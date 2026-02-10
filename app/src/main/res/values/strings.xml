@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AutoExpandNotifications</string>
+
+    <!-- Module status -->
+    <string name="module_active">Module is active</string>
+    <string name="module_inactive">Module is not active — enable in LSPosed and reboot</string>
+
+    <!-- Feature toggles -->
+    <string name="expand_shade_title">Expand in notification shade</string>
+    <string name="expand_shade_desc">Auto-expand all notifications in the shade</string>
+    <string name="expand_headsup_title">Expand heads-up</string>
+    <string name="expand_headsup_desc">Show expanded layout in heads-up banners</string>
+    <string name="expand_lockscreen_title">Expand on lock screen</string>
+    <string name="expand_lockscreen_desc">Allow expanded notifications on the lock screen</string>
+    <string name="disable_back_haptic_title">Disable back gesture haptic</string>
+    <string name="disable_back_haptic_desc">Suppress OxygenOS back swipe vibration</string>
+
+    <!-- Excluded apps -->
+    <string name="excluded_apps_title">Excluded apps</string>
+    <string name="excluded_apps_desc_none">No apps excluded</string>
+    <string name="excluded_apps_desc_count">%d app(s) excluded</string>
+
+    <!-- App list -->
+    <string name="search_hint">Search apps…</string>
+
+    <!-- Snackbar -->
+    <string name="reboot_required">Reboot required for changes to take effect</string>
+</resources>

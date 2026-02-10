@@ -1,0 +1,22 @@
+[versions]
+agp = "8.13.2"
+kotlin = "2.1.0"
+xposed = "82"
+material = "1.12.0"
+appcompat = "1.7.0"
+composeBom = "2024.12.01"
+activityCompose = "1.9.3"
+
+[libraries]
+xposed-api = { module = "de.robv.android.xposed:api", version.ref = "xposed" }
+material = { module = "com.google.android.material:material", version.ref = "material" }
+appcompat = { module = "androidx.appcompat:appcompat", version.ref = "appcompat" }
+compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }
+compose-material3 = { module = "androidx.compose.material3:material3" }
+compose-ui = { module = "androidx.compose.ui:ui" }
+activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
