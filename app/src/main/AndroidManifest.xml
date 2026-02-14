@@ -8,7 +8,8 @@
     <application
         android:name=".App"
         android:label="@string/app_name"
-        android:icon="@android:drawable/ic_menu_manage"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@style/Theme.AutoExpand">
 
         <activity
@@ -37,7 +38,7 @@
         <!-- Module description -->
         <meta-data
             android:name="xposeddescription"
-            android:value="Auto-expand all notifications in the notification shade" />
+            android:value="Notification &amp; System Tweaks for OxygenOS — auto-expand notifications, disable heads-up popup, mute back gesture haptic" />
 
         <!-- Minimum Xposed API version -->
         <meta-data

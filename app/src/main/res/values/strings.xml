@@ -15,6 +15,10 @@
     <string name="expand_lockscreen_desc">Allow expanded notifications on the lock screen</string>
     <string name="disable_back_haptic_title">Disable back gesture haptic</string>
     <string name="disable_back_haptic_desc">Suppress OxygenOS back swipe vibration</string>
+    <string name="disable_headsup_popup_title">Disable heads-up popup</string>
+    <string name="disable_headsup_popup_desc">Block mini-window/freeform launch when swiping on heads-up</string>
+    <string name="ungroup_notifications_title">Ungroup notifications</string>
+    <string name="ungroup_notifications_desc">Show each notification as a separate card instead of grouped by app</string>
 
     <!-- Excluded apps -->
     <string name="excluded_apps_title">Excluded apps</string>

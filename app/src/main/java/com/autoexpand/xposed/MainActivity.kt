@@ -101,8 +101,17 @@ class MainActivity : ComponentActivity() {
                 .putBoolean("expand_headsup_enabled", true)
                 .putBoolean("expand_lockscreen_enabled", true)
                 .putBoolean("disable_back_haptic_enabled", true)
+                .putBoolean("disable_headsup_popup_enabled", true)
+                .putBoolean("ungroup_notifications_enabled", true)
                 .putStringSet("excluded_apps", emptySet())
                 .apply()
+        }
+        // Ensure new prefs exist for upgrades
+        if (!prefs.contains("disable_headsup_popup_enabled")) {
+            prefs.edit().putBoolean("disable_headsup_popup_enabled", true).apply()
+        }
+        if (!prefs.contains("ungroup_notifications_enabled")) {
+            prefs.edit().putBoolean("ungroup_notifications_enabled", true).apply()
         }
         makePrefsWorldReadable(this)
 
@@ -132,6 +141,8 @@ private fun SettingsScreen(prefs: SharedPreferences) {
     var headsUpEnabled by remember { mutableStateOf(prefs.getBoolean("expand_headsup_enabled", true)) }
     var lockscreenEnabled by remember { mutableStateOf(prefs.getBoolean("expand_lockscreen_enabled", true)) }
     var backHapticEnabled by remember { mutableStateOf(prefs.getBoolean("disable_back_haptic_enabled", true)) }
+    var headsupPopupEnabled by remember { mutableStateOf(prefs.getBoolean("disable_headsup_popup_enabled", true)) }
+    var ungroupEnabled by remember { mutableStateOf(prefs.getBoolean("ungroup_notifications_enabled", true)) }
     var excludedCount by remember { mutableIntStateOf(prefs.getStringSet("excluded_apps", emptySet())?.size ?: 0) }
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -218,14 +229,28 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                 }
             }
 
-            // Back haptic toggle
+            // OxygenOS tweaks
             Card {
-                ToggleRow(
-                    title = stringResource(R.string.disable_back_haptic_title),
-                    description = stringResource(R.string.disable_back_haptic_desc),
-                    checked = backHapticEnabled,
-                    onCheckedChange = { backHapticEnabled = it; onToggle("disable_back_haptic_enabled", it) }
-                )
+                Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                    ToggleRow(
+                        title = stringResource(R.string.disable_headsup_popup_title),
+                        description = stringResource(R.string.disable_headsup_popup_desc),
+                        checked = headsupPopupEnabled,
+                        onCheckedChange = { headsupPopupEnabled = it; onToggle("disable_headsup_popup_enabled", it) }
+                    )
+                    ToggleRow(
+                        title = stringResource(R.string.ungroup_notifications_title),
+                        description = stringResource(R.string.ungroup_notifications_desc),
+                        checked = ungroupEnabled,
+                        onCheckedChange = { ungroupEnabled = it; onToggle("ungroup_notifications_enabled", it) }
+                    )
+                    ToggleRow(
+                        title = stringResource(R.string.disable_back_haptic_title),
+                        description = stringResource(R.string.disable_back_haptic_desc),
+                        checked = backHapticEnabled,
+                        onCheckedChange = { backHapticEnabled = it; onToggle("disable_back_haptic_enabled", it) }
+                    )
+                }
             }
 
             // Excluded apps
