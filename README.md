@@ -2,8 +2,8 @@
 
 Notification & System Tweaks for OxygenOS
 
-![GitHub release](https://img.shields.io/github/v/release/kvmy666/AutoExpandNotifications?style=flat-square)
-![License](https://img.shields.io/github/license/kvmy666/AutoExpandNotifications?style=flat-square)
+![GitHub release](https://img.shields.io/github/v/release/kvmy666/-AutoExpandNotifications?style=flat-square)
+![License](https://img.shields.io/github/license/kvmy666/-AutoExpandNotifications?style=flat-square)
 ![Android](https://img.shields.io/badge/Android-15%2B-green?style=flat-square)
 
 ---
@@ -47,7 +47,7 @@ Choose specific apps whose notifications should NOT be auto-expanded. Exclusions
 
 ## Installation
 
-1. Download the latest APK from [Releases](https://github.com/kvmy666/AutoExpandNotifications/releases)
+1. Download the latest APK from [Releases](https://github.com/kvmy666/-AutoExpandNotifications/releases)
 2. Install the APK
 3. Open **LSPosed Manager** > Modules > Enable **AutoExpandNotifications**
 4. Ensure **System UI** is checked in the module scope
