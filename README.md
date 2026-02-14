@@ -4,7 +4,7 @@ Notification & System Tweaks for OxygenOS
 
 ![GitHub release](https://img.shields.io/github/v/release/kvmy666/-AutoExpandNotifications?style=flat-square)
 ![License](https://img.shields.io/github/license/kvmy666/-AutoExpandNotifications?style=flat-square)
-![Android](https://img.shields.io/badge/Android-15%2B-green?style=flat-square)
+![Android](https://img.shields.io/badge/Android-16%2B-green?style=flat-square)
 
 ---
 
@@ -16,7 +16,7 @@ An LSPosed/Xposed module that enhances notification behavior on OnePlus devices 
 
 | Expanded Heads-Up | Notification Shade | Settings |
 |---|---|---|
-| *Coming soon* | *Coming soon* | *Coming soon* |
+| <img src="screenshots/headsup-expanded.jpg" width="250"/> | <img src="screenshots/notification-shade.jpg" width="250"/> | <img src="screenshots/settings.jpg" width="250"/> |
 
 ## Features
 
@@ -40,7 +40,7 @@ Choose specific apps whose notifications should NOT be auto-expanded. Exclusions
 
 ## Requirements
 
-- OnePlus device running **OxygenOS 16** (Android 15)
+- OnePlus device running **OxygenOS 16** (Android 16)
 - **Root access** (Magisk / KernelSU / APatch)
 - **LSPosed** framework (Irena or compatible fork)
 - **Zygisk** enabled
@@ -58,7 +58,7 @@ Choose specific apps whose notifications should NOT be auto-expanded. Exclusions
 
 | Device | OS Version | Status |
 |---|---|---|
-| OnePlus 13 | OxygenOS 16 (Android 15) | Fully Working |
+| OnePlus 15 | OxygenOS 16.0.3.501 (Android 16) | Fully Working |
 
 > **Note:** This module was built and tested specifically for OxygenOS 16. It may work on other OxygenOS versions or OnePlus devices, but compatibility is not guaranteed. Contributions to support more devices are welcome!
 
