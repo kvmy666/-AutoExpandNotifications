@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -47,13 +50,12 @@ jobs:
 
       - name: Publish to Xposed-Modules-Repo
         env:
-          XPOSED_TOKEN: ${{ secrets.XPOSED_REPO_TOKEN }}
-        if: env.XPOSED_TOKEN != ''
+          GH_TOKEN: ${{ secrets.XPOSED_REPO_TOKEN }}
+        if: env.GH_TOKEN != ''
         run: |
           VERSION="${{ steps.version.outputs.name }}"
           APK_FILE="AutoExpandNotifications-${VERSION}.apk"
 
-          # Create release on Xposed-Modules-Repo
           gh release create "v${VERSION}" "$APK_FILE" \
             --repo Xposed-Modules-Repo/com.autoexpand.xposed \
             --title "v${VERSION}" \
