@@ -44,3 +44,17 @@ jobs:
         with:
           files: AutoExpandNotifications-${{ steps.version.outputs.name }}.apk
           generate_release_notes: true
+
+      - name: Publish to Xposed-Modules-Repo
+        env:
+          XPOSED_TOKEN: ${{ secrets.XPOSED_REPO_TOKEN }}
+        if: env.XPOSED_TOKEN != ''
+        run: |
+          VERSION="${{ steps.version.outputs.name }}"
+          APK_FILE="AutoExpandNotifications-${VERSION}.apk"
+
+          # Create release on Xposed-Modules-Repo
+          gh release create "v${VERSION}" "$APK_FILE" \
+            --repo Xposed-Modules-Repo/com.autoexpand.xposed \
+            --title "v${VERSION}" \
+            --notes "Release v${VERSION} - See [changelog](https://github.com/kvmy666/-AutoExpandNotifications/releases/tag/v${VERSION})"
