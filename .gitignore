@@ -8,11 +8,27 @@ local.properties
 /captures/
 .externalNativeBuild/
 .cxx/
+
+# APK / AAB
 *.apk
 *.aab
+
+# Signing
 *.jks
 *.keystore
-*.DS_Store
-.env
-*.log
+keystore.properties
+
+# Claude Code
 .claude/
+CLAUDE.md
+**/CLAUDE.md
+
+# OS files
+*.DS_Store
+Thumbs.db
+nul
+
+# Environment
+.env
+.env.*
+*.log
