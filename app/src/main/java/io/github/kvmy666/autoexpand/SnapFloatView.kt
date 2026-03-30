@@ -158,7 +158,11 @@ class SnapFloatView(
             .scaleX(0f).scaleY(0f).alpha(0f)
             .setDuration(250)
             .setInterpolator(AccelerateInterpolator())
-            .withEndAction(onDone)
+            .withEndAction {
+                alpha = 0f
+                visibility = View.INVISIBLE
+                onDone()
+            }
             .start()
     }
 
@@ -168,7 +172,11 @@ class SnapFloatView(
             .scaleX(0f).scaleY(0f).alpha(0f)
             .setDuration(200)
             .setInterpolator(AccelerateInterpolator())
-            .withEndAction(onDone)
+            .withEndAction {
+                alpha = 0f
+                visibility = View.INVISIBLE
+                onDone()
+            }
             .start()
     }
 }

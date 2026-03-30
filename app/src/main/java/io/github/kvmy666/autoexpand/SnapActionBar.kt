@@ -11,51 +11,54 @@ import android.view.MotionEvent
 import android.view.View
 
 /**
- * Floating capsule action bar shown after the user completes a crop selection.
+ * Floating capsule action bar shown after the user completes a crop selection,
+ * or above/below a floating snap.
  *
- * Six icon buttons (left → right): Copy, Save, Share, OCR, Float, Close.
+ * Constructor takes an optional [actions] array so the bar can show a subset of all actions.
  * Entry animation (scale + fade) is driven externally via [ViewPropertyAnimator].
  */
-class SnapActionBar(context: Context) : View(context) {
+class SnapActionBar(
+    context: Context,
+    private val actions: Array<SnapperAction> = SnapperAction.values()
+) : View(context) {
 
-    var onAction: ((SnapperAction) -> Unit)? = null
+    var onAction:     ((SnapperAction) -> Unit)? = null
+    var onOutsideTap: (() -> Unit)?              = null
 
     // ── Dimensions ────────────────────────────────────────────────────────────────
 
-    private val d = resources.displayMetrics.density
-    private val btnSize = 44f * d
-    private val btnGap  =  4f * d
-    private val padH    = 12f * d
-    private val barH    = 52f * d
+    private val d       = resources.displayMetrics.density
+    private val btnSize = 46f * d
+    private val btnGap  =  6f * d
+    private val padH    = 14f * d
+    private val barH    = 56f * d
 
-    val barWidthPx  = (padH * 2 + btnSize * 6 + btnGap * 5).toInt()
+    val barWidthPx  = (padH * 2 + btnSize * actions.size + btnGap * (actions.size - 1)).toInt()
     val barHeightPx = barH.toInt()
-
-    private val buttons = SnapperAction.values()
 
     // ── Paints ────────────────────────────────────────────────────────────────────
 
     private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(210, 26, 26, 26)
+        color = Color.argb(204, 26, 26, 26)
     }
     /** Shared stroke paint for icon paths – reset per icon as needed. */
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        style = Paint.Style.STROKE
-        strokeWidth = 2f * d
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
+        color       = Color.WHITE
+        style       = Paint.Style.STROKE
+        strokeWidth = 1.8f * d
+        strokeCap   = Paint.Cap.ROUND
+        strokeJoin  = Paint.Join.ROUND
     }
     /** Dark fill for front-rect overlap masking (COPY icon). */
     private val bgFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(210, 26, 26, 26)
+        color = Color.argb(204, 26, 26, 26)
         style = Paint.Style.FILL
     }
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        textSize = 11f * d
+        color     = Color.WHITE
+        textSize  = 11f * d
         textAlign = Paint.Align.CENTER
-        typeface = Typeface.DEFAULT_BOLD
+        typeface  = Typeface.DEFAULT_BOLD
     }
 
     // ── Measure ───────────────────────────────────────────────────────────────────
@@ -70,7 +73,7 @@ class SnapActionBar(context: Context) : View(context) {
         val r = barH / 2f
         canvas.drawRoundRect(0f, 0f, barWidthPx.toFloat(), barH, r, r, bgPaint)
 
-        buttons.forEachIndexed { i, action ->
+        actions.forEachIndexed { i, action ->
             val cx = padH + btnSize / 2f + i * (btnSize + btnGap)
             val cy = barH / 2f
             drawIcon(canvas, action, cx, cy)
@@ -149,16 +152,25 @@ class SnapActionBar(context: Context) : View(context) {
 
     // ── Touch ─────────────────────────────────────────────────────────────────────
 
+    /** Index of the button that received ACTION_DOWN; -1 if none / outside gap. */
+    private var downIndex = -1
+
+    private fun indexAt(x: Float): Int {
+        val raw   = ((x - padH) / (btnSize + btnGap)).toInt()
+        val start = padH + raw * (btnSize + btnGap)
+        return if (raw in actions.indices && x >= start && x <= start + btnSize) raw else -1
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (event.action == MotionEvent.ACTION_UP) {
-            val x = event.x
-            // Which button was tapped?
-            val rawIndex = ((x - padH) / (btnSize + btnGap)).toInt()
-            // Also verify x is actually inside the button (not in the gap)
-            val btnStart = padH + rawIndex * (btnSize + btnGap)
-            if (rawIndex in buttons.indices && x >= btnStart && x <= btnStart + btnSize) {
-                onAction?.invoke(buttons[rawIndex])
+        when (event.action) {
+            MotionEvent.ACTION_DOWN    -> downIndex = indexAt(event.x)
+            MotionEvent.ACTION_UP      -> {
+                val up = indexAt(event.x)
+                if (downIndex >= 0 && up == downIndex) onAction?.invoke(actions[up])
+                downIndex = -1
             }
+            MotionEvent.ACTION_CANCEL  -> downIndex = -1
+            MotionEvent.ACTION_OUTSIDE -> { onOutsideTap?.invoke(); return true }
         }
         return true
     }

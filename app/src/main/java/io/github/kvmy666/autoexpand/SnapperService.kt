@@ -62,9 +62,9 @@ class SnapperService : Service() {
     // ── Floating snaps ────────────────────────────────────────────────────────────
 
     private val floatingSnaps = mutableListOf<SnapFloatView>()
-    private var trashZone:   SnapTrashZone?   = null
-    private var contextMenu: SnapContextMenu? = null
-    private var menuTarget:  SnapFloatView?   = null
+    private var trashZone:      SnapTrashZone?  = null
+    private var snapBar:        SnapActionBar?  = null
+    private var snapBarTarget:  SnapFloatView?  = null
 
     // ── Edge button ───────────────────────────────────────────────────────────────
 
@@ -81,10 +81,7 @@ class SnapperService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification())
         when (intent?.action) {
             ACTION_TEST_CAPTURE -> { if (cropView == null) handleCapture() }
-            ACTION_CAPTURE      -> {
-                val fromQs = intent?.getBooleanExtra(EXTRA_QS_TRIGGERED, false) ?: false
-                if (cropView == null) handleCapture(delayMs = if (fromQs) 700L else 0L)
-            }
+            ACTION_CAPTURE      -> { if (cropView == null) handleCapture() }
             ACTION_SHOW_EDGE_BUTTON  -> showEdgeButton()
             ACTION_HIDE_EDGE_BUTTON  -> { hideEdgeButton(); stopSelfIfIdle() }
         }
@@ -97,7 +94,7 @@ class SnapperService : Service() {
         dismissAll()
         floatingSnaps.toList().forEach { removeSnap(it, animate = false) }
         dismissTrashZone()
-        dismissContextMenu()
+        dismissSnapBar()
         edgeButton?.let { safeRemoveView(it); edgeButton = null }
         super.onDestroy()
     }
@@ -159,9 +156,8 @@ class SnapperService : Service() {
      * Briefly hides the button so it doesn't appear in the screenshot, then restores it.
      */
     private fun handleCaptureHideButton() {
-        edgeButton?.alpha = 0f
+        edgeButton?.alpha = 0f   // hide before the next frame; su+screencap startup is >> 1 frame
         Thread {
-            Thread.sleep(80)  // one frame at 60fps = ~16ms; 80ms is safely beyond any refresh rate
             handleCaptureInternal()
             handler.post { edgeButton?.alpha = 1f }
         }.start()
@@ -169,14 +165,8 @@ class SnapperService : Service() {
 
     // ── Screenshot capture ────────────────────────────────────────────────────────
 
-    private fun handleCapture(delayMs: Long = 0L) {
-        Thread {
-            if (delayMs > 0L) {
-                Log.d(TAG, "QS delay: waiting ${delayMs}ms for panel close")
-                Thread.sleep(delayMs)
-            }
-            handleCaptureInternal()
-        }.start()
+    private fun handleCapture() {
+        Thread { handleCaptureInternal() }.start()
     }
 
     private fun handleCaptureInternal() {
@@ -193,7 +183,7 @@ class SnapperService : Service() {
 
     private fun captureScreen(): Bitmap? = try {
         val f    = File(cacheDir, "snap_${System.currentTimeMillis()}.png")
-        val p    = Runtime.getRuntime().exec(arrayOf("su", "-c", "screencap -d 0 -p ${f.absolutePath}"))
+        val p    = Runtime.getRuntime().exec(arrayOf("su", "-c", "screencap -p ${f.absolutePath}"))
         val exit = p.waitFor()
         Log.d(TAG, "screencap exit=$exit")
         if (exit != 0 || !f.exists() || f.length() == 0L) { f.delete(); null }
@@ -230,9 +220,8 @@ class SnapperService : Service() {
                 val fullBmp = cropView?.getFullBitmap() ?: return@fullScreenPin
                 handler.post {
                     dismissAll()
-                    createFloatingSnap(fullBmp, RectF(0f, 0f, fullBmp.width.toFloat(), fullBmp.height.toFloat()))
-                    saveToHistory(fullBmp)
-                    updateNotification()
+                    stopSelfIfIdle()
+                    exportBitmap(fullBmp, SnapperAction.SAVE) {}
                 }
             }
         }
@@ -255,22 +244,32 @@ class SnapperService : Service() {
         val bar    = SnapActionBar(this).apply { onAction = { handleCropAction(it) } }
         val screen = windowManager.currentWindowMetrics.bounds
 
+        // Convert selRect from the crop view's local coordinates to absolute screen coordinates.
+        // getLocationOnScreen() accounts for any window inset/gravity offset on the device.
+        val cropLoc = IntArray(2)
+        cropView?.getLocationOnScreen(cropLoc)
+        val absSelBottom = cropLoc[1] + selRect.bottom.toInt()
+        val absSelTop    = cropLoc[1] + selRect.top.toInt()
+
         val barX = ((selRect.left + selRect.right) / 2f - bar.barWidthPx / 2f)
             .toInt().coerceIn(
                 (8f * density).toInt(),
                 screen.width() - bar.barWidthPx - (8f * density).toInt()
             )
         val margin     = (16f * density).toInt()
-        val preferredY = selRect.bottom.toInt() + margin
-        val barY       = if (preferredY + bar.barHeightPx > screen.height() - (16f * density).toInt())
-            selRect.top.toInt() - margin - bar.barHeightPx
+        val preferredY = absSelBottom + margin
+        val barY       = if (preferredY + bar.barHeightPx > screen.height() - margin)
+            absSelTop - margin - bar.barHeightPx
         else preferredY
+
+        Log.d(TAG, "Toolbar: cropBottomY=$absSelBottom toolbarTopY=$barY gap=${barY - absSelBottom}px")
 
         val params = WindowManager.LayoutParams(
             bar.barWidthPx, bar.barHeightPx,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START; x = barX; y = barY }
 
@@ -343,10 +342,10 @@ class SnapperService : Service() {
         }
 
         view.wmParams     = params
-        view.onDragStart  = { showTrashZone() }
+        view.onDragStart  = { dismissSnapBar(); showTrashZone() }
         view.onDragUpdate = { cx, cy -> onSnapDragUpdate(cx, cy) }
         view.onDrop       = { cx, cy -> onSnapDrop(view, cx, cy) }
-        view.onTap        = { toggleContextMenu(view) }
+        view.onTap        = { toggleSnapBar(view) }
         if (doubleTapDismiss) {
             view.onDoubleTap = { animateDismissSnap(view) }
         }
@@ -434,57 +433,70 @@ class SnapperService : Service() {
         }
     }
 
-    // ── Context menu ──────────────────────────────────────────────────────────────
+    // ── Snap action bar (floating snaps) ─────────────────────────────────────────
 
-    private fun toggleContextMenu(view: SnapFloatView) {
-        if (menuTarget == view && contextMenu != null) { dismissContextMenu(); return }
-        dismissContextMenu()
-        showContextMenu(view)
+    private fun toggleSnapBar(target: SnapFloatView) {
+        if (snapBarTarget == target && snapBar != null) { dismissSnapBar(); return }
+        dismissSnapBar()
+        showSnapBar(target)
     }
 
-    private fun showContextMenu(view: SnapFloatView) {
-        val menu   = SnapContextMenu(this)
+    private fun showSnapBar(target: SnapFloatView) {
+        val bar    = SnapActionBar(this, arrayOf(
+            SnapperAction.COPY, SnapperAction.SAVE, SnapperAction.SHARE,
+            SnapperAction.OCR, SnapperAction.CLOSE))
         val screen = windowManager.currentWindowMetrics.bounds
         val margin = (8f * density).toInt()
-        val menuX  = view.wmParams.x.coerceIn(margin, screen.width() - menu.menuW - margin)
-        val menuY  = if (view.wmParams.y - menu.menuH - margin >= 0)
-            view.wmParams.y - menu.menuH - margin
+        val gap    = (8f * density).toInt()
+
+        val barX = (target.wmParams.x + target.snapW / 2f - bar.barWidthPx / 2f)
+            .toInt().coerceIn(margin, screen.width() - bar.barWidthPx - margin)
+
+        val contentBottom = target.wmParams.y + target.snapH - target.shadowPad
+        val contentTop    = target.wmParams.y + target.shadowPad
+        val barY = if (contentBottom + gap + bar.barHeightPx < screen.height() - margin)
+            contentBottom + gap
         else
-            view.wmParams.y + view.snapH + margin
+            (contentTop - gap - bar.barHeightPx).coerceAtLeast(margin)
 
         val params = WindowManager.LayoutParams(
-            menu.menuW, menu.menuH,
+            bar.barWidthPx, bar.barHeightPx,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
             PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START; x = menuX; y = menuY }
+        ).apply { gravity = Gravity.TOP or Gravity.START; x = barX; y = barY }
 
-        menu.onAction = { action -> handleSnapContextAction(view, action) }
-        windowManager.addView(menu, params)
-        menu.animateIn()
-        contextMenu = menu
-        menuTarget  = view
+        bar.onAction     = { action -> handleSnapAction(target, action) }
+        bar.onOutsideTap = { dismissSnapBar() }
+        bar.scaleX = 0.85f; bar.scaleY = 0.85f; bar.alpha = 0f
+        windowManager.addView(bar, params)
+        snapBar = bar; snapBarTarget = target
+        bar.animate().scaleX(1f).scaleY(1f).alpha(1f)
+            .setDuration(180).setInterpolator(DecelerateInterpolator()).start()
+        Log.d(TAG, "Snap bar shown at ($barX,$barY)")
     }
 
-    private fun dismissContextMenu() {
-        contextMenu?.let { safeRemoveView(it); contextMenu = null }
-        menuTarget = null
+    private fun dismissSnapBar() {
+        snapBar?.let { safeRemoveView(it); snapBar = null }
+        snapBarTarget = null
     }
 
-    private fun handleSnapContextAction(view: SnapFloatView, action: SnapperAction?) {
-        dismissContextMenu()
+    private fun handleSnapAction(target: SnapFloatView, action: SnapperAction) {
+        dismissSnapBar()
         when (action) {
-            null              -> animateDismissSnap(view)
-            SnapperAction.OCR -> doOcr(view.getBitmap()) {}
-            else              -> exportBitmap(view.getBitmap(), action) {}
+            SnapperAction.CLOSE -> animateDismissSnap(target)
+            SnapperAction.OCR   -> doOcr(target.getBitmap()) {}
+            else                -> exportBitmap(target.getBitmap(), action) {}
         }
     }
 
     // ── Snap dismissal ────────────────────────────────────────────────────────────
 
     private fun animateDismissSnap(view: SnapFloatView) {
-        dismissContextMenu()
+        dismissSnapBar()
         view.animateDismiss { removeSnap(view, animate = false) }
     }
 

@@ -540,7 +540,11 @@ private fun SnapperSettingsCard(
     val context = LocalContext.current
     val showEdgeOptions = snapperMethod != "qs_tile"
 
-    Card {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        )
+    ) {
         Column(modifier = Modifier.padding(vertical = 4.dp)) {
             Text(
                 text     = stringResource(R.string.snapper_section_title),
