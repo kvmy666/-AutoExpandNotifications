@@ -5,6 +5,9 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
+import android.graphics.RectF
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
@@ -24,9 +27,12 @@ import kotlin.math.hypot
  */
 class SnapFloatView(
     context: Context,
-    private val bitmap: Bitmap,
+    rawBitmap: Bitmap,
     private val wm: WindowManager
 ) : View(context) {
+
+    /** Bitmap with 8dp rounded corners pre-applied (PorterDuff SRC_IN mask). */
+    private val bitmap: Bitmap = rawBitmap.withRoundedCorners(8f * context.resources.displayMetrics.density)
 
     // ── Callbacks ─────────────────────────────────────────────────────────────────
 
@@ -60,8 +66,7 @@ class SnapFloatView(
     }
 
     init {
-        // setShadowLayer only works with software layer
-        setLayerType(LAYER_TYPE_SOFTWARE, null)
+        setLayerType(LAYER_TYPE_SOFTWARE, null)  // required for setShadowLayer
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -166,4 +171,22 @@ class SnapFloatView(
             .withEndAction(onDone)
             .start()
     }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────────
+
+/**
+ * Returns a new ARGB_8888 bitmap with transparent rounded corners of radius [r] px.
+ * The shadow drawn by [Paint.setShadowLayer] naturally follows the alpha boundary.
+ */
+private fun Bitmap.withRoundedCorners(r: Float): Bitmap {
+    val out    = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(out)
+    val paint  = Paint(Paint.ANTI_ALIAS_FLAG)
+    // Draw the rounded-rect mask
+    canvas.drawRoundRect(RectF(0f, 0f, width.toFloat(), height.toFloat()), r, r, paint)
+    // Composite the source bitmap inside the mask
+    paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_IN)
+    canvas.drawBitmap(this, 0f, 0f, paint)
+    return out
 }

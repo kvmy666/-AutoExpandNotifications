@@ -5,11 +5,12 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.PixelFormat
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.RectF
 import android.util.Log
+import android.view.GestureDetector
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import kotlin.math.max
@@ -19,12 +20,17 @@ import kotlin.math.sqrt
 /**
  * Full-screen crop view for Screen Snapper.
  *
- * Draws the frozen screenshot behind a dark dim overlay. The user draws a rectangle
- * by dragging; the dim is "punched out" inside the selection to show the screenshot
- * at full brightness. Corner handles and edge strips allow resize. Center drag moves.
+ * Draws the frozen screenshot behind a dark dim overlay. The user draws a
+ * rectangle by dragging; the dim is "punched out" inside the selection.
+ * Corner handles and edge strips allow resize without constraints — dragging
+ * a corner or edge past its opposite side flips the rectangle naturally.
  *
- * Call [onSelectionComplete] to be notified when the user lifts their finger after
- * making a valid selection. Call [getCroppedBitmap] to extract the selected region.
+ * Two permanent bottom buttons are always visible:
+ *  • Full Screenshot (left)  — pins the entire capture as a floating snap
+ *  • Cancel (right, ×)       — dismisses the Snapper
+ *
+ * When the window loses focus (home gesture) or the back key is pressed,
+ * [onCancelRequested] is invoked to let the service clean up.
  */
 class SnapCropView(
     context: Context,
@@ -35,125 +41,242 @@ class SnapCropView(
 
     /** Called on ACTION_UP with a valid (non-trivial) selection. */
     var onSelectionComplete: ((RectF) -> Unit)? = null
-
     /** Called on ACTION_DOWN when a selection already exists (user is adjusting). */
     var onAdjustStarted: (() -> Unit)? = null
+    /** Called when home/back gesture is detected — service should dismiss all. */
+    var onCancelRequested: (() -> Unit)? = null
+    /** Called when user double-taps inside the selection — shortcut to pin/float. */
+    var onDoubleTapPin: (() -> Unit)? = null
+    /** Called when the "Full Screenshot" bottom button is tapped. */
+    var onFullScreenPin: (() -> Unit)? = null
+
+    // ── Public helpers ────────────────────────────────────────────────────────────
+
+    /** Returns a copy of the current selection rect in view px, or null if none. */
+    fun getSelRect(): RectF? = if (hasSel) RectF(selRect) else null
+
+    /** Returns the full frozen screenshot bitmap. */
+    fun getFullBitmap(): Bitmap = screenshot
+
+    /**
+     * Returns the portion of [screenshot] that corresponds to the current selection,
+     * mapped from view-px to bitmap-px coordinates. Returns null if no selection.
+     */
+    fun getCroppedBitmap(): Bitmap? {
+        if (!hasSel || width == 0 || height == 0) return null
+        val scaleX = screenshot.width.toFloat()  / width
+        val scaleY = screenshot.height.toFloat() / height
+        val bx = (selRect.left   * scaleX).toInt().coerceIn(0, screenshot.width  - 1)
+        val by = (selRect.top    * scaleY).toInt().coerceIn(0, screenshot.height - 1)
+        val bw = (selRect.width()  * scaleX).toInt().coerceAtLeast(1).coerceAtMost(screenshot.width  - bx)
+        val bh = (selRect.height() * scaleY).toInt().coerceAtLeast(1).coerceAtMost(screenshot.height - by)
+        return Bitmap.createBitmap(screenshot, bx, by, bw, bh)
+    }
 
     // ── Selection state ───────────────────────────────────────────────────────────
 
     private val selRect = RectF()
-    private var hasSel = false
+    private var hasSel  = false
 
-    // Used only while DragMode.DRAWING
+    /**
+     * Anchor point for DRAWING and corner-drag modes.
+     * For DRAWING: the first touch point.
+     * For CORNER_*: the opposite corner (stays fixed while the finger moves).
+     */
     private var drawOriginX = 0f
     private var drawOriginY = 0f
 
     // ── Touch state ───────────────────────────────────────────────────────────────
 
-    private var dragMode = DragMode.NONE
-    private var lastX = 0f
-    private var lastY = 0f
+    private var dragMode        = DragMode.NONE
+    private var lastX           = 0f
+    private var lastY           = 0f
+    private var doubleTapPending = false
+    private var tapOnButton     = false
 
     // ── Dimensions ────────────────────────────────────────────────────────────────
 
-    private val density = resources.displayMetrics.density
-    private val handleLen = dp(20f)     // length of each L-arm
-    private val handleW   = dp(5f)      // handle stroke width
-    private val borderW   = dp(1.5f)    // thin selection border
-    private val cornerHit = dp(30f)     // hit-test radius for corners
-    private val edgeHit   = dp(14f)     // hit-test half-width for edges
-    private val minSize   = dp(40f)     // minimum selection dimension
+    private val density   = resources.displayMetrics.density
+    private val handleLen = dp(20f)
+    private val handleW   = dp(5f)
+    private val borderW   = dp(1.5f)
+    private val cornerHit = dp(30f)
+    private val edgeHit   = dp(14f)
+    private val minSize   = dp(40f)   // only enforced on initial draw release
+
+    // ── Bottom buttons ────────────────────────────────────────────────────────────
+
+    private val btnFullRect  = RectF()
+    private val btnCloseRect = RectF()
+
+    private val btnBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(190, 30, 30, 30)
+    }
+    private val btnIconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeCap  = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
 
     // ── Paints ────────────────────────────────────────────────────────────────────
 
-    private val bitmapDst = RectF()     // set in onSizeChanged to fill view
+    private val bitmapDst = RectF()
 
     private val dimPaint = Paint().apply {
-        color = Color.BLACK
-        alpha = 120     // ~47 % opacity
-        isAntiAlias = false
+        color = Color.BLACK; alpha = 120; isAntiAlias = false
     }
     private val clearPaint = Paint().apply {
-        xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
-        isAntiAlias = false
+        xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR); isAntiAlias = false
     }
     private val borderPaint = Paint().apply {
-        color = Color.WHITE
-        style = Paint.Style.STROKE
-        strokeWidth = borderW
-        isAntiAlias = true
+        color = Color.WHITE; style = Paint.Style.STROKE
+        strokeWidth = borderW; isAntiAlias = true
     }
     private val handlePaint = Paint().apply {
-        color = Color.WHITE
-        style = Paint.Style.STROKE
-        strokeWidth = handleW
-        strokeCap = Paint.Cap.SQUARE
-        isAntiAlias = true
+        color = Color.WHITE; style = Paint.Style.STROKE
+        strokeWidth = handleW; strokeCap = Paint.Cap.SQUARE; isAntiAlias = true
     }
 
     init {
         // Hardware layer needed so saveLayer + PorterDuff.CLEAR composites correctly.
         setLayerType(LAYER_TYPE_HARDWARE, null)
+        // Focusable so we receive key events (back) and window-focus callbacks (home).
+        isFocusable         = true
+        isFocusableInTouchMode = true
     }
+
+    // ── Gesture detector — double-tap to pin ──────────────────────────────────────
+
+    private val gestureDetector = GestureDetector(context,
+        object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                if (hasSel && selRect.contains(e.x, e.y) && onDoubleTapPin != null) {
+                    doubleTapPending = true
+                    return true
+                }
+                return false
+            }
+        }
+    )
 
     // ── Layout ────────────────────────────────────────────────────────────────────
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         bitmapDst.set(0f, 0f, w.toFloat(), h.toFloat())
+        Log.d("JeezSnapper", "CropView: view=${w}×${h}  bitmap=${screenshot.width}×${screenshot.height}")
+
+        // Two 52dp buttons, 16dp gap, 16dp from screen bottom, horizontally centred
+        val btnSize = dp(52f)
+        val gap     = dp(16f)
+        val totalW  = btnSize * 2 + gap
+        val startX  = (w - totalW) / 2f
+        val btnY    = h - dp(16f) - btnSize
+        btnFullRect.set(startX,                btnY, startX + btnSize,  btnY + btnSize)
+        btnCloseRect.set(startX + btnSize + gap, btnY, startX + totalW, btnY + btnSize)
     }
 
     // ── Drawing ───────────────────────────────────────────────────────────────────
 
     override fun onDraw(canvas: Canvas) {
-        // 1. Frozen screenshot (scaled to fill view)
+        // 1. Frozen screenshot
         canvas.drawBitmap(screenshot, null, bitmapDst, null)
 
-        // 2. Dark dim with selection punched out
+        // 2. Dim with selection punched out
         val sc = canvas.saveLayer(bitmapDst, null)
         canvas.drawRect(bitmapDst, dimPaint)
         if (hasSel) canvas.drawRect(selRect, clearPaint)
         canvas.restoreToCount(sc)
 
-        // 3. Selection border + corner handles
+        // 3. Selection border + handles
         if (hasSel) {
             canvas.drawRect(selRect, borderPaint)
             drawHandles(canvas)
         }
+
+        // 4. Permanent bottom buttons (always visible)
+        drawBottomButtons(canvas)
     }
 
     private fun drawHandles(canvas: Canvas) {
-        val r = selRect
-        val len = handleLen
+        val r = selRect; val len = handleLen
+        canvas.drawLine(r.left,         r.top + len, r.left,          r.top,         handlePaint)
+        canvas.drawLine(r.left,         r.top,       r.left  + len,   r.top,         handlePaint)
+        canvas.drawLine(r.right - len,  r.top,       r.right,         r.top,         handlePaint)
+        canvas.drawLine(r.right,        r.top,       r.right,         r.top  + len,  handlePaint)
+        canvas.drawLine(r.left,         r.bottom - len, r.left,       r.bottom,      handlePaint)
+        canvas.drawLine(r.left,         r.bottom,    r.left  + len,   r.bottom,      handlePaint)
+        canvas.drawLine(r.right - len,  r.bottom,    r.right,         r.bottom,      handlePaint)
+        canvas.drawLine(r.right,        r.bottom,    r.right,         r.bottom - len, handlePaint)
+    }
 
-        // Top-left ─ vertical arm then horizontal arm
-        canvas.drawLine(r.left, r.top + len, r.left, r.top, handlePaint)
-        canvas.drawLine(r.left, r.top, r.left + len, r.top, handlePaint)
+    private fun drawBottomButtons(canvas: Canvas) {
+        val cornerR = dp(10f)
+        btnIconPaint.strokeWidth = dp(2.5f)
 
-        // Top-right
-        canvas.drawLine(r.right - len, r.top, r.right, r.top, handlePaint)
-        canvas.drawLine(r.right, r.top, r.right, r.top + len, handlePaint)
+        // Full-screenshot button (left) — corner-bracket icon
+        canvas.drawRoundRect(btnFullRect, cornerR, cornerR, btnBgPaint)
+        drawFullIcon(canvas, btnFullRect.centerX(), btnFullRect.centerY())
 
-        // Bottom-left
-        canvas.drawLine(r.left, r.bottom - len, r.left, r.bottom, handlePaint)
-        canvas.drawLine(r.left, r.bottom, r.left + len, r.bottom, handlePaint)
+        // Cancel button (right) — × icon
+        canvas.drawRoundRect(btnCloseRect, cornerR, cornerR, btnBgPaint)
+        val cx = btnCloseRect.centerX(); val cy = btnCloseRect.centerY(); val arm = dp(8f)
+        canvas.drawLine(cx - arm, cy - arm, cx + arm, cy + arm, btnIconPaint)
+        canvas.drawLine(cx + arm, cy - arm, cx - arm, cy + arm, btnIconPaint)
+    }
 
-        // Bottom-right
-        canvas.drawLine(r.right - len, r.bottom, r.right, r.bottom, handlePaint)
-        canvas.drawLine(r.right, r.bottom, r.right, r.bottom - len, handlePaint)
+    /** Four L-shaped corner brackets indicating "full frame". */
+    private fun drawFullIcon(canvas: Canvas, cx: Float, cy: Float) {
+        val s   = dp(10f)
+        val arm = dp(5f)
+        val p   = btnIconPaint
+        canvas.drawLine(cx - s,       cy - s + arm, cx - s,       cy - s,       p)
+        canvas.drawLine(cx - s,       cy - s,       cx - s + arm, cy - s,       p)
+        canvas.drawLine(cx + s - arm, cy - s,       cx + s,       cy - s,       p)
+        canvas.drawLine(cx + s,       cy - s,       cx + s,       cy - s + arm, p)
+        canvas.drawLine(cx - s,       cy + s - arm, cx - s,       cy + s,       p)
+        canvas.drawLine(cx - s,       cy + s,       cx - s + arm, cy + s,       p)
+        canvas.drawLine(cx + s - arm, cy + s,       cx + s,       cy + s,       p)
+        canvas.drawLine(cx + s,       cy + s,       cx + s,       cy + s - arm, p)
     }
 
     // ── Touch ─────────────────────────────────────────────────────────────────────
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        gestureDetector.onTouchEvent(event)   // detects double-tap → sets doubleTapPending
         val x = event.x
         val y = event.y
 
         when (event.action) {
-            MotionEvent.ACTION_DOWN -> onDown(x, y)
-            MotionEvent.ACTION_MOVE -> onMove(x, y)
-            MotionEvent.ACTION_UP   -> onUp(x, y)
-            MotionEvent.ACTION_CANCEL -> dragMode = DragMode.NONE
+            MotionEvent.ACTION_DOWN -> {
+                if (btnFullRect.contains(x, y) || btnCloseRect.contains(x, y)) {
+                    tapOnButton = true
+                } else {
+                    tapOnButton = false
+                    if (!doubleTapPending) onDown(x, y)
+                }
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (!tapOnButton && !doubleTapPending) onMove(x, y)
+            }
+            MotionEvent.ACTION_UP -> when {
+                tapOnButton -> {
+                    tapOnButton = false
+                    if (btnFullRect.contains(x, y))       onFullScreenPin?.invoke()
+                    else if (btnCloseRect.contains(x, y)) onCancelRequested?.invoke()
+                }
+                doubleTapPending -> {
+                    doubleTapPending = false
+                    onDoubleTapPin?.invoke()
+                }
+                else -> onUp(x, y)
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                tapOnButton      = false
+                doubleTapPending = false
+                dragMode         = DragMode.NONE
+            }
         }
         return true
     }
@@ -166,13 +289,19 @@ class SnapCropView(
         } else {
             hitTest(x, y)
         }
-        lastX = x
-        lastY = y
+        // For corner drags: record the OPPOSITE corner as anchor so we get iOS-like flip behaviour
+        when (dragMode) {
+            DragMode.CORNER_TL -> { drawOriginX = selRect.right;  drawOriginY = selRect.bottom }
+            DragMode.CORNER_TR -> { drawOriginX = selRect.left;   drawOriginY = selRect.bottom }
+            DragMode.CORNER_BL -> { drawOriginX = selRect.right;  drawOriginY = selRect.top    }
+            DragMode.CORNER_BR -> { drawOriginX = selRect.left;   drawOriginY = selRect.top    }
+            else -> {}
+        }
+        lastX = x; lastY = y
     }
 
     private fun startDrawing(x: Float, y: Float) {
-        drawOriginX = x
-        drawOriginY = y
+        drawOriginX = x; drawOriginY = y
         selRect.set(x, y, x, y)
         hasSel = true
     }
@@ -182,12 +311,13 @@ class SnapCropView(
         val dy = y - lastY
 
         when (dragMode) {
-            DragMode.DRAWING -> {
+            // DRAWING and all corner drags use anchor/live min-max — rectangle flips freely
+            DragMode.DRAWING,
+            DragMode.CORNER_TL, DragMode.CORNER_TR,
+            DragMode.CORNER_BL, DragMode.CORNER_BR -> {
                 selRect.set(
-                    min(drawOriginX, x),
-                    min(drawOriginY, y),
-                    max(drawOriginX, x),
-                    max(drawOriginY, y)
+                    min(drawOriginX, x), min(drawOriginY, y),
+                    max(drawOriginX, x), max(drawOriginY, y)
                 )
                 clampToView()
             }
@@ -195,90 +325,94 @@ class SnapCropView(
                 selRect.offset(dx, dy)
                 clampToView()
             }
-            DragMode.CORNER_TL -> {
-                selRect.left = min(selRect.left + dx, selRect.right  - minSize)
-                selRect.top  = min(selRect.top  + dy, selRect.bottom - minSize)
-                clampToView()
-            }
-            DragMode.CORNER_TR -> {
-                selRect.right = max(selRect.right + dx, selRect.left   + minSize)
-                selRect.top   = min(selRect.top   + dy, selRect.bottom - minSize)
-                clampToView()
-            }
-            DragMode.CORNER_BL -> {
-                selRect.left   = min(selRect.left   + dx, selRect.right  - minSize)
-                selRect.bottom = max(selRect.bottom + dy, selRect.top    + minSize)
-                clampToView()
-            }
-            DragMode.CORNER_BR -> {
-                selRect.right  = max(selRect.right  + dx, selRect.left + minSize)
-                selRect.bottom = max(selRect.bottom + dy, selRect.top  + minSize)
-                clampToView()
-            }
+            // Edge drags: unconstrained; switch dragMode when crossing the opposite edge
             DragMode.EDGE_L -> {
-                selRect.left = min(selRect.left + dx, selRect.right - minSize)
+                selRect.left += dx
+                if (selRect.left > selRect.right) {
+                    val t = selRect.left; selRect.left = selRect.right; selRect.right = t
+                    dragMode = DragMode.EDGE_R
+                }
                 clampToView()
             }
             DragMode.EDGE_R -> {
-                selRect.right = max(selRect.right + dx, selRect.left + minSize)
+                selRect.right += dx
+                if (selRect.right < selRect.left) {
+                    val t = selRect.right; selRect.right = selRect.left; selRect.left = t
+                    dragMode = DragMode.EDGE_L
+                }
                 clampToView()
             }
             DragMode.EDGE_T -> {
-                selRect.top = min(selRect.top + dy, selRect.bottom - minSize)
+                selRect.top += dy
+                if (selRect.top > selRect.bottom) {
+                    val t = selRect.top; selRect.top = selRect.bottom; selRect.bottom = t
+                    dragMode = DragMode.EDGE_B
+                }
                 clampToView()
             }
             DragMode.EDGE_B -> {
-                selRect.bottom = max(selRect.bottom + dy, selRect.top + minSize)
+                selRect.bottom += dy
+                if (selRect.bottom < selRect.top) {
+                    val t = selRect.bottom; selRect.bottom = selRect.top; selRect.top = t
+                    dragMode = DragMode.EDGE_T
+                }
                 clampToView()
             }
             DragMode.NONE -> {}
         }
-
         invalidate()
-        lastX = x
-        lastY = y
+        lastX = x; lastY = y
     }
 
     private fun onUp(x: Float, y: Float) {
         if (dragMode == DragMode.DRAWING) {
-            val tooSmall = selRect.width() < minSize || selRect.height() < minSize
-            if (tooSmall) {
-                hasSel = false
-                invalidate()
-                dragMode = DragMode.NONE
-                return
+            if (selRect.width() < minSize || selRect.height() < minSize) {
+                hasSel = false; invalidate(); dragMode = DragMode.NONE; return
             }
         }
         if (hasSel) {
-            Log.d("JeezSnapper", "Selection: ${selRect.toShortString()} — ${selRect.width().toInt()}×${selRect.height().toInt()}px")
+            Log.d("JeezSnapper",
+                "Selection: ${selRect.toShortString()} — ${selRect.width().toInt()}×${selRect.height().toInt()}px")
             onSelectionComplete?.invoke(RectF(selRect))
         }
         dragMode = DragMode.NONE
+    }
+
+    // ── System gesture / key handling ─────────────────────────────────────────────
+
+    /**
+     * Fires when the window loses focus — triggered by the home gesture or any
+     * system UI that takes the foreground. Used to auto-cancel the Snapper.
+     */
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        if (!hasWindowFocus) onCancelRequested?.invoke()
+    }
+
+    /** Intercepts the back key/gesture while this window is focused. */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
+            onCancelRequested?.invoke()
+            return true
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     // ── Hit testing ───────────────────────────────────────────────────────────────
 
     private fun hitTest(x: Float, y: Float): DragMode {
         val r = selRect
-
-        // Corners (priority over edges)
         if (dist(x, y, r.left,  r.top)    < cornerHit) return DragMode.CORNER_TL
         if (dist(x, y, r.right, r.top)    < cornerHit) return DragMode.CORNER_TR
         if (dist(x, y, r.left,  r.bottom) < cornerHit) return DragMode.CORNER_BL
         if (dist(x, y, r.right, r.bottom) < cornerHit) return DragMode.CORNER_BR
-
-        // Edges
         val onH = x in r.left..r.right
         val onV = y in r.top..r.bottom
         if (onH && y in r.top    - edgeHit..r.top    + edgeHit) return DragMode.EDGE_T
         if (onH && y in r.bottom - edgeHit..r.bottom + edgeHit) return DragMode.EDGE_B
         if (onV && x in r.left   - edgeHit..r.left   + edgeHit) return DragMode.EDGE_L
         if (onV && x in r.right  - edgeHit..r.right  + edgeHit) return DragMode.EDGE_R
-
-        // Inside → move
         if (r.contains(x, y)) return DragMode.CENTER
-
-        // Outside → start new drawing
         hasSel = false
         startDrawing(x, y)
         return DragMode.DRAWING
@@ -287,9 +421,7 @@ class SnapCropView(
     // ── Utilities ─────────────────────────────────────────────────────────────────
 
     private fun clampToView() {
-        val w = width.toFloat()
-        val h = height.toFloat()
-        // Clamp edges individually; keep rect valid (don't clamp so hard it collapses)
+        val w = width.toFloat(); val h = height.toFloat()
         selRect.left   = selRect.left.coerceIn(0f, w)
         selRect.right  = selRect.right.coerceIn(0f, w)
         selRect.top    = selRect.top.coerceIn(0f, h)
@@ -302,24 +434,6 @@ class SnapCropView(
     }
 
     private fun dp(v: Float) = v * density
-
-    // ── Public helpers ────────────────────────────────────────────────────────────
-
-    /**
-     * Returns the portion of [screenshot] that corresponds to the current selection,
-     * mapped from view coordinates to bitmap pixel coordinates.
-     * Returns null if there is no selection.
-     */
-    fun getCroppedBitmap(): Bitmap? {
-        if (!hasSel || width == 0 || height == 0) return null
-        val scaleX = screenshot.width.toFloat() / width
-        val scaleY = screenshot.height.toFloat() / height
-        val bx = (selRect.left   * scaleX).toInt().coerceIn(0, screenshot.width  - 1)
-        val by = (selRect.top    * scaleY).toInt().coerceIn(0, screenshot.height - 1)
-        val bw = (selRect.width() * scaleX).toInt().coerceAtLeast(1).coerceAtMost(screenshot.width  - bx)
-        val bh = (selRect.height()* scaleY).toInt().coerceAtLeast(1).coerceAtMost(screenshot.height - by)
-        return Bitmap.createBitmap(screenshot, bx, by, bw, bh)
-    }
 }
 
 // ── Drag mode enum ────────────────────────────────────────────────────────────────

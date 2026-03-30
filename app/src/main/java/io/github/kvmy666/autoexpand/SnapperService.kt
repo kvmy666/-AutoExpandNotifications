@@ -42,6 +42,8 @@ class SnapperService : Service() {
         const val ACTION_SHOW_EDGE_BUTTON = "io.github.kvmy666.autoexpand.ACTION_SHOW_EDGE_BUTTON"
         /** Hide the edge button overlay (service stops itself if nothing else is active). */
         const val ACTION_HIDE_EDGE_BUTTON = "io.github.kvmy666.autoexpand.ACTION_HIDE_EDGE_BUTTON"
+        /** Intent extra: set to true when the intent comes from the QS tile (needs panel-close delay). */
+        const val EXTRA_QS_TRIGGERED      = "from_qs"
         private const val NOTIFICATION_ID = 1001
         private const val TAG             = "JeezSnapper"
         private const val FILE_PROVIDER   = "io.github.kvmy666.autoexpand.fileprovider"
@@ -78,8 +80,11 @@ class SnapperService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
         when (intent?.action) {
-            ACTION_TEST_CAPTURE,
-            ACTION_CAPTURE           -> { if (cropView == null) handleCapture() }
+            ACTION_TEST_CAPTURE -> { if (cropView == null) handleCapture() }
+            ACTION_CAPTURE      -> {
+                val fromQs = intent?.getBooleanExtra(EXTRA_QS_TRIGGERED, false) ?: false
+                if (cropView == null) handleCapture(delayMs = if (fromQs) 700L else 0L)
+            }
             ACTION_SHOW_EDGE_BUTTON  -> showEdgeButton()
             ACTION_HIDE_EDGE_BUTTON  -> { hideEdgeButton(); stopSelfIfIdle() }
         }
@@ -164,8 +169,14 @@ class SnapperService : Service() {
 
     // ── Screenshot capture ────────────────────────────────────────────────────────
 
-    private fun handleCapture() {
-        Thread { handleCaptureInternal() }.start()
+    private fun handleCapture(delayMs: Long = 0L) {
+        Thread {
+            if (delayMs > 0L) {
+                Log.d(TAG, "QS delay: waiting ${delayMs}ms for panel close")
+                Thread.sleep(delayMs)
+            }
+            handleCaptureInternal()
+        }.start()
     }
 
     private fun handleCaptureInternal() {
@@ -182,7 +193,7 @@ class SnapperService : Service() {
 
     private fun captureScreen(): Bitmap? = try {
         val f    = File(cacheDir, "snap_${System.currentTimeMillis()}.png")
-        val p    = Runtime.getRuntime().exec(arrayOf("su", "-c", "screencap -p ${f.absolutePath}"))
+        val p    = Runtime.getRuntime().exec(arrayOf("su", "-c", "screencap -d 0 -p ${f.absolutePath}"))
         val exit = p.waitFor()
         Log.d(TAG, "screencap exit=$exit")
         if (exit != 0 || !f.exists() || f.length() == 0L) { f.delete(); null }
@@ -193,12 +204,13 @@ class SnapperService : Service() {
 
     private fun showCropUi(bmp: Bitmap) {
         dismissCropUi()
+        // FLAG_NOT_FOCUSABLE intentionally omitted so the window can receive
+        // focus-change events (home gesture) and key events (back gesture).
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START }
@@ -206,9 +218,27 @@ class SnapperService : Service() {
         val view = SnapCropView(this, bmp).apply {
             onSelectionComplete = { rect -> onCropSelected(rect) }
             onAdjustStarted     = { dismissActionBar() }
+            onCancelRequested   = { handler.post { dismissAll(); stopSelfIfIdle() } }
+            onDoubleTapPin      = doubleTapPin@{
+                val rect = cropView?.getSelRect()       ?: return@doubleTapPin
+                val snap = cropView?.getCroppedBitmap() ?: return@doubleTapPin
+                lastSelRect = rect
+                // Temporarily store snap so doFloat() can grab it even after cropView changes
+                handler.post { doFloat() }
+            }
+            onFullScreenPin     = fullScreenPin@{
+                val fullBmp = cropView?.getFullBitmap() ?: return@fullScreenPin
+                handler.post {
+                    dismissAll()
+                    createFloatingSnap(fullBmp, RectF(0f, 0f, fullBmp.width.toFloat(), fullBmp.height.toFloat()))
+                    saveToHistory(fullBmp)
+                    updateNotification()
+                }
+            }
         }
         windowManager.addView(view, params)
         cropView = view
+        view.requestFocus()
         Log.d(TAG, "Crop UI shown")
     }
 
@@ -230,7 +260,7 @@ class SnapperService : Service() {
                 (8f * density).toInt(),
                 screen.width() - bar.barWidthPx - (8f * density).toInt()
             )
-        val margin     = (12f * density).toInt()
+        val margin     = (16f * density).toInt()
         val preferredY = selRect.bottom.toInt() + margin
         val barY       = if (preferredY + bar.barHeightPx > screen.height() - (16f * density).toInt())
             selRect.top.toInt() - margin - bar.barHeightPx

@@ -24,6 +24,7 @@ class SnapperTileService : TileService() {
     override fun onClick() {
         val svc = Intent(this, SnapperService::class.java).apply {
             action = SnapperService.ACTION_CAPTURE
+            putExtra(SnapperService.EXTRA_QS_TRIGGERED, true)
         }
         startForegroundService(svc)
     }
