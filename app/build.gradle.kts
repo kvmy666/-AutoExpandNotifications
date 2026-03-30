@@ -59,6 +59,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -70,4 +71,5 @@ dependencies {
     implementation(libs.compose.material3)
     implementation(libs.compose.ui)
     implementation(libs.activity.compose)
+    implementation(libs.mlkit.text.recognition)
 }

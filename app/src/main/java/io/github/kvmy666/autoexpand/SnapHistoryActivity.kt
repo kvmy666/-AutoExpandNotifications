@@ -1,0 +1,216 @@
+package io.github.kvmy666.autoexpand
+
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+class SnapHistoryActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        setContent {
+            val scheme = if (isSystemInDarkTheme())
+                dynamicDarkColorScheme(this) else dynamicLightColorScheme(this)
+            MaterialTheme(colorScheme = scheme) {
+                SnapHistoryScreen()
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SnapHistoryScreen() {
+    val context = LocalContext.current
+    val db      = remember { SnapHistoryDb(context) }
+    var entries by remember { mutableStateOf(db.getAll()) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Snap History") },
+                actions = {
+                    if (entries.isNotEmpty()) {
+                        TextButton(onClick = {
+                            entries.forEach { File(it.filePath).delete() }
+                            db.deleteAll()
+                            entries = emptyList()
+                        }) {
+                            Text("Clear all")
+                        }
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        if (entries.isEmpty()) {
+            Box(
+                modifier         = Modifier.fillMaxSize().padding(padding),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("No snaps saved yet", style = MaterialTheme.typography.bodyLarge)
+            }
+        } else {
+            LazyVerticalGrid(
+                columns                  = GridCells.Fixed(2),
+                modifier                 = Modifier.fillMaxSize().padding(padding).padding(4.dp),
+                horizontalArrangement    = Arrangement.spacedBy(4.dp),
+                verticalArrangement      = Arrangement.spacedBy(4.dp)
+            ) {
+                items(items = entries, key = { it.id }) { entry ->
+                    SnapHistoryItem(
+                        entry    = entry,
+                        onDelete = {
+                            File(entry.filePath).delete()
+                            db.delete(entry.id)
+                            entries = db.getAll()
+                        },
+                        onShare  = {
+                            val file = File(entry.filePath)
+                            if (file.exists()) {
+                                val uri = FileProvider.getUriForFile(
+                                    context,
+                                    "io.github.kvmy666.autoexpand.fileprovider",
+                                    file
+                                )
+                                context.startActivity(
+                                    Intent.createChooser(
+                                        Intent(Intent.ACTION_SEND).apply {
+                                            type = "image/png"
+                                            putExtra(Intent.EXTRA_STREAM, uri)
+                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        }, "Share snap"
+                                    ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+                                )
+                            }
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SnapHistoryItem(
+    entry    : SnapHistoryDb.Entry,
+    onDelete : () -> Unit,
+    onShare  : () -> Unit
+) {
+    var bitmap   by remember { mutableStateOf<Bitmap?>(null) }
+    var showMenu by remember { mutableStateOf(false) }
+
+    val dateStr = remember(entry.timestamp) {
+        SimpleDateFormat("MMM d · HH:mm", Locale.getDefault()).format(Date(entry.timestamp))
+    }
+
+    LaunchedEffect(entry.filePath) {
+        bitmap = withContext(Dispatchers.IO) {
+            val opts = BitmapFactory.Options().apply { inSampleSize = 4 }
+            BitmapFactory.decodeFile(entry.filePath, opts)
+        }
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { showMenu = true }
+    ) {
+        Box {
+            if (bitmap != null) {
+                Image(
+                    bitmap             = bitmap!!.asImageBitmap(),
+                    contentDescription = dateStr,
+                    modifier           = Modifier.fillMaxWidth(),
+                    contentScale       = ContentScale.Crop
+                )
+            } else {
+                Box(
+                    modifier         = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                }
+            }
+
+            Text(
+                text      = dateStr,
+                style     = MaterialTheme.typography.labelSmall,
+                color     = Color.White,
+                modifier  = Modifier
+                    .align(Alignment.BottomCenter)
+                    .background(Color(0x99000000))
+                    .fillMaxWidth()
+                    .padding(4.dp),
+                textAlign = TextAlign.Center
+            )
+
+            DropdownMenu(
+                expanded         = showMenu,
+                onDismissRequest = { showMenu = false }
+            ) {
+                DropdownMenuItem(
+                    text    = { Text("Share") },
+                    onClick = { showMenu = false; onShare() }
+                )
+                DropdownMenuItem(
+                    text    = { Text("Delete") },
+                    onClick = { showMenu = false; onDelete() }
+                )
+            }
+        }
+    }
+}

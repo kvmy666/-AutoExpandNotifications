@@ -4,6 +4,10 @@
 
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:name=".App"
@@ -29,6 +33,36 @@
             android:name=".PrefsProvider"
             android:authorities="io.github.kvmy666.autoexpand.prefs"
             android:exported="true" />
+
+        <service
+            android:name=".SnapperService"
+            android:foregroundServiceType="specialUse"
+            android:exported="false" />
+
+        <service
+            android:name=".SnapperTileService"
+            android:exported="true"
+            android:label="Screen Snapper"
+            android:icon="@android:drawable/ic_menu_crop"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <activity
+            android:name=".SnapHistoryActivity"
+            android:exported="false" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="io.github.kvmy666.autoexpand.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <!-- Xposed module marker -->
         <meta-data

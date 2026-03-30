@@ -3,6 +3,7 @@ package io.github.kvmy666.autoexpand
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.Settings
@@ -22,12 +23,16 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -131,6 +136,26 @@ class MainActivity : ComponentActivity() {
                 .putBoolean("btn_shortcut_enabled", true)
                 .apply()
         }
+        if (!prefs.contains("snapper_enabled")) {
+            prefs.edit()
+                .putBoolean("snapper_enabled", false)
+                .putString("snapper_activation_method", "qs_tile")
+                .putString("snapper_button_side", "right")
+                .putBoolean("snapper_double_tap_dismiss", true)
+                .putString("snapper_history_limit", "50")
+                .apply()
+        }
+
+        // Re-attach edge button if it was active before (e.g. after app restart)
+        if (prefs.getBoolean("snapper_enabled", false) &&
+            prefs.getString("snapper_activation_method", "qs_tile") != "qs_tile"
+        ) {
+            startForegroundService(
+                Intent(this, SnapperService::class.java).apply {
+                    action = SnapperService.ACTION_SHOW_EDGE_BUTTON
+                }
+            )
+        }
 
         makePrefsWorldReadable(this)
 
@@ -163,6 +188,14 @@ private fun SettingsScreen(prefs: SharedPreferences) {
     var headsupPopupEnabled by remember { mutableStateOf(prefs.getBoolean("disable_headsup_popup_enabled", true)) }
     var ungroupEnabled by remember { mutableStateOf(prefs.getBoolean("ungroup_notifications_enabled", true)) }
     var excludedCount by remember { mutableIntStateOf(prefs.getStringSet("excluded_apps", emptySet())?.size ?: 0) }
+
+    // Keyboard Enhancer
+    // Screen Snapper
+    var snapperEnabled    by remember { mutableStateOf(prefs.getBoolean("snapper_enabled", false)) }
+    var snapperMethod     by remember { mutableStateOf(prefs.getString("snapper_activation_method", "qs_tile") ?: "qs_tile") }
+    var snapperButtonSide by remember { mutableStateOf(prefs.getString("snapper_button_side", "right") ?: "right") }
+    var snapperDoubleTap  by remember { mutableStateOf(prefs.getBoolean("snapper_double_tap_dismiss", true)) }
+    var snapperHistLimit  by remember { mutableStateOf(prefs.getString("snapper_history_limit", "50") ?: "50") }
 
     // Keyboard Enhancer
     var kbEnhancerEnabled by remember { mutableStateOf(prefs.getBoolean("keyboard_enhancer_enabled", true)) }
@@ -314,6 +347,66 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                 }
             }
 
+            // [DEBUG] Screen Snapper test
+            if (BuildConfig.DEBUG) {
+                SnapperDebugCard(snackbarHostState)
+            }
+
+            // Screen Snapper settings
+            SnapperSettingsCard(
+                prefs              = prefs,
+                snapperEnabled     = snapperEnabled,
+                snapperMethod      = snapperMethod,
+                snapperButtonSide  = snapperButtonSide,
+                snapperDoubleTap   = snapperDoubleTap,
+                snapperHistLimit   = snapperHistLimit,
+                onEnabledChange    = { enabled ->
+                    snapperEnabled = enabled
+                    prefs.edit().putBoolean("snapper_enabled", enabled).apply()
+                    val svc = Intent(context, SnapperService::class.java)
+                    if (enabled && snapperMethod != "qs_tile") {
+                        svc.action = SnapperService.ACTION_SHOW_EDGE_BUTTON
+                        context.startForegroundService(svc)
+                    } else if (!enabled) {
+                        svc.action = SnapperService.ACTION_HIDE_EDGE_BUTTON
+                        context.startForegroundService(svc)
+                    }
+                },
+                onMethodChange     = { method ->
+                    snapperMethod = method
+                    prefs.edit().putString("snapper_activation_method", method).apply()
+                    if (snapperEnabled) {
+                        val svc = Intent(context, SnapperService::class.java)
+                        svc.action = if (method != "qs_tile")
+                            SnapperService.ACTION_SHOW_EDGE_BUTTON
+                        else
+                            SnapperService.ACTION_HIDE_EDGE_BUTTON
+                        context.startForegroundService(svc)
+                    }
+                },
+                onSideChange       = { side ->
+                    snapperButtonSide = side
+                    prefs.edit().putString("snapper_button_side", side).apply()
+                    if (snapperEnabled && snapperMethod != "qs_tile") {
+                        // Restart edge button with new side
+                        val svc = Intent(context, SnapperService::class.java)
+                        svc.action = SnapperService.ACTION_HIDE_EDGE_BUTTON
+                        context.startForegroundService(svc)
+                        val svc2 = Intent(context, SnapperService::class.java)
+                        svc2.action = SnapperService.ACTION_SHOW_EDGE_BUTTON
+                        context.startForegroundService(svc2)
+                    }
+                },
+                onDoubleTapChange  = { dt ->
+                    snapperDoubleTap = dt
+                    prefs.edit().putBoolean("snapper_double_tap_dismiss", dt).apply()
+                },
+                onHistLimitChange  = { lim ->
+                    snapperHistLimit = lim.filter { it.isDigit() }
+                    prefs.edit().putString("snapper_history_limit", snapperHistLimit).apply()
+                }
+            )
+
             // Keyboard Enhancer
             Card {
                 Column(modifier = Modifier.padding(vertical = 4.dp)) {
@@ -425,6 +518,186 @@ private fun SettingsScreen(prefs: SharedPreferences) {
             }
 
 
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SnapperSettingsCard(
+    prefs             : SharedPreferences,
+    snapperEnabled    : Boolean,
+    snapperMethod     : String,
+    snapperButtonSide : String,
+    snapperDoubleTap  : Boolean,
+    snapperHistLimit  : String,
+    onEnabledChange   : (Boolean) -> Unit,
+    onMethodChange    : (String)  -> Unit,
+    onSideChange      : (String)  -> Unit,
+    onDoubleTapChange : (Boolean) -> Unit,
+    onHistLimitChange : (String)  -> Unit,
+) {
+    val context = LocalContext.current
+    val showEdgeOptions = snapperMethod != "qs_tile"
+
+    Card {
+        Column(modifier = Modifier.padding(vertical = 4.dp)) {
+            Text(
+                text     = stringResource(R.string.snapper_section_title),
+                style    = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                color    = MaterialTheme.colorScheme.primary
+            )
+
+            // Master toggle
+            ToggleRow(
+                title          = stringResource(R.string.snapper_enabled_title),
+                description    = stringResource(R.string.snapper_enabled_desc),
+                checked        = snapperEnabled,
+                onCheckedChange = onEnabledChange
+            )
+
+            // Activation method segmented buttons
+            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Text(
+                    text  = stringResource(R.string.snapper_activation_title),
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Spacer(modifier = Modifier.padding(top = 8.dp))
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    SegmentedButton(
+                        selected = snapperMethod == "qs_tile",
+                        onClick  = { onMethodChange("qs_tile") },
+                        shape    = SegmentedButtonDefaults.itemShape(index = 0, count = 3),
+                        label    = { Text(stringResource(R.string.snapper_method_qs)) }
+                    )
+                    SegmentedButton(
+                        selected = snapperMethod == "edge_button",
+                        onClick  = { onMethodChange("edge_button") },
+                        shape    = SegmentedButtonDefaults.itemShape(index = 1, count = 3),
+                        label    = { Text(stringResource(R.string.snapper_method_edge)) }
+                    )
+                    SegmentedButton(
+                        selected = snapperMethod == "both",
+                        onClick  = { onMethodChange("both") },
+                        shape    = SegmentedButtonDefaults.itemShape(index = 2, count = 3),
+                        label    = { Text(stringResource(R.string.snapper_method_both)) }
+                    )
+                }
+            }
+
+            // Edge button side (only when edge button is part of the method)
+            if (showEdgeOptions) {
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    Text(
+                        text  = stringResource(R.string.snapper_button_side_title),
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Spacer(modifier = Modifier.padding(top = 8.dp))
+                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                        SegmentedButton(
+                            selected = snapperButtonSide == "left",
+                            onClick  = { onSideChange("left") },
+                            shape    = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                            label    = { Text(stringResource(R.string.snapper_side_left)) }
+                        )
+                        SegmentedButton(
+                            selected = snapperButtonSide == "right",
+                            onClick  = { onSideChange("right") },
+                            shape    = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                            label    = { Text(stringResource(R.string.snapper_side_right)) }
+                        )
+                    }
+                }
+            }
+
+            // Double-tap dismiss
+            ToggleRow(
+                title           = stringResource(R.string.snapper_double_tap_title),
+                description     = stringResource(R.string.snapper_double_tap_desc),
+                checked         = snapperDoubleTap,
+                onCheckedChange = onDoubleTapChange
+            )
+
+            // History limit
+            OutlinedTextField(
+                value          = snapperHistLimit,
+                onValueChange  = onHistLimitChange,
+                label          = { Text(stringResource(R.string.snapper_history_limit_title)) },
+                supportingText = { Text(stringResource(R.string.snapper_history_limit_desc)) },
+                modifier       = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine     = true
+            )
+
+            // View history button
+            Button(
+                onClick  = { context.startActivity(Intent(context, SnapHistoryActivity::class.java)) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .padding(bottom = 8.dp)
+            ) {
+                Text(stringResource(R.string.snapper_view_history))
+            }
+        }
+    }
+}
+
+@Composable
+private fun SnapperDebugCard(snackbarHostState: SnackbarHostState) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.tertiaryContainer
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "DEBUG — Screen Snapper",
+                style = MaterialTheme.typography.titleSmall
+            )
+            Text(
+                text = "Tap to test screenshot capture. Requires SYSTEM_ALERT_WINDOW permission. Check logcat -s JeezSnapper for timing.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Button(
+                onClick = {
+                    if (!Settings.canDrawOverlays(context)) {
+                        val intent = Intent(
+                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            Uri.parse("package:${context.packageName}")
+                        )
+                        context.startActivity(intent)
+                        scope.launch {
+                            snackbarHostState.currentSnackbarData?.dismiss()
+                            snackbarHostState.showSnackbar("Grant 'Display over other apps' permission, then try again")
+                        }
+                    } else {
+                        val svc = Intent(context, SnapperService::class.java).apply {
+                            action = SnapperService.ACTION_TEST_CAPTURE
+                        }
+                        context.startForegroundService(svc)
+                        scope.launch {
+                            snackbarHostState.currentSnackbarData?.dismiss()
+                            snackbarHostState.showSnackbar("Snapper started — watch logcat JeezSnapper")
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Test Screenshot Capture")
+            }
         }
     }
 }

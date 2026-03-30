@@ -49,6 +49,23 @@
     <string name="keyboard_clipboard_max_title">Max clipboard entries</string>
     <string name="keyboard_clipboard_max_desc">Oldest non-pinned entries are pruned when limit is reached</string>
 
+    <!-- Screen Snapper settings -->
+    <string name="snapper_section_title">Screen Snapper</string>
+    <string name="snapper_enabled_title">Enable Screen Snapper</string>
+    <string name="snapper_enabled_desc">Activate via QS tile or edge button</string>
+    <string name="snapper_activation_title">Activation method</string>
+    <string name="snapper_method_qs">QS tile</string>
+    <string name="snapper_method_edge">Edge button</string>
+    <string name="snapper_method_both">Both</string>
+    <string name="snapper_button_side_title">Edge button side</string>
+    <string name="snapper_side_left">Left</string>
+    <string name="snapper_side_right">Right</string>
+    <string name="snapper_double_tap_title">Double-tap to dismiss</string>
+    <string name="snapper_double_tap_desc">Double-tap a floating snap to remove it</string>
+    <string name="snapper_history_limit_title">History limit</string>
+    <string name="snapper_history_limit_desc">Max number of snaps saved to history (0 = disabled)</string>
+    <string name="snapper_view_history">View Snap History</string>
+
     <!-- Snackbar -->
     <string name="reboot_required">Reboot required for changes to take effect</string>
 </resources>
