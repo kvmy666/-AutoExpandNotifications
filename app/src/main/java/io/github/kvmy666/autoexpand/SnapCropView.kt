@@ -137,6 +137,13 @@ class SnapCropView(
         color = Color.WHITE; style = Paint.Style.STROKE
         strokeWidth = handleW; strokeCap = Paint.Cap.SQUARE; isAntiAlias = true
     }
+    /** Rule-of-thirds grid lines — subtle white at ~22% opacity. */
+    private val gridPaint = Paint().apply {
+        color = Color.argb(55, 255, 255, 255)
+        style = Paint.Style.STROKE
+        strokeWidth = 0.8f * density
+        isAntiAlias = false
+    }
 
     init {
         // Hardware layer needed so saveLayer + PorterDuff.CLEAR composites correctly.
@@ -189,9 +196,10 @@ class SnapCropView(
         if (hasSel) canvas.drawRect(selRect, clearPaint)
         canvas.restoreToCount(sc)
 
-        // 3. Selection border + handles
+        // 3. Selection border + rule-of-thirds grid + handles
         if (hasSel) {
             canvas.drawRect(selRect, borderPaint)
+            drawGrid(canvas)
             drawHandles(canvas)
         }
 
@@ -199,16 +207,34 @@ class SnapCropView(
         drawBottomButtons(canvas)
     }
 
+    /**
+     * Draws the eight L-shaped corner handles.
+     * The arm length is clamped to half the rect's shortest dimension so handles never
+     * visually overlap or cross each other when the selection is very thin. (Task 4)
+     */
     private fun drawHandles(canvas: Canvas) {
-        val r = selRect; val len = handleLen
-        canvas.drawLine(r.left,         r.top + len, r.left,          r.top,         handlePaint)
-        canvas.drawLine(r.left,         r.top,       r.left  + len,   r.top,         handlePaint)
-        canvas.drawLine(r.right - len,  r.top,       r.right,         r.top,         handlePaint)
-        canvas.drawLine(r.right,        r.top,       r.right,         r.top  + len,  handlePaint)
-        canvas.drawLine(r.left,         r.bottom - len, r.left,       r.bottom,      handlePaint)
-        canvas.drawLine(r.left,         r.bottom,    r.left  + len,   r.bottom,      handlePaint)
-        canvas.drawLine(r.right - len,  r.bottom,    r.right,         r.bottom,      handlePaint)
-        canvas.drawLine(r.right,        r.bottom,    r.right,         r.bottom - len, handlePaint)
+        val r   = selRect
+        // Clamp so handle arms never exceed half the rect size — prevents |-----| glitch
+        val len = handleLen.coerceAtMost(min(r.width() / 2f, r.height() / 2f))
+        canvas.drawLine(r.left,         r.top + len,    r.left,         r.top,          handlePaint)
+        canvas.drawLine(r.left,         r.top,          r.left + len,   r.top,          handlePaint)
+        canvas.drawLine(r.right - len,  r.top,          r.right,        r.top,          handlePaint)
+        canvas.drawLine(r.right,        r.top,          r.right,        r.top + len,    handlePaint)
+        canvas.drawLine(r.left,         r.bottom - len, r.left,         r.bottom,       handlePaint)
+        canvas.drawLine(r.left,         r.bottom,       r.left + len,   r.bottom,       handlePaint)
+        canvas.drawLine(r.right - len,  r.bottom,       r.right,        r.bottom,       handlePaint)
+        canvas.drawLine(r.right,        r.bottom,       r.right,        r.bottom - len, handlePaint)
+    }
+
+    /** Rule-of-thirds grid: two vertical + two horizontal lines dividing selRect into 9 zones. */
+    private fun drawGrid(canvas: Canvas) {
+        val r  = selRect
+        val w3 = r.width()  / 3f
+        val h3 = r.height() / 3f
+        canvas.drawLine(r.left + w3,     r.top,    r.left + w3,     r.bottom, gridPaint)
+        canvas.drawLine(r.left + 2*w3,   r.top,    r.left + 2*w3,   r.bottom, gridPaint)
+        canvas.drawLine(r.left, r.top + h3,    r.right, r.top + h3,    gridPaint)
+        canvas.drawLine(r.left, r.top + 2*h3,  r.right, r.top + 2*h3,  gridPaint)
     }
 
     private fun drawBottomButtons(canvas: Canvas) {

@@ -134,6 +134,58 @@ class MainHook : IXposedHookLoadPackage {
         val contentViewClass = "com.android.systemui.statusbar.notification.row.NotificationContentView"
 
         // =====================================================
+        // SNAPPER — intercept hardware Power+VolumeDown screenshot
+        // Hooks TakeScreenshotService.onStartCommand in SystemUI.
+        // Bypass: SnapperService writes /data/local/tmp/.snapper_bypass before
+        // triggering `input keyevent 120` so that tap triggers native screenshot.
+        // =====================================================
+
+        // Try standard AOSP class name first, then OxygenOS variant
+        val screenshotClasses = listOf(
+            "com.android.systemui.screenshot.TakeScreenshotService",
+            "com.oplus.screenshot.OplusTakeScreenshotService"
+        )
+        for (cls in screenshotClasses) {
+            try {
+                XposedHelpers.findAndHookMethod(
+                    cls, lpparam.classLoader,
+                    "onStartCommand",
+                    android.content.Intent::class.java,
+                    Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            val ctx = appContext ?: return
+                            // Check bypass flag — allows native screenshot passthrough from our UI
+                            val bypassFile = java.io.File("/data/local/tmp/.snapper_bypass")
+                            if (bypassFile.exists()) {
+                                try { bypassFile.delete() } catch (_: Throwable) {}
+                                XposedBridge.log("Snapper: bypass flag set — allowing native screenshot")
+                                return
+                            }
+                            // Cancel native screenshot, launch Snapper instead
+                            param.result = android.app.Service.START_NOT_STICKY
+                            try {
+                                val snap = android.content.Intent("io.github.kvmy666.autoexpand.ACTION_CAPTURE").apply {
+                                    component = android.content.ComponentName(
+                                        "io.github.kvmy666.autoexpand",
+                                        "io.github.kvmy666.autoexpand.SnapperService"
+                                    )
+                                }
+                                ctx.startForegroundService(snap)
+                                XposedBridge.log("Snapper: intercepted screenshot → started SnapperService")
+                            } catch (e: Throwable) {
+                                XposedBridge.log("Snapper: failed to start SnapperService — ${e.message}")
+                            }
+                        }
+                    }
+                )
+                XposedBridge.log("Snapper: hooked screenshot via $cls")
+                break  // hooked successfully, stop trying
+            } catch (_: Throwable) {}
+        }
+
+        // =====================================================
         // Capture SystemUI context + write module-active marker
         // =====================================================
         try {

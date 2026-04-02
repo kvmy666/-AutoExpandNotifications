@@ -1,9 +1,13 @@
 package io.github.kvmy666.autoexpand
 
+import android.content.ContentValues
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Bundle
+import android.provider.MediaStore
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -37,6 +41,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -48,6 +53,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
@@ -109,13 +115,13 @@ private fun SnapHistoryScreen() {
             ) {
                 items(items = entries, key = { it.id }) { entry ->
                     SnapHistoryItem(
-                        entry    = entry,
-                        onDelete = {
+                        entry         = entry,
+                        onDelete      = {
                             File(entry.filePath).delete()
                             db.delete(entry.id)
                             entries = db.getAll()
                         },
-                        onShare  = {
+                        onShare       = {
                             val file = File(entry.filePath)
                             if (file.exists()) {
                                 val uri = FileProvider.getUriForFile(
@@ -133,6 +139,32 @@ private fun SnapHistoryScreen() {
                                     ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
                                 )
                             }
+                        },
+                        onFloat       = {
+                            // Re-open this snap as a floating overlay via SnapperService
+                            val svc = Intent(context, SnapperService::class.java).apply {
+                                action = SnapperService.ACTION_FLOAT_SNAP
+                                putExtra(SnapperService.EXTRA_SNAP_PATH, entry.filePath)
+                            }
+                            context.startForegroundService(svc)
+                            Toast.makeText(context, "Snap pinned as overlay", Toast.LENGTH_SHORT).show()
+                        },
+                        onOpenGallery = {
+                            val file = File(entry.filePath)
+                            if (file.exists()) {
+                                val uri = FileProvider.getUriForFile(
+                                    context,
+                                    "io.github.kvmy666.autoexpand.fileprovider",
+                                    file
+                                )
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW).apply {
+                                        setDataAndType(uri, "image/png")
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                                 Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                )
+                            }
                         }
                     )
                 }
@@ -143,10 +175,14 @@ private fun SnapHistoryScreen() {
 
 @Composable
 private fun SnapHistoryItem(
-    entry    : SnapHistoryDb.Entry,
-    onDelete : () -> Unit,
-    onShare  : () -> Unit
+    entry         : SnapHistoryDb.Entry,
+    onDelete      : () -> Unit,
+    onShare       : () -> Unit,
+    onFloat       : () -> Unit,
+    onOpenGallery : () -> Unit,
 ) {
+    val context  = LocalContext.current
+    val scope    = rememberCoroutineScope()
     var bitmap   by remember { mutableStateOf<Bitmap?>(null) }
     var showMenu by remember { mutableStateOf(false) }
 
@@ -203,6 +239,30 @@ private fun SnapHistoryItem(
                 onDismissRequest = { showMenu = false }
             ) {
                 DropdownMenuItem(
+                    text    = { Text("Float / Pin") },
+                    onClick = { showMenu = false; onFloat() }
+                )
+                DropdownMenuItem(
+                    text    = { Text("Open in Gallery") },
+                    onClick = { showMenu = false; onOpenGallery() }
+                )
+                DropdownMenuItem(
+                    text    = { Text("Save to Gallery") },
+                    onClick = {
+                        showMenu = false
+                        scope.launch {
+                            val saved = withContext(Dispatchers.IO) {
+                                saveEntryToGallery(context, entry.filePath)
+                            }
+                            Toast.makeText(
+                                context,
+                                if (saved) "Saved to gallery" else "Save failed",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                )
+                DropdownMenuItem(
                     text    = { Text("Share") },
                     onClick = { showMenu = false; onShare() }
                 )
@@ -213,4 +273,22 @@ private fun SnapHistoryItem(
             }
         }
     }
+}
+
+/** Copies the snap file into the system MediaStore (Pictures/Snapper). */
+private fun saveEntryToGallery(context: android.content.Context, filePath: String): Boolean {
+    return try {
+        val bmp = BitmapFactory.decodeFile(filePath) ?: return false
+        val cv  = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, "Snap_${System.currentTimeMillis()}.png")
+            put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Snapper")
+        }
+        val uri: Uri? = context.contentResolver.insert(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)
+        uri?.let { context.contentResolver.openOutputStream(it)?.use { s ->
+            bmp.compress(Bitmap.CompressFormat.PNG, 100, s)
+        }}
+        uri != null
+    } catch (_: Exception) { false }
 }

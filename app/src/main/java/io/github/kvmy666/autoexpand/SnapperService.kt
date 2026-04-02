@@ -42,8 +42,10 @@ class SnapperService : Service() {
         const val ACTION_SHOW_EDGE_BUTTON = "io.github.kvmy666.autoexpand.ACTION_SHOW_EDGE_BUTTON"
         /** Hide the edge button overlay (service stops itself if nothing else is active). */
         const val ACTION_HIDE_EDGE_BUTTON = "io.github.kvmy666.autoexpand.ACTION_HIDE_EDGE_BUTTON"
-        /** Intent extra: set to true when the intent comes from the QS tile (needs panel-close delay). */
         const val EXTRA_QS_TRIGGERED      = "from_qs"
+        /** Float a saved snap from history as an overlay; pass EXTRA_SNAP_PATH with the file path. */
+        const val ACTION_FLOAT_SNAP       = "io.github.kvmy666.autoexpand.ACTION_FLOAT_SNAP"
+        const val EXTRA_SNAP_PATH         = "snap_path"
         private const val NOTIFICATION_ID = 1001
         private const val TAG             = "JeezSnapper"
         private const val FILE_PROVIDER   = "io.github.kvmy666.autoexpand.fileprovider"
@@ -80,10 +82,14 @@ class SnapperService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
         when (intent?.action) {
-            ACTION_TEST_CAPTURE -> { if (cropView == null) handleCapture() }
-            ACTION_CAPTURE      -> { if (cropView == null) handleCapture() }
+            ACTION_TEST_CAPTURE      -> { if (cropView == null) handleCapture() }
+            ACTION_CAPTURE           -> { if (cropView == null) handleCapture() }
             ACTION_SHOW_EDGE_BUTTON  -> showEdgeButton()
             ACTION_HIDE_EDGE_BUTTON  -> { hideEdgeButton(); stopSelfIfIdle() }
+            ACTION_FLOAT_SNAP        -> {
+                val path = intent.getStringExtra(EXTRA_SNAP_PATH) ?: return START_NOT_STICKY
+                floatSnapFromHistory(path)
+            }
         }
         return START_NOT_STICKY
     }
@@ -153,19 +159,35 @@ class SnapperService : Service() {
 
     /**
      * Capture triggered from the edge button.
-     * Briefly hides the button so it doesn't appear in the screenshot, then restores it.
+     * Hides ALL our windows (not just the button) so no overlay bleeds into screencap.
      */
     private fun handleCaptureHideButton() {
-        edgeButton?.alpha = 0f   // hide before the next frame; su+screencap startup is >> 1 frame
-        Thread {
-            handleCaptureInternal()
-            handler.post { edgeButton?.alpha = 1f }
-        }.start()
+        hideAllForCapture()
+        Thread { handleCaptureInternal() }.start()
     }
 
     // ── Screenshot capture ────────────────────────────────────────────────────────
 
+    /**
+     * Hides ALL our overlay windows before screencap runs.
+     * Setting alpha=0f on a WindowManager surface causes SurfaceFlinger to treat it as
+     * fully transparent, so it doesn't bleed into the raw screencap output. (Task 5)
+     */
+    private fun hideAllForCapture() {
+        edgeButton?.alpha = 0f
+        snapBar?.alpha    = 0f
+        trashZone?.alpha  = 0f
+        floatingSnaps.forEach { it.alpha = 0f }
+    }
+
+    private fun restoreAfterCapture() {
+        edgeButton?.alpha = 1f
+        floatingSnaps.forEach { it.alpha = 1f }
+        // snapBar and trashZone are transient — they re-show on next user interaction
+    }
+
     private fun handleCapture() {
+        hideAllForCapture()   // Task 5: zero artifacts — hide everything before capture
         Thread { handleCaptureInternal() }.start()
     }
 
@@ -174,11 +196,11 @@ class SnapperService : Service() {
         val bmp = captureScreen()
         if (bmp == null) {
             Log.e(TAG, "Capture failed")
-            handler.post { stopSelfIfIdle() }
+            handler.post { restoreAfterCapture(); stopSelfIfIdle() }
             return
         }
         Log.d(TAG, "Capture OK in ${System.currentTimeMillis() - t0}ms — ${bmp.width}×${bmp.height}")
-        handler.post { showCropUi(bmp) }
+        handler.post { restoreAfterCapture(); showCropUi(bmp) }
     }
 
     private fun captureScreen(): Bitmap? = try {
@@ -217,11 +239,20 @@ class SnapperService : Service() {
                 handler.post { doFloat() }
             }
             onFullScreenPin     = fullScreenPin@{
-                val fullBmp = cropView?.getFullBitmap() ?: return@fullScreenPin
                 handler.post {
                     dismissAll()
                     stopSelfIfIdle()
-                    exportBitmap(fullBmp, SnapperAction.SAVE) {}
+                    // Task 2: Write bypass flag then inject the native screenshot key combo.
+                    // Our Xposed hook in SystemUI checks the flag and allows the screenshot through.
+                    Thread {
+                        try {
+                            Runtime.getRuntime().exec(arrayOf("su", "-c",
+                                "touch /data/local/tmp/.snapper_bypass && input keyevent 120"))
+                                .waitFor()
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Native screenshot passthrough failed: ${e.message}")
+                        }
+                    }.start()
                 }
             }
         }
@@ -318,6 +349,26 @@ class SnapperService : Service() {
         saveToHistory(bmp)
         updateNotification()
         Log.d(TAG, "Float created — ${floatingSnaps.size} snap(s) active")
+    }
+
+    /** Re-opens a history snap as a floating overlay (called from ACTION_FLOAT_SNAP). */
+    private fun floatSnapFromHistory(path: String) {
+        Thread {
+            val bmp = BitmapFactory.decodeFile(path)
+            if (bmp == null) { handler.post { toast("Could not load snap") }; return@Thread }
+            handler.post {
+                val screen = windowManager.currentWindowMetrics.bounds
+                // Place it centred in the top portion of the screen
+                val srcRect = RectF(
+                    screen.width() * 0.1f,  screen.height() * 0.15f,
+                    screen.width() * 0.9f,  screen.height() * 0.15f + bmp.height.toFloat() *
+                            (screen.width() * 0.8f / bmp.width)
+                )
+                createFloatingSnap(bmp, srcRect)
+                updateNotification()
+                Log.d(TAG, "History snap floated — ${floatingSnaps.size} active")
+            }
+        }.start()
     }
 
     // ── Floating snap creation ────────────────────────────────────────────────────
@@ -574,7 +625,7 @@ class SnapperService : Service() {
         val cv = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, "Snap_${System.currentTimeMillis()}.png")
             put(MediaStore.Images.Media.MIME_TYPE, "image/png")
-            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Jeez Snapper")
+            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Snapper")
         }
         val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)
         uri?.let { contentResolver.openOutputStream(it)?.use { s -> bmp.compress(Bitmap.CompressFormat.PNG, 100, s) } }
