@@ -3,7 +3,6 @@
     <string-array name="xposed_scope">
         <item>android</item>
         <item>com.android.systemui</item>
-        <item>com.oplus.exsystemservice</item>
         <item>com.google.android.inputmethod.latin</item>
     </string-array>
 </resources>

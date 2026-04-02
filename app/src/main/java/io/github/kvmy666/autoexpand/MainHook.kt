@@ -16,8 +16,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage
 
 class MainHook : IXposedHookLoadPackage {
 
-    private var appContext: Context? = null       // captured from SystemUI process
-    private var sysServerContext: Context? = null // captured from system_server process
+    private var appContext: Context? = null  // captured from SystemUI process
     private val PROVIDER_URI = Uri.parse("content://io.github.kvmy666.autoexpand.prefs")
 
     // Cached prefs
@@ -134,42 +133,36 @@ class MainHook : IXposedHookLoadPackage {
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         when (lpparam.packageName) {
-            "android"                    -> handleSystemServer(lpparam)
-            "com.android.systemui"       -> handleSystemUi(lpparam)
-            "com.oplus.exsystemservice"  -> handleExSystemService(lpparam)
+            "android"              -> handleSystemServer(lpparam)
+            "com.android.systemui" -> handleSystemUi(lpparam)
         }
     }
 
     // =====================================================
-    // system_server hooks — PhoneWindowManager key interception
+    // system_server — SAFE interceptKeyBeforeQueueing hook
+    //
+    // Intercepts the Power+VolumeDown chord BEFORE KeyCombinationManager
+    // detects it. Consuming KEYCODE_VOLUME_DOWN while Power is held prevents
+    // the native KeyCombinationManager chord rule from firing at all.
+    //
+    // SAFETY CONTRACT: entire hook body is in try/catch(Throwable).
+    // On ANY exception we log and return — the original method is never
+    // blocked by our code, so system_server cannot deadlock.
     // =====================================================
 
-    private fun handleSystemServer(lpparam: XC_LoadPackage.LoadPackageParam) {
-        // Capture system_server Application context
-        try {
-            XposedHelpers.findAndHookMethod(
-                "android.app.Application", lpparam.classLoader,
-                "onCreate",
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        sysServerContext = param.thisObject as? Context
-                        XposedBridge.log("Snapper: system_server context captured")
-                    }
-                }
-            )
-        } catch (e: Throwable) {
-            XposedBridge.log("Snapper: sysServerContext capture failed: ${e.message}")
-        }
+    /** Tracks whether KEYCODE_POWER is currently held down. Volatile for thread safety. */
+    @Volatile private var pwmPowerDown = false
 
-        // ── Candidate PhoneWindowManager classes on OxygenOS 16 ──────────────────
+    private fun handleSystemServer(lpparam: XC_LoadPackage.LoadPackageParam) {
+        // OxygenOS 16 uses PhoneWindowManager (standard AOSP class in system_server).
+        // From logcat: "KEYLOG_PhoneWindowManager: interceptKeyBeforeQueueing" fires before
+        // KeyCombinationManager detects the chord — this is our safe intercept point.
         val pwmCandidates = listOf(
             "com.android.server.policy.PhoneWindowManager",
-            "com.oplus.server.policy.OplusPhoneWindowManager",
-            "com.oplus.server.policy.OplusPhoneWindowManagerExt"
+            "com.oplus.server.policy.OplusPhoneWindowManager"
         )
 
         for (cls in pwmCandidates) {
-            // interceptKeyBeforeQueueing — fires for EVERY key event
             try {
                 XposedHelpers.findAndHookMethod(
                     cls, lpparam.classLoader,
@@ -177,266 +170,92 @@ class MainHook : IXposedHookLoadPackage {
                     KeyEvent::class.java, Int::class.javaPrimitiveType,
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
-                            val ev = param.args[0] as KeyEvent
-                            val kc = ev.keyCode
-                            // Only log POWER and VOLUME_DOWN — the screenshot chord
-                            if (kc == KeyEvent.KEYCODE_VOLUME_DOWN || kc == KeyEvent.KEYCODE_POWER) {
-                                Log.d("JeezSnapper",
-                                    "PWM.interceptKeyBeforeQueueing [$cls] keyCode=$kc action=${ev.action} flags=${ev.flags}")
+                            // ── CRITICAL SAFETY BOUNDARY ────────────────────────────────────────
+                            // Everything inside this try/catch. If we throw, original runs safely.
+                            try {
+                                val ev = param.args[0] as? KeyEvent ?: return
+
+                                when (ev.keyCode) {
+                                    KeyEvent.KEYCODE_POWER -> {
+                                        // Track power-key state — never consume it, just observe
+                                        pwmPowerDown = (ev.action == KeyEvent.ACTION_DOWN)
+                                    }
+                                    KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                                        if (ev.action == KeyEvent.ACTION_DOWN && pwmPowerDown) {
+                                            // ── Bypass check ────────────────────────────────
+                                            // "Full Screenshot" button writes this file so the
+                                            // native screenshot can go through for that one press.
+                                            val bypass = java.io.File("/data/local/tmp/.snapper_bypass")
+                                            if (bypass.exists()) {
+                                                try { bypass.delete() } catch (_: Throwable) {}
+                                                Log.d("JeezSnapper", "bypass flag — native screenshot allowed")
+                                                return  // let original handle it
+                                            }
+
+                                            // ── Consume the chord ───────────────────────────
+                                            // Return value 0 means the event is consumed and NOT
+                                            // passed to apps or KeyCombinationManager internals.
+                                            param.result = 0
+
+                                            // ── Launch SnapperService ────────────────────────
+                                            // Get context from PhoneWindowManager's mContext field.
+                                            val ctx: Context? = try {
+                                                XposedHelpers.getObjectField(param.thisObject, "mContext") as? Context
+                                            } catch (_: Throwable) { null }
+
+                                            if (ctx != null) {
+                                                try {
+                                                    ctx.startForegroundService(
+                                                        Intent("io.github.kvmy666.autoexpand.ACTION_CAPTURE").apply {
+                                                            component = ComponentName(
+                                                                "io.github.kvmy666.autoexpand",
+                                                                "io.github.kvmy666.autoexpand.SnapperService"
+                                                            )
+                                                        }
+                                                    )
+                                                    Log.d("JeezSnapper",
+                                                        "P+VolDown chord consumed [$cls] → SnapperService launched")
+                                                } catch (e: Throwable) {
+                                                    Log.e("JeezSnapper", "startForegroundService failed: ${e.message}")
+                                                    // Restore so the native screenshot still works
+                                                    param.result = null
+                                                }
+                                            } else {
+                                                Log.e("JeezSnapper", "mContext null on $cls — not blocking chord")
+                                                param.result = null  // restore — don't silently eat the key
+                                            }
+                                        }
+                                    }
+                                }
+                            } catch (t: Throwable) {
+                                // ── DEADLOCK PREVENTION ──────────────────────────────────────────
+                                // Log the error and clear any partial result so the original method
+                                // can run normally. System never freezes from our hook.
+                                Log.e("JeezSnapper", "interceptKeyBeforeQueueing hook threw: $t")
+                                param.result = null
                             }
                         }
                     }
                 )
-                XposedBridge.log("Snapper: hooked $cls.interceptKeyBeforeQueueing [system_server]")
+                XposedBridge.log("Snapper: SAFE interceptKeyBeforeQueueing hook registered on $cls")
+                break  // first class that hooks successfully is enough
             } catch (e: Throwable) {
-                XposedBridge.log("Snapper: skip $cls.interceptKeyBeforeQueueing: ${e.message}")
-            }
-
-            // Hook handleKeyGestureEvent — gestureType=11 is the screenshot chord (confirmed via logcat)
-            try {
-                val clazz = XposedHelpers.findClass(cls, lpparam.classLoader)
-                XposedBridge.hookAllMethods(clazz, "handleKeyGestureEvent", object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        // Log all gesture types to confirm gestureType=11 is screenshot
-                        val type = param.args.getOrNull(0)
-                        Log.d("JeezSnapper", "$cls.handleKeyGestureEvent gestureType=$type")
-                    }
-                })
-                XposedBridge.log("Snapper: hooked $cls.handleKeyGestureEvent")
-            } catch (_: Throwable) {}
-
-            // Hook all screenshot-related methods by name
-            val screenshotMethods = listOf(
-                "takeScreenshot", "requestScreenshot", "handleScreenshot",
-                "screenshotChordVolumeLongPressEventReceived", "handleVolumeDownLongPress",
-                "sendScreenshotRequest", "triggerScreenshot"
-            )
-            val clazz = try { XposedHelpers.findClass(cls, lpparam.classLoader) } catch (_: Throwable) { null }
-            if (clazz != null) {
-                for (method in screenshotMethods) {
-                    try {
-                        XposedBridge.hookAllMethods(clazz, method, object : XC_MethodHook() {
-                            override fun beforeHookedMethod(param: MethodHookParam) {
-                                Log.d("JeezSnapper", "SCREENSHOT_TRIGGER [$cls.$method] — intercepting")
-                                // Once confirmed which method fires, we'll block + start Snapper here.
-                                // For now: log only.
-                            }
-                        })
-                        XposedBridge.log("Snapper: hooked $cls.$method [system_server]")
-                    } catch (_: Throwable) {}
-                }
+                XposedBridge.log("Snapper: cannot hook $cls.interceptKeyBeforeQueueing: ${e.message}")
             }
         }
     }
 
     // =====================================================
-    // com.oplus.exsystemservice — OxygenOS 16 screenshot manager
-    //
-    // Empirically confirmed via logcat (Phase 12):
-    //   Power+VolDown → KeyCombinationManager (system_server) → gestureType=11
-    //   → OplusScreenshotManagerService.takeScreenshot (com.oplus.exsystemservice)
-    //   → binds com.oplus.screenshot/ScreenshotService
-    //
-    // We block takeScreenshot here and redirect to SnapperService.
-    // Bypass: check /data/local/tmp/.snapper_bypass before blocking.
-    // =====================================================
-
-    private var exSvcContext: Context? = null
-
-    private fun handleExSystemService(lpparam: XC_LoadPackage.LoadPackageParam) {
-        // Capture Application context for this process
-        try {
-            XposedHelpers.findAndHookMethod(
-                "android.app.Application", lpparam.classLoader, "onCreate",
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        exSvcContext = param.thisObject as? Context
-                        XposedBridge.log("Snapper: com.oplus.exsystemservice context captured")
-                    }
-                }
-            )
-        } catch (e: Throwable) {
-            XposedBridge.log("Snapper: exSvcContext capture failed: ${e.message}")
-        }
-
-        // ClassLoader spy to find the exact OplusScreenshotManagerService class name
-        try {
-            XposedBridge.hookAllMethods(ClassLoader::class.java, "loadClass",
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val name = param.args[0] as? String ?: return
-                        if (param.result != null && name.contains("creenshot", ignoreCase = true)) {
-                            Log.d("JeezSnapper", "exSvc CLASS_LOADED: $name")
-                        }
-                    }
-                }
-            )
-        } catch (_: Throwable) {}
-
-        // Hook all candidate class/method names — block takeScreenshot and start Snapper
-        val interceptHook = object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                Log.d("JeezSnapper", "OplusScreenshotManagerService.${param.method.name} INTERCEPTED")
-                val ctx = exSvcContext ?: run {
-                    Log.e("JeezSnapper", "exSvcContext null — cannot redirect")
-                    return
-                }
-                // Bypass flag: let native screenshot through when triggered by our "Full Screenshot" button
-                val bypassFile = java.io.File("/data/local/tmp/.snapper_bypass")
-                if (bypassFile.exists()) {
-                    try { bypassFile.delete() } catch (_: Throwable) {}
-                    Log.d("JeezSnapper", "bypass flag set — allowing native screenshot")
-                    return
-                }
-                // Block native screenshot
-                param.result = null
-                // Start Snapper
-                try {
-                    ctx.startForegroundService(Intent("io.github.kvmy666.autoexpand.ACTION_CAPTURE").apply {
-                        component = ComponentName(
-                            "io.github.kvmy666.autoexpand",
-                            "io.github.kvmy666.autoexpand.SnapperService"
-                        )
-                    })
-                    Log.d("JeezSnapper", "OplusScreenshotManagerService blocked → SnapperService started")
-                } catch (e: Throwable) {
-                    Log.e("JeezSnapper", "startForegroundService from exSvc failed: ${e.message}")
-                }
-            }
-        }
-
-        // Try candidate class names found from logcat analysis
-        val candidates = listOf(
-            "com.oplus.exsystemservice.screenshot.OplusScreenshotManagerService",
-            "com.oplus.systemserver.screenshot.OplusScreenshotManagerService",
-            "com.oplus.exsystemservice.OplusScreenshotManagerService",
-            "com.oplus.screenshot.OplusScreenshotManagerService"
-        )
-        for (cls in candidates) {
-            val clazz = try { XposedHelpers.findClass(cls, lpparam.classLoader) }
-                        catch (_: Throwable) { null } ?: continue
-            // Hook all overloads of takeScreenshot
-            try {
-                XposedBridge.hookAllMethods(clazz, "takeScreenshot", interceptHook)
-                XposedBridge.log("Snapper: hooked $cls.takeScreenshot [exsystemservice] ✓")
-            } catch (e: Throwable) {
-                XposedBridge.log("Snapper: $cls.takeScreenshot hook failed: ${e.message}")
-            }
-        }
-    }
-
-    // =====================================================
-    // SystemUI hooks — notification + screenshot interception
+    // SystemUI hooks — notification tweaks only
+    // Screenshot hooks removed: OxygenOS 16 routes screenshots through
+    // com.oplus.exsystemservice / com.oplus.screenshot (not SystemUI).
+    // Interception is handled in system_server via handleSystemServer().
     // =====================================================
 
     private fun handleSystemUi(lpparam: XC_LoadPackage.LoadPackageParam) {
 
         val rowClass = "com.android.systemui.statusbar.notification.row.ExpandableNotificationRow"
         val contentViewClass = "com.android.systemui.statusbar.notification.row.NotificationContentView"
-
-        // ── ClassLoader spy — discover which screenshot classes OxygenOS 16 actually loads ──
-        // This is a one-time diagnostic: produces "JeezSnapper CLASS_LOADED: com.oplus.xxx" in logcat.
-        try {
-            XposedBridge.hookAllMethods(ClassLoader::class.java, "loadClass",
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val name = param.args[0] as? String ?: return
-                        if (param.result != null &&
-                            (name.contains("creenshot", ignoreCase = true) ||
-                             name.contains("Capture", ignoreCase = true))) {
-                            Log.d("JeezSnapper", "CLASS_LOADED: $name")
-                        }
-                    }
-                }
-            )
-        } catch (_: Throwable) {}
-
-        // ── TakeScreenshotService hook — intercept native screenshot ──────────────
-        // Bypass: SnapperService writes /data/local/tmp/.snapper_bypass then injects keyevent 120
-        val snapAction = object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val ctx = appContext ?: run {
-                    Log.e("JeezSnapper", "TakeScreenshotService hook fired but appContext is null")
-                    return
-                }
-                val bypassFile = java.io.File("/data/local/tmp/.snapper_bypass")
-                if (bypassFile.exists()) {
-                    try { bypassFile.delete() } catch (_: Throwable) {}
-                    Log.d("JeezSnapper", "bypass flag set — allowing native screenshot through")
-                    return
-                }
-                param.result = android.app.Service.START_NOT_STICKY
-                try {
-                    ctx.startForegroundService(Intent("io.github.kvmy666.autoexpand.ACTION_CAPTURE").apply {
-                        component = ComponentName(
-                            "io.github.kvmy666.autoexpand",
-                            "io.github.kvmy666.autoexpand.SnapperService"
-                        )
-                    })
-                    Log.d("JeezSnapper", "TakeScreenshotService intercepted → SnapperService started")
-                } catch (e: Throwable) {
-                    Log.e("JeezSnapper", "startForegroundService failed: ${e.message}")
-                }
-            }
-        }
-
-        val screenshotServiceCandidates = listOf(
-            "com.android.systemui.screenshot.TakeScreenshotService",
-            "com.oplus.systemui.screenshot.OplusTakeScreenshotService",
-            "com.oplus.screenshot.TakeScreenshotService"
-        )
-        for (cls in screenshotServiceCandidates) {
-            try {
-                XposedHelpers.findAndHookMethod(
-                    cls, lpparam.classLoader,
-                    "onStartCommand",
-                    Intent::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
-                    snapAction
-                )
-                Log.d("JeezSnapper", "hooked TakeScreenshotService via $cls [SystemUI]")
-                break
-            } catch (e: Throwable) {
-                Log.d("JeezSnapper", "skip TakeScreenshotService $cls: ${e.message}")
-            }
-        }
-
-        // ── Also try hooking ScreenshotHelper.takeScreenshot ─────────────────────
-        val helperCandidates = listOf(
-            "com.android.systemui.screenshot.ScreenshotHelper",
-            "com.oplus.systemui.screenshot.OplusScreenshotHelper"
-        )
-        for (cls in helperCandidates) {
-            val clazz = try { XposedHelpers.findClass(cls, lpparam.classLoader) } catch (_: Throwable) { null }
-                ?: continue
-            try {
-                XposedBridge.hookAllMethods(clazz, "takeScreenshot", object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        Log.d("JeezSnapper", "ScreenshotHelper.takeScreenshot called [$cls]")
-                        val ctx = appContext ?: return
-                        val bypassFile = java.io.File("/data/local/tmp/.snapper_bypass")
-                        if (bypassFile.exists()) {
-                            try { bypassFile.delete() } catch (_: Throwable) {}
-                            return
-                        }
-                        param.result = null  // cancel the screenshot
-                        try {
-                            ctx.startForegroundService(Intent("io.github.kvmy666.autoexpand.ACTION_CAPTURE").apply {
-                                component = ComponentName(
-                                    "io.github.kvmy666.autoexpand",
-                                    "io.github.kvmy666.autoexpand.SnapperService"
-                                )
-                            })
-                            Log.d("JeezSnapper", "ScreenshotHelper intercepted → SnapperService started")
-                        } catch (e: Throwable) {
-                            Log.e("JeezSnapper", "startForegroundService failed: ${e.message}")
-                        }
-                    }
-                })
-                Log.d("JeezSnapper", "hooked ScreenshotHelper.takeScreenshot via $cls")
-            } catch (e: Throwable) {
-                Log.d("JeezSnapper", "skip ScreenshotHelper $cls: ${e.message}")
-            }
-        }
 
         // =====================================================
         // Capture SystemUI context + write module-active marker
