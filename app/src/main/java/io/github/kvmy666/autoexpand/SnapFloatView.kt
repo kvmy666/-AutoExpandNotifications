@@ -3,7 +3,6 @@ package io.github.kvmy666.autoexpand
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
@@ -53,20 +52,28 @@ class SnapFloatView(
     // ── Dimensions ────────────────────────────────────────────────────────────────
 
     private val density = resources.displayMetrics.density
-    /** Extra space around the bitmap to show the drop shadow without clipping. */
-    val shadowPad = (24f * density).toInt()
+    /**
+     * Padding around the bitmap. Previously held space for a drop shadow, but
+     * setShadowLayer + LAYER_TYPE_SOFTWARE caused OxygenOS's compositor to apply
+     * a forced mirror-reflection effect on TYPE_APPLICATION_OVERLAY windows.
+     * Shadow removed; pad kept at 0 — snap appears at exact crop coordinates.
+     */
+    val shadowPad = 0
 
-    val snapW = bitmap.width  + shadowPad * 2
-    val snapH = bitmap.height + shadowPad * 2
+    val snapW = bitmap.width
+    val snapH = bitmap.height
 
     // ── Drawing ───────────────────────────────────────────────────────────────────
 
-    private val bmpPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        setShadowLayer(18f * density, 0f, 6f * density, Color.argb(150, 0, 0, 0))
-    }
+    /** Clean hardware-accelerated paint — no shadow layer, no software compositing. */
+    private val bmpPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
     init {
-        setLayerType(LAYER_TYPE_SOFTWARE, null)  // required for setShadowLayer
+        // Hardware layer: OxygenOS's reflection compositor only fires on SOFTWARE layers.
+        // Forcing hardware prevents the ghost mirror artifact. (Task 2 fix)
+        setLayerType(LAYER_TYPE_HARDWARE, null)
+        elevation     = 0f
+        outlineProvider = null   // disable Android's automatic shadow from elevation
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -74,7 +81,7 @@ class SnapFloatView(
     }
 
     override fun onDraw(canvas: Canvas) {
-        canvas.drawBitmap(bitmap, shadowPad.toFloat(), shadowPad.toFloat(), bmpPaint)
+        canvas.drawBitmap(bitmap, 0f, 0f, bmpPaint)
     }
 
     // ── Touch ─────────────────────────────────────────────────────────────────────
