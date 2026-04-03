@@ -53,6 +53,8 @@
     <string name="snapper_section_title">Screen Snapper</string>
     <string name="snapper_enabled_title">Enable Screen Snapper</string>
     <string name="snapper_enabled_desc">Activate via QS tile or edge button</string>
+    <string name="snapper_master_toggle_title">Enable Screen Snapper</string>
+    <string name="snapper_master_toggle_desc">Master switch — disables all Snapper activation methods</string>
     <string name="snapper_activation_title">Activation method</string>
     <string name="snapper_method_qs">QS tile</string>
     <string name="snapper_method_edge">Edge button</string>

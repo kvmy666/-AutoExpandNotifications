@@ -213,6 +213,7 @@ class MainHook : IXposedHookLoadPackage {
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             try {
+                                if (!isFeatureEnabled("enable_snapper_entirely")) return
                                 val ev = param.args[0] as? KeyEvent ?: return
                                 when (ev.keyCode) {
                                     KeyEvent.KEYCODE_POWER -> when (ev.action) {
@@ -289,6 +290,7 @@ class MainHook : IXposedHookLoadPackage {
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             try {
+                                if (!isFeatureEnabled("enable_snapper_entirely")) return
                                 val gestureEvent = param.args.getOrNull(0) ?: return
                                 // args[0] is KeyGestureEvent — use toString() to identify
                                 // SCREENSHOT_CHORD (confirmed "KEY_GESTURE_TYPE_SCREENSHOT_CHORD")

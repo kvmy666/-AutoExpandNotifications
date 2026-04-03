@@ -43,6 +43,11 @@ Choose specific apps whose notifications should NOT be auto-expanded. Exclusions
 
 ---
 
+### Master Toggle for Screen Snapper — New in v2.0.1
+A single switch at the top of the Snapper tab to fully disable all Snapper activation methods (hardware chord and edge button) without changing individual settings.
+
+---
+
 ### Screen Snapper — New in v2.0.0
 A zero-delay screen capture and annotation tool built directly into the system.
 

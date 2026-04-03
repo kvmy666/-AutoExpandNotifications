@@ -156,6 +156,9 @@ class MainActivity : ComponentActivity() {
         if (!prefs.contains("snapper_hardware_chord_enabled")) {
             prefs.edit().putBoolean("snapper_hardware_chord_enabled", true).apply()
         }
+        if (!prefs.contains("enable_snapper_entirely")) {
+            prefs.edit().putBoolean("enable_snapper_entirely", true).apply()
+        }
 
         // Re-attach edge button if it was active before (e.g. after app restart)
         if (prefs.getBoolean("snapper_enabled", false) &&
@@ -210,7 +213,8 @@ private fun SettingsScreen(prefs: SharedPreferences) {
     var snapperButtonSide    by remember { mutableStateOf(prefs.getString("snapper_button_side", "right") ?: "right") }
     var snapperDoubleTap     by remember { mutableStateOf(prefs.getBoolean("snapper_double_tap_dismiss", true)) }
     var snapperHistLimit     by remember { mutableStateOf(prefs.getString("snapper_history_limit", "50") ?: "50") }
-    var snapperHardwareChord by remember { mutableStateOf(prefs.getBoolean("snapper_hardware_chord_enabled", true)) }
+    var snapperHardwareChord   by remember { mutableStateOf(prefs.getBoolean("snapper_hardware_chord_enabled", true)) }
+    var snapperMasterEnabled   by remember { mutableStateOf(prefs.getBoolean("enable_snapper_entirely", true)) }
 
     // ── Keyboard Enhancer state ───────────────────────────────────────────────
     var kbEnhancerEnabled   by remember { mutableStateOf(prefs.getBoolean("keyboard_enhancer_enabled", true)) }
@@ -505,10 +509,16 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                 // ── Tab 2: Screen Snapper ─────────────────────────────────────
                 2 -> {
                     SnapperSettingsCard(
-                        snapperMethod     = snapperMethod,
-                        snapperButtonSide = snapperButtonSide,
-                        snapperDoubleTap  = snapperDoubleTap,
-                        snapperHistLimit  = snapperHistLimit,
+                        snapperMasterEnabled = snapperMasterEnabled,
+                        snapperMethod        = snapperMethod,
+                        snapperButtonSide    = snapperButtonSide,
+                        snapperDoubleTap     = snapperDoubleTap,
+                        snapperHistLimit     = snapperHistLimit,
+                        onMasterEnabledChange = { v ->
+                            snapperMasterEnabled = v
+                            prefs.edit().putBoolean("enable_snapper_entirely", v).apply()
+                            MainActivity.makePrefsWorldReadable(context)
+                        },
                         onMethodChange    = { method ->
                             snapperMethod = method
                             val chordOn = method == "chord" || method == "both"
@@ -705,14 +715,16 @@ private fun GuideCard(title: String, sections: List<Pair<String, String>>) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SnapperSettingsCard(
-    snapperMethod     : String,
-    snapperButtonSide : String,
-    snapperDoubleTap  : Boolean,
-    snapperHistLimit  : String,
-    onMethodChange    : (String)  -> Unit,
-    onSideChange      : (String)  -> Unit,
-    onDoubleTapChange : (Boolean) -> Unit,
-    onHistLimitChange : (String)  -> Unit,
+    snapperMasterEnabled : Boolean,
+    snapperMethod        : String,
+    snapperButtonSide    : String,
+    snapperDoubleTap     : Boolean,
+    snapperHistLimit     : String,
+    onMasterEnabledChange: (Boolean) -> Unit,
+    onMethodChange       : (String)  -> Unit,
+    onSideChange         : (String)  -> Unit,
+    onDoubleTapChange    : (Boolean) -> Unit,
+    onHistLimitChange    : (String)  -> Unit,
 ) {
     val context = LocalContext.current
 
@@ -723,6 +735,13 @@ private fun SnapperSettingsCard(
                 style    = MaterialTheme.typography.titleSmall,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 color    = MaterialTheme.colorScheme.primary
+            )
+
+            ToggleRow(
+                title           = stringResource(R.string.snapper_master_toggle_title),
+                description     = stringResource(R.string.snapper_master_toggle_desc),
+                checked         = snapperMasterEnabled,
+                onCheckedChange = onMasterEnabledChange
             )
 
             // Activation method: Software (edge button) | Hardware (chord) | Both
