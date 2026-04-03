@@ -1,6 +1,6 @@
 # AutoExpandNotifications
 
-Notification & System Tweaks + Screen Snapper + Keyboard Enhancer for OxygenOS
+Notification Tweaks + Screen Snapper + Keyboard Enhancer for OxygenOS
 
 ![GitHub release](https://img.shields.io/github/v/release/kvmy666/-AutoExpandNotifications?style=flat-square)
 ![License](https://img.shields.io/github/license/kvmy666/-AutoExpandNotifications?style=flat-square)
@@ -18,6 +18,8 @@ An LSPosed/Xposed module that brings powerful system-level enhancements to OnePl
 |---|---|---|
 | ![](https://raw.githubusercontent.com/kvmy666/-AutoExpandNotifications/main/screenshots/headsup-expanded.jpg) | ![](https://raw.githubusercontent.com/kvmy666/-AutoExpandNotifications/main/screenshots/notification-shade.jpg) | ![](https://raw.githubusercontent.com/kvmy666/-AutoExpandNotifications/main/screenshots/settings.jpg) |
 
+---
+
 ## Features
 
 ### Auto-Expand Notifications
@@ -26,7 +28,7 @@ Automatically expand all notifications in three contexts:
 - **Heads-Up Banners** — incoming banners arrive fully expanded; swipe down to collapse, swipe down again to expand
 - **Lock Screen** — expanded notifications by default; can be disabled for privacy
 
-### Heads-Up Max Lines — New in v2.0.0
+### Heads-Up Max Lines
 Caps the number of visible text lines in auto-expanded heads-up banners so long messages don't fill your entire screen. Set your preferred limit in the Notifications tab (default: 5 lines, 0 = unlimited). Action buttons always remain visible.
 
 ### Disable Heads-Up Popup
@@ -43,41 +45,33 @@ Choose specific apps whose notifications should NOT be auto-expanded. Exclusions
 
 ---
 
-### Bug Fixes — v2.0.2
-- **Crop coordinate fix**: Selection box now maps exactly to the cropped output. Previously the status bar height caused a vertical shift, pulling the status bar into crops and adding extra bottom padding.
-- **Gemini hardening**: `cancelPowerKeyLongPress()` is now called immediately when the chord is detected (not on Power UP), preventing Gemini from activating while Power is still held.
-
----
-
-### Master Toggle for Screen Snapper — New in v2.0.1
-A single switch at the top of the Snapper tab to fully disable all Snapper activation methods (hardware chord and edge button) without changing individual settings.
-
----
-
-### Screen Snapper — New in v2.0.0
-A zero-delay screen capture and annotation tool built directly into the system.
+### Screen Snapper
+A zero-delay screen capture and annotation tool built directly into the system. Requires the **Display over other apps** overlay permission.
 
 **Activation**
 Three modes selectable in the Snapper tab:
 - **Software** — floating edge button on the left or right side of the screen
-- **Hardware** — Power + Volume Down chord, intercepted at `system_server` level. The native OxygenOS screenshot is fully suppressed; only Snapper fires
+- **Hardware** — Power + Volume Down chord, intercepted at `system_server` level before `KeyCombinationManager` sees it. The native OxygenOS screenshot is fully suppressed; only Snapper fires
 - **Both** — edge button and chord active simultaneously
 
+A **master toggle** at the top of the Snapper tab lets you disable all activation methods instantly without changing individual settings.
+
 **Capture flow**
-- Snapper pre-fetches the screencap in the background the moment activation fires (zero delay)
-- A crop UI appears 100 ms later on a clean frame with no UI chrome visible
-- Drag corner handles to select your region, then release to float it
+- The screencap is pre-fetched in the background the moment activation fires — zero delay between press and crop UI
+- The crop UI appears on a clean frame with no system chrome visible
+- Drag corner handles to select your region; pinch inside the selection to check detail before confirming
 
 **Floating overlay**
-- The cropped region appears as a resizable floating window above all apps
-- Pinch to zoom in/out; drag to reposition
-- Corner bracket button triggers a standard OS screenshot of what's currently on screen (separate from Snapper)
+- The cropped region appears as a resizable, draggable floating window above all apps
+- Pinch to zoom; drag to reposition anywhere on screen
+- Zooming is bounds-clamped — you cannot zoom out beyond the original crop size or pan outside the image edges
+- Corner bracket button triggers a standard OS screenshot of whatever is currently on screen (separate from Snapper)
 - Double-tap to dismiss (configurable)
 
 **Snap History**
 - Every saved crop is stored locally in a gallery accessible from the Snapper tab
 - Per-snap actions: Float / Pin as overlay · Open in Gallery · Save to Photos · Share · Delete
-- Configurable history limit; pruning deletes the actual image files (no silent storage bloat)
+- Configurable history limit (0 = disabled); pruning removes the actual image files — no silent storage bloat
 
 ---
 
@@ -92,19 +86,19 @@ Injects a customizable toolbar below Gboard. Each button can be individually ena
 
 ---
 
-### App UI Overhaul — New in v2.0.0
-The settings app has been fully redesigned with a bottom navigation bar:
+### Settings UI
+The settings app uses a bottom navigation bar with four tabs:
 
-- **Notifications tab** — all notification toggles including the new heads-up max lines field
-- **Keyboard tab** — Gboard toolbar settings and button toggles
-- **Snapper tab** — activation method, edge button side, double-tap dismiss, history limit, and history viewer
-- **Guide tab** — collapsible explanations for every feature; includes a privacy notice confirming everything runs locally
+- **Notifications** — all notification toggles, heads-up max lines field, and app exclusion list
+- **Keyboard** — Gboard toolbar settings, button toggles, shortcut text, and clipboard limit
+- **Snapper** — master toggle, activation method, edge button side, double-tap dismiss, history limit, and history viewer
+- **Guide** — collapsible explanations for every feature, privacy notice
 
 ---
 
 ## Privacy
 
-Everything this module does happens entirely on your device. No data is collected, no network requests are made, no analytics are included. All settings and Snap History are stored locally in the app's private storage.
+Everything this module does happens entirely on your device. No data is collected, no network requests are made, no analytics are included. No internet permission is declared. All settings and Snap History are stored in the app's local private storage.
 
 ---
 
@@ -114,6 +108,7 @@ Everything this module does happens entirely on your device. No data is collecte
 - **Root access** (Magisk / KernelSU / APatch)
 - **LSPosed** framework (Irena or compatible fork)
 - **Zygisk** enabled
+- **Display over other apps** permission (required for Screen Snapper)
 
 ## Installation
 
@@ -123,6 +118,7 @@ Everything this module does happens entirely on your device. No data is collecte
 4. Ensure **System UI** and **Gboard** are checked in the module scope
 5. **Reboot** your device
 6. Open the app to configure features
+7. For Screen Snapper: grant **Display over other apps** when prompted in the Snapper tab
 
 ## Tested On
 
@@ -130,7 +126,37 @@ Everything this module does happens entirely on your device. No data is collecte
 |---|---|---|
 | OnePlus 15 | OxygenOS 16.0.3.501 (Android 16) | Fully Working |
 
-> **Note:** This module was built and tested specifically for OxygenOS 16. It may work on other OxygenOS versions or OnePlus devices, but compatibility is not guaranteed. Contributions to support more devices are welcome!
+> **Note:** Built and tested specifically for OxygenOS 16. It may work on other OxygenOS versions or OnePlus devices, but compatibility is not guaranteed.
+
+---
+
+## Changelog
+
+### v2.0.4
+- Snapper tab now shows a visible **red warning card** when the overlay permission is missing — tap to open system settings directly
+- Master toggle description updates to reflect missing permission; tapping it redirects to the permission screen instead of silently failing
+- Permission state re-checks automatically when returning from system settings
+
+### v2.0.3
+- All `windowManager.addView()` calls wrapped in try-catch — if the overlay permission is revoked while Snapper is active, the service stops cleanly instead of crashing
+
+### v2.0.2
+- **Crop coordinate fix** — selection box now maps exactly to the cropped output; previously the status bar height caused a vertical upward shift
+- **Gemini hardening** — `cancelPowerKeyLongPress()` now fires at chord detection time rather than on Power UP, preventing Gemini from activating while Power is still held
+
+### v2.0.1
+- Master toggle for Screen Snapper — disables all activation methods (hardware chord and edge button) without changing individual settings
+
+### v2.0.0
+- **Screen Snapper** — zero-delay capture, crop UI, floating overlay, pinch-to-zoom, Snap History
+- **Heads-Up Max Lines** — configurable line cap for expanded heads-up banners
+- **Bottom navigation UI** — full redesign with Notifications / Keyboard / Snapper / Guide tabs
+- **Hardware chord interception** — Power + Volume Down intercepted at `system_server` level, native screenshot fully suppressed
+
+### v1.2.x and earlier
+- Keyboard Enhancer (Gboard toolbar), clipboard history, ungroup notifications, initial release
+
+---
 
 ## FAQ
 
@@ -143,8 +169,11 @@ A: Every hook is wrapped in a try-catch. If something fails, it fails silently a
 **Q: The keyboard toolbar doesn't appear after enabling it.**
 A: Force-stop Gboard after enabling the toolbar in the settings app, then open any text field.
 
-**Q: The hardware chord (Power + Vol Down) triggers Snapper but also takes a native screenshot.**
-A: Make sure "Hardware" or "Both" is selected in the Snapper tab. The hook intercepts the chord at `system_server` level and suppresses the native screenshot. A full reboot is required after changing the activation method.
+**Q: The hardware chord triggers Snapper but also takes a native screenshot.**
+A: Make sure **Hardware** or **Both** is selected in the Snapper tab and reboot. The hook intercepts the chord at `system_server` before the native handler sees it.
+
+**Q: Screen Snapper doesn't appear when I press the chord / edge button.**
+A: Check that the **Display over other apps** permission is granted. The Snapper tab shows a red warning card if it is missing.
 
 **Q: Can I use this with Oxygen Customizer?**
 A: Yes, they hook different parts of SystemUI and should not conflict.
