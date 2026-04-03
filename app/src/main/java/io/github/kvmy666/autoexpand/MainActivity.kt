@@ -515,6 +515,11 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                         snapperDoubleTap     = snapperDoubleTap,
                         snapperHistLimit     = snapperHistLimit,
                         onMasterEnabledChange = { v ->
+                            if (v && !android.provider.Settings.canDrawOverlays(context)) {
+                                android.widget.Toast.makeText(context, "Overlay permission required for Screen Snapper", android.widget.Toast.LENGTH_LONG).show()
+                                context.startActivity(android.content.Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION, android.net.Uri.parse("package:${context.packageName}")).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                                return@SnapperSettingsCard
+                            }
                             snapperMasterEnabled = v
                             prefs.edit().putBoolean("enable_snapper_entirely", v).apply()
                             MainActivity.makePrefsWorldReadable(context)

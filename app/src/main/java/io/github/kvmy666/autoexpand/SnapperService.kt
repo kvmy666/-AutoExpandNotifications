@@ -158,7 +158,7 @@ class SnapperService : Service() {
 
         btn.onTap = { if (cropView == null) handleCaptureHideButton() }
         btn.alpha = 0f
-        windowManager.addView(btn, params)
+        try { windowManager.addView(btn, params) } catch (e: Exception) { Log.e(TAG, "addView edge btn failed: ${e.message}"); stopSelf(); return }
         edgeButton = btn
         btn.animate().alpha(1f).setDuration(300).setInterpolator(DecelerateInterpolator()).start()
         Log.d(TAG, "Edge button shown (side=$side)")
@@ -376,7 +376,7 @@ class SnapperService : Service() {
                 }
             }
         }
-        windowManager.addView(view, params)
+        try { windowManager.addView(view, params) } catch (e: Exception) { Log.e(TAG, "addView cropView failed: ${e.message}"); stopSelf(); return }
         cropView = view
         view.requestFocus()
         view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
@@ -426,7 +426,7 @@ class SnapperService : Service() {
         ).apply { gravity = Gravity.TOP or Gravity.START; x = barX; y = barY }
 
         bar.scaleX = 0.8f; bar.scaleY = 0.8f; bar.alpha = 0f
-        windowManager.addView(bar, params)
+        try { windowManager.addView(bar, params) } catch (e: Exception) { Log.e(TAG, "addView actionBar failed: ${e.message}"); stopSelf(); return }
         actionBar = bar
         bar.animate().scaleX(1f).scaleY(1f).alpha(1f)
             .setDuration(200).setInterpolator(DecelerateInterpolator()).start()
@@ -529,7 +529,7 @@ class SnapperService : Service() {
             view.onDoubleTap = { animateDismissSnap(view) }
         }
 
-        windowManager.addView(view, params)
+        try { windowManager.addView(view, params) } catch (e: Exception) { Log.e(TAG, "addView floatSnap failed: ${e.message}"); stopSelf(); return }
         floatingSnaps.add(view)
     }
 
@@ -577,7 +577,7 @@ class SnapperService : Service() {
         ).apply { gravity = Gravity.TOP or Gravity.START; this.x = x; this.y = y }
 
         zone.visibility = android.view.View.GONE
-        windowManager.addView(zone, params)
+        try { windowManager.addView(zone, params) } catch (e: Exception) { Log.e(TAG, "addView trashZone failed: ${e.message}"); stopSelf(); return }
         trashZone = zone
         zone.show()
     }
@@ -651,7 +651,7 @@ class SnapperService : Service() {
         bar.onAction     = { action -> handleSnapAction(target, action) }
         bar.onOutsideTap = { dismissSnapBar() }
         bar.scaleX = 0.85f; bar.scaleY = 0.85f; bar.alpha = 0f
-        windowManager.addView(bar, params)
+        try { windowManager.addView(bar, params) } catch (e: Exception) { Log.e(TAG, "addView snapBar failed: ${e.message}"); stopSelf(); return }
         snapBar = bar; snapBarTarget = target
         bar.animate().scaleX(1f).scaleY(1f).alpha(1f)
             .setDuration(180).setInterpolator(DecelerateInterpolator()).start()
