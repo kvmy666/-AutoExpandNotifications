@@ -290,6 +290,12 @@ class SnapperService : Service() {
     private fun captureAndCrop(selRect: RectF, onDone: (Bitmap?) -> Unit) {
         val viewW = cropView?.width  ?: 0
         val viewH = cropView?.height ?: 0
+        // Read absolute screen position of crop view on the main thread (same as viewW/viewH).
+        // offsetY = status bar height — bitmap covers full screen, crop view starts below status bar.
+        val cropLoc = IntArray(2)
+        cropView?.getLocationOnScreen(cropLoc)
+        val offsetX = cropLoc[0]
+        val offsetY = cropLoc[1]
         // Screencap is already running in the background (started in startPrefetchScreencap).
         // Just hide the crop UI visually so the transition looks clean.
         cropView?.alpha  = 0f
@@ -306,12 +312,16 @@ class SnapperService : Service() {
                 handler.post { restoreUiAfterFailure(); onDone(null) }
                 return@Thread
             }
-            val scaleX = full.width.toFloat()  / viewW.coerceAtLeast(1)
-            val scaleY = full.height.toFloat() / viewH.coerceAtLeast(1)
-            val bx = (selRect.left    * scaleX).toInt().coerceIn(0, full.width  - 1)
-            val by = (selRect.top     * scaleY).toInt().coerceIn(0, full.height - 1)
-            val bw = (selRect.width() * scaleX).toInt().coerceAtLeast(1).coerceAtMost(full.width  - bx)
-            val bh = (selRect.height()* scaleY).toInt().coerceAtLeast(1).coerceAtMost(full.height - by)
+            // Map selection coords (crop-view-local) to full-screen bitmap coords.
+            // screenW/H = full logical screen size; scaleX/Y = bitmap pixels per logical pixel.
+            val screenW = (viewW + offsetX).coerceAtLeast(1)
+            val screenH = (viewH + offsetY).coerceAtLeast(1)
+            val scaleX = full.width.toFloat()  / screenW
+            val scaleY = full.height.toFloat() / screenH
+            val bx = ((offsetX + selRect.left)    * scaleX).toInt().coerceIn(0, full.width  - 1)
+            val by = ((offsetY + selRect.top)     * scaleY).toInt().coerceIn(0, full.height - 1)
+            val bw = (selRect.width()  * scaleX).toInt().coerceAtLeast(1).coerceAtMost(full.width  - bx)
+            val bh = (selRect.height() * scaleY).toInt().coerceAtLeast(1).coerceAtMost(full.height - by)
             val crop = Bitmap.createBitmap(full, bx, by, bw, bh)
             Log.d(TAG, "captureAndCrop: waited=${prefetchDone}, crop=${bw}x${bh}")
             handler.post { onDone(crop) }

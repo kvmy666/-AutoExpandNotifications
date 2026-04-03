@@ -43,6 +43,12 @@ Choose specific apps whose notifications should NOT be auto-expanded. Exclusions
 
 ---
 
+### Bug Fixes — v2.0.2
+- **Crop coordinate fix**: Selection box now maps exactly to the cropped output. Previously the status bar height caused a vertical shift, pulling the status bar into crops and adding extra bottom padding.
+- **Gemini hardening**: `cancelPowerKeyLongPress()` is now called immediately when the chord is detected (not on Power UP), preventing Gemini from activating while Power is still held.
+
+---
+
 ### Master Toggle for Screen Snapper — New in v2.0.1
 A single switch at the top of the Snapper tab to fully disable all Snapper activation methods (hardware chord and edge button) without changing individual settings.
 

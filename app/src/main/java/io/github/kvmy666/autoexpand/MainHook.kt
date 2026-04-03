@@ -240,6 +240,10 @@ class MainHook : IXposedHookLoadPackage {
                                             val gap = ev.downTime - powerDownTime
                                             if (gap > 0L && gap < CHORD_WINDOW_MS) {
                                                 chordTriggered = true
+                                                // Cancel power long-press NOW — Gemini fires while
+                                                // Power is still held, so POWER_UP is too late.
+                                                try { XposedHelpers.callMethod(param.thisObject, "cancelPowerKeyLongPress") } catch (_: Throwable) {}
+                                                try { XposedHelpers.setBooleanField(param.thisObject, "mPowerKeyHandled", true) } catch (_: Throwable) {}
                                                 param.result = 0
                                                 val ctx = getCtx(param)
                                                 if (ctx != null) {
