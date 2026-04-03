@@ -21,8 +21,8 @@ android {
         applicationId = "io.github.kvmy666.autoexpand"
         minSdk = 35
         targetSdk = 36
-        versionCode = 20003
-        versionName = "2.0.3"
+        versionCode = 20004
+        versionName = "2.0.4"
     }
 
     signingConfigs {

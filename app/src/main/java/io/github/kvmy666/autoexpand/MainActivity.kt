@@ -515,11 +515,6 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                         snapperDoubleTap     = snapperDoubleTap,
                         snapperHistLimit     = snapperHistLimit,
                         onMasterEnabledChange = { v ->
-                            if (v && !android.provider.Settings.canDrawOverlays(context)) {
-                                android.widget.Toast.makeText(context, "Overlay permission required for Screen Snapper", android.widget.Toast.LENGTH_LONG).show()
-                                context.startActivity(android.content.Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION, android.net.Uri.parse("package:${context.packageName}")).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
-                                return@SnapperSettingsCard
-                            }
                             snapperMasterEnabled = v
                             prefs.edit().putBoolean("enable_snapper_entirely", v).apply()
                             MainActivity.makePrefsWorldReadable(context)
@@ -732,6 +727,24 @@ private fun SnapperSettingsCard(
     onHistLimitChange    : (String)  -> Unit,
 ) {
     val context = LocalContext.current
+    var hasOverlayPermission by remember { mutableStateOf(android.provider.Settings.canDrawOverlays(context)) }
+
+    // Re-check when user returns from system overlay permission screen
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                hasOverlayPermission = android.provider.Settings.canDrawOverlays(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val grantOverlayIntent = android.content.Intent(
+        android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+        android.net.Uri.parse("package:${context.packageName}")
+    ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
 
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(modifier = Modifier.padding(vertical = 4.dp)) {
@@ -742,11 +755,51 @@ private fun SnapperSettingsCard(
                 color    = MaterialTheme.colorScheme.primary
             )
 
+            // ── Overlay permission warning ────────────────────────────────────
+            if (!hasOverlayPermission) {
+                Card(
+                    onClick  = { context.startActivity(grantOverlayIntent) },
+                    colors   = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
+                ) {
+                    Row(
+                        modifier          = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(
+                            imageVector       = Icons.Filled.Info,
+                            contentDescription = null,
+                            tint              = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Column {
+                            Text(
+                                text  = "Overlay Permission Required",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                            Text(
+                                text  = "Tap here to grant 'Display over other apps' — Snapper will not work without it.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        }
+                    }
+                }
+            }
+
             ToggleRow(
                 title           = stringResource(R.string.snapper_master_toggle_title),
-                description     = stringResource(R.string.snapper_master_toggle_desc),
-                checked         = snapperMasterEnabled,
-                onCheckedChange = onMasterEnabledChange
+                description     = if (hasOverlayPermission) stringResource(R.string.snapper_master_toggle_desc)
+                                  else "Grant overlay permission first",
+                checked         = snapperMasterEnabled && hasOverlayPermission,
+                onCheckedChange = { v ->
+                    if (v && !hasOverlayPermission) {
+                        context.startActivity(grantOverlayIntent)
+                    } else {
+                        onMasterEnabledChange(v)
+                    }
+                }
             )
 
             // Activation method: Software (edge button) | Hardware (chord) | Both
