@@ -7,8 +7,11 @@ import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.RectF
+import android.view.Choreographer
 import android.view.GestureDetector
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.WindowManager
 import android.view.animation.AccelerateInterpolator
@@ -77,11 +80,13 @@ class SnapFloatView(
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        setMeasuredDimension(snapW, snapH)
+        val w = if (MeasureSpec.getMode(widthMeasureSpec)  == MeasureSpec.EXACTLY) MeasureSpec.getSize(widthMeasureSpec)  else snapW
+        val h = if (MeasureSpec.getMode(heightMeasureSpec) == MeasureSpec.EXACTLY) MeasureSpec.getSize(heightMeasureSpec) else snapH
+        setMeasuredDimension(w, h)
     }
 
     override fun onDraw(canvas: Canvas) {
-        canvas.drawBitmap(bitmap, 0f, 0f, bmpPaint)
+        canvas.drawBitmap(bitmap, null, RectF(0f, 0f, width.toFloat(), height.toFloat()), bmpPaint)
     }
 
     // ── Touch ─────────────────────────────────────────────────────────────────────
@@ -95,10 +100,54 @@ class SnapFloatView(
 
     private val dragThreshold = 10f * density
 
+    // ── Choreographer throttle — one WM IPC per vsync frame ──────────────────────
+
+    private var pendingX      = 0
+    private var pendingY      = 0
+    private var choreoPending = false
+    private val choreoCb      = Choreographer.FrameCallback {
+        choreoPending = false
+        val screen = wm.currentWindowMetrics.bounds
+        wmParams.x = pendingX.coerceIn(0, (screen.width()  - wmParams.width).coerceAtLeast(0))
+        wmParams.y = pendingY.coerceIn(0, (screen.height() - wmParams.height).coerceAtLeast(0))
+        wm.updateViewLayout(this, wmParams)
+    }
+
+    // ── Pinch-to-zoom ─────────────────────────────────────────────────────────────
+
+    private var currentScale = 1f
+    private val scaleDetector = ScaleGestureDetector(context,
+        object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                currentScale = (currentScale * detector.scaleFactor).coerceIn(0.1f, 2.0f)
+                val newW = (snapW * currentScale).toInt().coerceAtLeast(1)
+                val newH = (snapH * currentScale).toInt().coerceAtLeast(1)
+                val oldW = wmParams.width
+                val oldH = wmParams.height
+                // Keep focal point fixed in screen coords by shifting the window origin
+                val fx = (detector.focusX / oldW.toFloat()).coerceIn(0f, 1f)
+                val fy = (detector.focusY / oldH.toFloat()).coerceIn(0f, 1f)
+                val screen = wm.currentWindowMetrics.bounds
+                wmParams.x = (wmParams.x + ((oldW - newW) * fx).toInt())
+                    .coerceIn(0, (screen.width()  - newW).coerceAtLeast(0))
+                wmParams.y = (wmParams.y + ((oldH - newH) * fy).toInt())
+                    .coerceIn(0, (screen.height() - newH).coerceAtLeast(0))
+                wmParams.width  = newW
+                wmParams.height = newH
+                wm.updateViewLayout(this@SnapFloatView, wmParams)
+                invalidate()
+                return true
+            }
+        }
+    )
+
     private val gestureDetector = GestureDetector(context,
         object : GestureDetector.SimpleOnGestureListener() {
             override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                if (!wasDragging) onTap?.invoke()
+                if (!wasDragging) {
+                    performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                    onTap?.invoke()
+                }
                 return true
             }
             override fun onDoubleTap(e: MotionEvent): Boolean {
@@ -109,9 +158,23 @@ class SnapFloatView(
     )
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        gestureDetector.onTouchEvent(event)
+        scaleDetector.onTouchEvent(event)
 
-        when (event.action) {
+        // Second finger touches down → kill any active drag immediately
+        if (event.actionMasked == MotionEvent.ACTION_POINTER_DOWN) {
+            isDragging  = false
+            wasDragging = true   // suppress tap after multi-touch gesture
+            return true
+        }
+
+        // Any multi-finger contact: feed gesture detector but skip drag entirely
+        if (event.pointerCount > 1 || scaleDetector.isInProgress) {
+            gestureDetector.onTouchEvent(event)
+            return true
+        }
+
+        gestureDetector.onTouchEvent(event)
+        when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 dragStartRawX = event.rawX
                 dragStartRawY = event.rawY
@@ -126,15 +189,19 @@ class SnapFloatView(
                 if (!isDragging && hypot(dx, dy) > dragThreshold) {
                     isDragging  = true
                     wasDragging = true
+                    performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
                     onDragStart?.invoke()
                 }
                 if (isDragging) {
-                    wmParams.x = (initParamX + dx).toInt()
-                    wmParams.y = (initParamY + dy).toInt()
-                    wm.updateViewLayout(this, wmParams)
+                    pendingX = (initParamX + dx).toInt()
+                    pendingY = (initParamY + dy).toInt()
+                    if (!choreoPending) {
+                        choreoPending = true
+                        Choreographer.getInstance().postFrameCallback(choreoCb)
+                    }
                     onDragUpdate?.invoke(
-                        wmParams.x + snapW / 2f,
-                        wmParams.y + snapH / 2f
+                        pendingX + wmParams.width  / 2f,
+                        pendingY + wmParams.height / 2f
                     )
                 }
             }
@@ -142,8 +209,8 @@ class SnapFloatView(
                 if (isDragging) {
                     isDragging = false
                     onDrop?.invoke(
-                        wmParams.x + snapW / 2f,
-                        wmParams.y + snapH / 2f
+                        wmParams.x + wmParams.width  / 2f,
+                        wmParams.y + wmParams.height / 2f
                     )
                 }
             }

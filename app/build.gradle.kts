@@ -21,8 +21,8 @@ android {
         applicationId = "io.github.kvmy666.autoexpand"
         minSdk = 35
         targetSdk = 36
-        versionCode = 5
-        versionName = "1.2.1"
+        versionCode = 20000
+        versionName = "2.0.0"
     }
 
     signingConfigs {
@@ -70,6 +70,7 @@ dependencies {
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.material3)
     implementation(libs.compose.ui)
+    implementation("androidx.compose.material:material-icons-extended")
     implementation(libs.activity.compose)
     implementation(libs.mlkit.text.recognition)
 }

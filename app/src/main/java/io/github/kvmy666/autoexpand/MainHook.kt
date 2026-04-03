@@ -20,7 +20,8 @@ class MainHook : IXposedHookLoadPackage {
     private val PROVIDER_URI = Uri.parse("content://io.github.kvmy666.autoexpand.prefs")
 
     // Cached prefs
-    private var cachedBoolPrefs = mutableMapOf<String, Boolean>()
+    private var cachedBoolPrefs   = mutableMapOf<String, Boolean>()
+    private var cachedStringPrefs = mutableMapOf<String, String>()
     private var cachedExcludedApps = emptySet<String>()
     private var lastCacheTime = 0L
     private val CACHE_INTERVAL_MS = 2000L
@@ -44,15 +45,17 @@ class MainHook : IXposedHookLoadPackage {
         try {
             val cursor = ctx.contentResolver.query(PROVIDER_URI, null, null, null, null)
             if (cursor != null) {
-                val newBools = mutableMapOf<String, Boolean>()
+                val newBools    = mutableMapOf<String, Boolean>()
+                val newStrings  = mutableMapOf<String, String>()
                 var newExcluded = emptySet<String>()
 
                 while (cursor.moveToNext()) {
-                    val key = cursor.getString(0)
-                    val type = cursor.getString(1)
+                    val key   = cursor.getString(0)
+                    val type  = cursor.getString(1)
                     val value = cursor.getString(2)
                     when (type) {
-                        "bool" -> newBools[key] = value == "1"
+                        "bool"       -> newBools[key] = value == "1"
+                        "string"     -> newStrings[key] = value
                         "string_set" -> if (key == "excluded_apps") {
                             newExcluded = if (value.isEmpty()) emptySet()
                             else value.split("\n").toSet()
@@ -61,7 +64,8 @@ class MainHook : IXposedHookLoadPackage {
                 }
                 cursor.close()
 
-                cachedBoolPrefs = newBools
+                cachedBoolPrefs   = newBools
+                cachedStringPrefs = newStrings
                 cachedExcludedApps = newExcluded
             }
         } catch (_: Throwable) {}
@@ -75,6 +79,11 @@ class MainHook : IXposedHookLoadPackage {
     private fun getExcludedApps(): Set<String> {
         refreshCacheIfNeeded()
         return cachedExcludedApps
+    }
+
+    private fun getIntPref(key: String, default: Int): Int {
+        refreshCacheIfNeeded()
+        return cachedStringPrefs[key]?.toIntOrNull() ?: default
     }
 
     private fun getNotificationPackage(row: Any): String? {
@@ -150,19 +159,52 @@ class MainHook : IXposedHookLoadPackage {
     // blocked by our code, so system_server cannot deadlock.
     // =====================================================
 
-    /** Tracks whether KEYCODE_POWER is currently held down. Volatile for thread safety. */
-    @Volatile private var pwmPowerDown = false
+    // ── Chord state machine ─────────────────────────────────────────────────────
+    //
+    // PHASE 18 LOGCAT EVIDENCE:
+    //   interceptKeyBeforeQueueing fires on tid=168 for POWER key=26 then
+    //   VOLUME_DOWN key=25 (same thread, sequential).
+    //   handleKeyGestureEvent fires on tid=41 AFTER both keys are down. Its
+    //   args[0] is a KeyGestureEvent object (NOT an int) — previous attempts
+    //   that cast args[0] as? Int silently skipped the block entirely.
+    //   Two calls: action=1 (start) then action=2 (complete). Both must be blocked.
+    //   Both hooks confirmed on com.android.server.policy.PhoneWindowManager.
+    //
+    // TWO-HOOK STRATEGY:
+    //   Hook 1 (interceptKeyBeforeQueueing):
+    //     - Power-first press order: VOLUME_DOWN arrives with pwmPowerDown=true →
+    //       consume VOLUME_DOWN (param.result=0) → launch Snapper → chordTriggered=true
+    //     - POWER UP with chordTriggered=true → param.setResult(0) → no screen-off
+    //   Hook 2 (handleKeyGestureEvent):
+    //     - Volume-first press order: gesture fires before interceptKeyBQ catches it
+    //     - Check args[0].toString() for "SCREENSHOT_CHORD" (confirmed string)
+    //     - param.setResult(null) on BOTH action=1 and action=2
+    //     - If !chordTriggered: launch Snapper here instead
+    // ────────────────────────────────────────────────────────────────────────────
+    @Volatile private var chordTriggered  = false
+    @Volatile private var powerDownTime   = 0L
+    @Volatile private var volumeDownTime  = 0L
+    private companion object { const val CHORD_WINDOW_MS = 150L }
 
     private fun handleSystemServer(lpparam: XC_LoadPackage.LoadPackageParam) {
-        // OxygenOS 16 uses PhoneWindowManager (standard AOSP class in system_server).
-        // From logcat: "KEYLOG_PhoneWindowManager: interceptKeyBeforeQueueing" fires before
-        // KeyCombinationManager detects the chord — this is our safe intercept point.
-        val pwmCandidates = listOf(
+        try {
+            installChordHooks(lpparam)
+        } catch (t: Throwable) {
+            Log.e("JeezSnapper", "handleSystemServer crashed: $t")
+        }
+    }
+
+    private fun installChordHooks(lpparam: XC_LoadPackage.LoadPackageParam) {
+        // Phase 18 confirmed both hooks work on PhoneWindowManager.
+        // Try it first; fall back to OplusPhoneWindowManager if not found.
+        val candidates = listOf(
             "com.android.server.policy.PhoneWindowManager",
             "com.oplus.server.policy.OplusPhoneWindowManager"
         )
 
-        for (cls in pwmCandidates) {
+        // ── Hook 1: interceptKeyBeforeQueueing ─────────────────────────────────
+        // Handles Power-first press order and POWER UP screen-off prevention.
+        for (cls in candidates) {
             try {
                 XposedHelpers.findAndHookMethod(
                     cls, lpparam.classLoader,
@@ -170,79 +212,143 @@ class MainHook : IXposedHookLoadPackage {
                     KeyEvent::class.java, Int::class.javaPrimitiveType,
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
-                            // ── CRITICAL SAFETY BOUNDARY ────────────────────────────────────────
-                            // Everything inside this try/catch. If we throw, original runs safely.
                             try {
                                 val ev = param.args[0] as? KeyEvent ?: return
-
                                 when (ev.keyCode) {
-                                    KeyEvent.KEYCODE_POWER -> {
-                                        // Track power-key state — never consume it, just observe
-                                        pwmPowerDown = (ev.action == KeyEvent.ACTION_DOWN)
-                                    }
-                                    KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                                        if (ev.action == KeyEvent.ACTION_DOWN && pwmPowerDown) {
-                                            // ── Bypass check ────────────────────────────────
-                                            // "Full Screenshot" button writes this file so the
-                                            // native screenshot can go through for that one press.
-                                            val bypass = java.io.File("/data/local/tmp/.snapper_bypass")
-                                            if (bypass.exists()) {
-                                                try { bypass.delete() } catch (_: Throwable) {}
-                                                Log.d("JeezSnapper", "bypass flag — native screenshot allowed")
-                                                return  // let original handle it
+                                    KeyEvent.KEYCODE_POWER -> when (ev.action) {
+                                        KeyEvent.ACTION_DOWN -> {
+                                            powerDownTime  = ev.downTime   // uptimeMillis domain
+                                            chordTriggered = false
+                                            // Pass through — do NOT consume
+                                        }
+                                        KeyEvent.ACTION_UP -> {
+                                            if (chordTriggered) {
+                                                chordTriggered = false
+                                                try { XposedHelpers.callMethod(param.thisObject, "cancelPowerKeyLongPress") } catch (_: Throwable) {}
+                                                try { XposedHelpers.setBooleanField(param.thisObject, "mPowerKeyDown", false) } catch (_: Throwable) {}
+                                                param.setResult(0)
+                                                Log.d("JeezSnapper", "POWER_UP consumed — screen stays on")
                                             }
-
-                                            // ── Consume the chord ───────────────────────────
-                                            // Return value 0 means the event is consumed and NOT
-                                            // passed to apps or KeyCombinationManager internals.
-                                            param.result = 0
-
-                                            // ── Launch SnapperService ────────────────────────
-                                            // Get context from PhoneWindowManager's mContext field.
-                                            val ctx: Context? = try {
-                                                XposedHelpers.getObjectField(param.thisObject, "mContext") as? Context
-                                            } catch (_: Throwable) { null }
-
-                                            if (ctx != null) {
-                                                try {
-                                                    ctx.startForegroundService(
-                                                        Intent("io.github.kvmy666.autoexpand.ACTION_CAPTURE").apply {
-                                                            component = ComponentName(
-                                                                "io.github.kvmy666.autoexpand",
-                                                                "io.github.kvmy666.autoexpand.SnapperService"
-                                                            )
-                                                        }
-                                                    )
-                                                    Log.d("JeezSnapper",
-                                                        "P+VolDown chord consumed [$cls] → SnapperService launched")
-                                                } catch (e: Throwable) {
-                                                    Log.e("JeezSnapper", "startForegroundService failed: ${e.message}")
-                                                    // Restore so the native screenshot still works
+                                            // else: pass through — normal screen-off
+                                        }
+                                    }
+                                    KeyEvent.KEYCODE_VOLUME_DOWN -> when (ev.action) {
+                                        KeyEvent.ACTION_DOWN -> {
+                                            volumeDownTime = ev.downTime   // always record
+                                            if (!isFeatureEnabled("snapper_hardware_chord_enabled")) return
+                                            val gap = ev.downTime - powerDownTime
+                                            if (gap > 0L && gap < CHORD_WINDOW_MS) {
+                                                chordTriggered = true
+                                                param.result = 0
+                                                val ctx = getCtx(param)
+                                                if (ctx != null) {
+                                                    try {
+                                                        launchSnapper(ctx)
+                                                        Log.d("JeezSnapper", "Snapper launched (interceptKeyBQ / Power-first)")
+                                                    } catch (e: Throwable) {
+                                                        Log.e("JeezSnapper", "launch failed: ${e.message}")
+                                                        chordTriggered = false
+                                                        param.result = null
+                                                    }
+                                                } else {
+                                                    Log.e("JeezSnapper", "mContext null (interceptKeyBQ)")
+                                                    chordTriggered = false
                                                     param.result = null
                                                 }
-                                            } else {
-                                                Log.e("JeezSnapper", "mContext null on $cls — not blocking chord")
-                                                param.result = null  // restore — don't silently eat the key
                                             }
+                                            // else: gap out of window — pass through normally
+                                        }
+                                        KeyEvent.ACTION_UP -> {
+                                            if (chordTriggered) param.result = 0
+                                            // else: pass through
                                         }
                                     }
                                 }
                             } catch (t: Throwable) {
-                                // ── DEADLOCK PREVENTION ──────────────────────────────────────────
-                                // Log the error and clear any partial result so the original method
-                                // can run normally. System never freezes from our hook.
-                                Log.e("JeezSnapper", "interceptKeyBeforeQueueing hook threw: $t")
+                                Log.e("JeezSnapper", "interceptKeyBQ hook threw: $t")
                                 param.result = null
                             }
                         }
                     }
                 )
-                XposedBridge.log("Snapper: SAFE interceptKeyBeforeQueueing hook registered on $cls")
-                break  // first class that hooks successfully is enough
+                Log.d("JeezSnapper", "Hook1 (interceptKeyBQ) registered on $cls")
+                break
             } catch (e: Throwable) {
-                XposedBridge.log("Snapper: cannot hook $cls.interceptKeyBeforeQueueing: ${e.message}")
+                Log.e("JeezSnapper", "Hook1 FAILED on $cls: $e")
             }
         }
+
+        // ── Hook 2: handleKeyGestureEvent ──────────────────────────────────────
+        // Handles Volume-first press order AND provides a second layer of defense.
+        // args[0] is a KeyGestureEvent object — check toString() for SCREENSHOT_CHORD.
+        // Block BOTH action=1 (start) and action=2 (complete) with setResult(null).
+        for (cls in candidates) {
+            try {
+                val clazz = XposedHelpers.findClass(cls, lpparam.classLoader)
+                val hooks = XposedBridge.hookAllMethods(clazz, "handleKeyGestureEvent",
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            try {
+                                val gestureEvent = param.args.getOrNull(0) ?: return
+                                // args[0] is KeyGestureEvent — use toString() to identify
+                                // SCREENSHOT_CHORD (confirmed "KEY_GESTURE_TYPE_SCREENSHOT_CHORD")
+                                if (!gestureEvent.toString().contains("SCREENSHOT_CHORD")) return
+                                if (!isFeatureEnabled("snapper_hardware_chord_enabled")) return
+
+                                // Block the native screenshot (both action=1 and action=2)
+                                param.setResult(null)
+                                Log.d("JeezSnapper", "handleKeyGestureEvent SCREENSHOT_CHORD blocked")
+
+                                // Launch Snapper only on simultaneous press (Vol-first path)
+                                // Both keys must have been pressed within CHORD_WINDOW_MS of each other.
+                                // volumeDownTime == 0 means Volume was never pressed → single Power press → skip.
+                                val bothSimultaneous = volumeDownTime > 0L &&
+                                    kotlin.math.abs(powerDownTime - volumeDownTime) < CHORD_WINDOW_MS
+                                if (!chordTriggered && bothSimultaneous) {
+                                    chordTriggered = true
+                                    val ctx = getCtx(param)
+                                    if (ctx != null) {
+                                        try {
+                                            launchSnapper(ctx)
+                                            Log.d("JeezSnapper", "Snapper launched (handleKeyGesture / Vol-first)")
+                                        } catch (e: Throwable) {
+                                            Log.e("JeezSnapper", "launch failed (handleKeyGesture): ${e.message}")
+                                            chordTriggered = false
+                                        }
+                                    } else {
+                                        Log.e("JeezSnapper", "mContext null (handleKeyGesture)")
+                                        chordTriggered = false
+                                    }
+                                }
+                            } catch (t: Throwable) {
+                                Log.e("JeezSnapper", "handleKeyGestureEvent hook threw: $t")
+                            }
+                        }
+                    }
+                )
+                if (hooks.isNotEmpty()) {
+                    Log.d("JeezSnapper", "Hook2 (handleKeyGestureEvent) registered ${hooks.size} methods on $cls")
+                    break
+                }
+            } catch (e: Throwable) {
+                Log.e("JeezSnapper", "Hook2 FAILED on $cls: $e")
+            }
+        }
+    }
+
+    private fun getCtx(param: XC_MethodHook.MethodHookParam): Context? = try {
+        XposedHelpers.getObjectField(param.thisObject, "mContext") as? Context
+    } catch (_: Throwable) { null }
+
+    private fun launchSnapper(ctx: Context) {
+        ctx.startForegroundService(
+            Intent("io.github.kvmy666.autoexpand.ACTION_CAPTURE").apply {
+                component = ComponentName(
+                    "io.github.kvmy666.autoexpand",
+                    "io.github.kvmy666.autoexpand.SnapperService"
+                )
+            }
+        )
     }
 
     // =====================================================
@@ -588,6 +694,33 @@ class MainHook : IXposedHookLoadPackage {
                     }
                 }
             })
+        } catch (_: Throwable) {}
+
+        // =====================================================
+        // HEADS-UP MAX LINES enforcement
+        // Target: com.android.internal.widget.MessagingTextMessage.setMaxDisplayedLines
+        // Called from MessagingLinearLayout.onMeasure with Integer.MAX_VALUE when
+        // our module forces full expansion — clamp to user-configured limit.
+        // 0 = unlimited (skip). Wrapped in try/catch — any failure is silent.
+        // =====================================================
+        try {
+            XposedHelpers.findAndHookMethod(
+                "com.android.internal.widget.MessagingTextMessage", lpparam.classLoader,
+                "setMaxDisplayedLines", Int::class.javaPrimitiveType,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        try {
+                            if (!isFeatureEnabled("expand_headsup_enabled")) return
+                            val maxLines = getIntPref("headsup_max_lines", 5)
+                            if (maxLines <= 0) return
+                            val requested = param.args[0] as Int
+                            if (requested > maxLines) {
+                                param.args[0] = maxLines
+                            }
+                        } catch (_: Throwable) {}
+                    }
+                }
+            )
         } catch (_: Throwable) {}
 
         // =====================================================

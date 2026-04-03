@@ -66,6 +66,10 @@
     <string name="snapper_history_limit_desc">Max number of snaps saved to history (0 = disabled)</string>
     <string name="snapper_view_history">View Snap History</string>
 
+    <!-- Heads-up max lines -->
+    <string name="headsup_max_lines_title">Heads-up max lines</string>
+    <string name="headsup_max_lines_desc">Cap visible text lines in expanded heads-up banners (0 = unlimited)</string>
+
     <!-- Snackbar -->
     <string name="reboot_required">Reboot required for changes to take effect</string>
 </resources>

@@ -26,16 +26,16 @@ import androidx.core.content.FileProvider
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import java.io.DataOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import kotlin.math.hypot
 
 class SnapperService : Service() {
 
     companion object {
         const val CHANNEL_ID              = "snapper_service"
-        /** Legacy debug action — behaves identically to ACTION_CAPTURE. */
-        const val ACTION_TEST_CAPTURE     = "io.github.kvmy666.autoexpand.ACTION_TEST_CAPTURE"
         /** Triggered by QS tile or edge button to start a capture. */
         const val ACTION_CAPTURE          = "io.github.kvmy666.autoexpand.ACTION_CAPTURE"
         /** Show the persistent edge button overlay. */
@@ -72,18 +72,29 @@ class SnapperService : Service() {
 
     private var edgeButton: SnapEdgeButton? = null
 
+    // ── Persistent root shell ─────────────────────────────────────────────────────
+
+    private var suProcess: Process? = null
+    private var suStdin:   DataOutputStream? = null
+
+    // ── Screencap prefetch ────────────────────────────────────────────────────────
+
+    @Volatile private var prefetchBitmap: Bitmap? = null
+    @Volatile private var prefetchDone:   Boolean = false
+    private var prefetchThread: Thread? = null
+
     // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
     override fun onCreate() {
         super.onCreate()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        startSuShell()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
         when (intent?.action) {
-            ACTION_TEST_CAPTURE      -> { if (cropView == null) handleCapture() }
-            ACTION_CAPTURE           -> { if (cropView == null) handleCapture() }
+            ACTION_CAPTURE           -> startCapture()
             ACTION_SHOW_EDGE_BUTTON  -> showEdgeButton()
             ACTION_HIDE_EDGE_BUTTON  -> { hideEdgeButton(); stopSelfIfIdle() }
             ACTION_FLOAT_SNAP        -> {
@@ -102,6 +113,9 @@ class SnapperService : Service() {
         dismissTrashZone()
         dismissSnapBar()
         edgeButton?.let { safeRemoveView(it); edgeButton = null }
+        try { suStdin?.writeBytes("exit\n"); suStdin?.flush() } catch (_: Exception) {}
+        suProcess?.destroy()
+        suProcess = null; suStdin = null
         super.onDestroy()
     }
 
@@ -158,20 +172,17 @@ class SnapperService : Service() {
     }
 
     /**
-     * Capture triggered from the edge button.
-     * Hides ALL our windows (not just the button) so no overlay bleeds into screencap.
+     * Capture triggered from the edge button — show crop UI immediately (live overlay).
      */
     private fun handleCaptureHideButton() {
-        hideAllForCapture()
-        Thread { handleCaptureInternal() }.start()
+        startCapture()
     }
 
-    // ── Screenshot capture ────────────────────────────────────────────────────────
+    // ── Screenshot capture (deferred — only runs when user commits to an action) ───
 
     /**
-     * Hides ALL our overlay windows before screencap runs.
-     * Setting alpha=0f on a WindowManager surface causes SurfaceFlinger to treat it as
-     * fully transparent, so it doesn't bleed into the raw screencap output. (Task 5)
+     * Hides ALL our overlay windows so SurfaceFlinger excludes them from screencap.
+     * Called just before running screencap after user action.
      */
     private fun hideAllForCapture() {
         edgeButton?.alpha = 0f
@@ -183,38 +194,133 @@ class SnapperService : Service() {
     private fun restoreAfterCapture() {
         edgeButton?.alpha = 1f
         floatingSnaps.forEach { it.alpha = 1f }
-        // snapBar and trashZone are transient — they re-show on next user interaction
     }
 
-    private fun handleCapture() {
-        hideAllForCapture()   // Task 5: zero artifacts — hide everything before capture
-        Thread { handleCaptureInternal() }.start()
+    private fun restoreUiAfterFailure() {
+        restoreAfterCapture()
+        cropView?.alpha  = 1f
+        actionBar?.alpha = 1f
     }
 
-    private fun handleCaptureInternal() {
-        val t0  = System.currentTimeMillis()
-        val bmp = captureScreen()
-        if (bmp == null) {
-            Log.e(TAG, "Capture failed")
-            handler.post { restoreAfterCapture(); stopSelfIfIdle() }
-            return
+    /**
+     * Hides Snapper overlays, then fires screencap in a background thread immediately
+     * so the bitmap is ready before the user finishes selecting a crop region.
+     * The crop UI is added with FLAG_SECURE so SurfaceFlinger excludes it automatically.
+     */
+    private fun startPrefetchScreencap() {
+        prefetchBitmap = null
+        prefetchDone   = false
+        // Hide our persistent overlays so they don't bleed into the screenshot.
+        edgeButton?.alpha = 0f
+        snapBar?.alpha    = 0f
+        trashZone?.alpha  = 0f
+        floatingSnaps.forEach { it.alpha = 0f }
+        prefetchThread = Thread {
+            // screencap calls SurfaceFlinger which captures the current frame immediately
+            // (within one vsync, ~16 ms). File write/encode takes longer. The crop UI is
+            // shown after a 100 ms delay so it is never in the captured frame.
+            prefetchBitmap = runScreencap()
+            handler.post {
+                edgeButton?.alpha = 1f
+                floatingSnaps.forEach { it.alpha = 1f }
+            }
+            prefetchDone = true
+            Log.d(TAG, "Prefetch screencap done — bitmap=${prefetchBitmap != null}")
+        }.also { it.start() }
+    }
+
+    /** Single entry-point for all capture triggers (chord, edge button, QS tile). */
+    private fun startCapture() {
+        if (cropView != null) return
+        startPrefetchScreencap()
+        // Delay crop UI by 100 ms — screencap grabs its SurfaceFlinger frame in ~16 ms
+        // (one vsync), so the crop overlay is guaranteed to be absent from the capture.
+        handler.postDelayed({ showCropUi() }, 100L)
+    }
+
+    private fun startSuShell() {
+        try {
+            suProcess?.destroy()
+            val p = Runtime.getRuntime().exec("su")
+            suStdin   = DataOutputStream(p.outputStream)
+            suProcess = p
+            Log.d(TAG, "su shell started")
+        } catch (e: Exception) {
+            Log.e(TAG, "su shell init failed: ${e.message}")
+            suProcess = null; suStdin = null
         }
-        Log.d(TAG, "Capture OK in ${System.currentTimeMillis() - t0}ms — ${bmp.width}×${bmp.height}")
-        handler.post { restoreAfterCapture(); showCropUi(bmp) }
     }
 
-    private fun captureScreen(): Bitmap? = try {
-        val f    = File(cacheDir, "snap_${System.currentTimeMillis()}.png")
-        val p    = Runtime.getRuntime().exec(arrayOf("su", "-c", "screencap -p ${f.absolutePath}"))
-        val exit = p.waitFor()
-        Log.d(TAG, "screencap exit=$exit")
-        if (exit != 0 || !f.exists() || f.length() == 0L) { f.delete(); null }
-        else BitmapFactory.decodeFile(f.absolutePath).also { f.delete() }
-    } catch (e: Exception) { Log.e(TAG, "captureScreen: ${e.message}"); null }
+    /** Runs screencap via persistent su shell. Falls back to one-off spawn if shell dies. */
+    private fun runScreencap(): Bitmap? {
+        val snap     = File(cacheDir, "snap_${System.currentTimeMillis()}.png")
+        val sentinel = File(cacheDir, "snap.done")
+        sentinel.delete()
+        try {
+            if (suProcess?.isAlive != true || suStdin == null) startSuShell()
+            val stdin = suStdin ?: throw IOException("no su shell")
+            stdin.writeBytes("screencap -p ${snap.absolutePath}; echo x > ${sentinel.absolutePath}\n")
+            stdin.flush()
+            val deadline = System.currentTimeMillis() + 3000L
+            while (System.currentTimeMillis() < deadline) {
+                if (sentinel.exists()) { sentinel.delete(); break }
+                Thread.sleep(20)
+            }
+            Log.d(TAG, "screencap exit=0 (persistent shell)")
+        } catch (e: Exception) {
+            Log.w(TAG, "persistent shell failed (${e.message}) — spawning fresh su")
+            suProcess?.destroy(); suProcess = null; suStdin = null
+            try {
+                val exit = Runtime.getRuntime().exec(arrayOf("su", "-c", "screencap -p ${snap.absolutePath}")).waitFor()
+                Log.d(TAG, "screencap exit=$exit (fallback)")
+            } catch (ex: Exception) {
+                Log.e(TAG, "fallback screencap failed: ${ex.message}")
+            }
+        }
+        return if (snap.exists() && snap.length() > 0L)
+            BitmapFactory.decodeFile(snap.absolutePath).also { snap.delete() }
+        else { snap.delete(); null }
+    }
+
+    /**
+     * Hides all overlays (including crop UI), runs screencap, crops to [selRect],
+     * then calls [onDone] on the main thread with the cropped bitmap (or null on failure).
+     * By the time su+screencap finishes (~300-500ms), the compositor has long settled.
+     */
+    private fun captureAndCrop(selRect: RectF, onDone: (Bitmap?) -> Unit) {
+        val viewW = cropView?.width  ?: 0
+        val viewH = cropView?.height ?: 0
+        // Screencap is already running in the background (started in startPrefetchScreencap).
+        // Just hide the crop UI visually so the transition looks clean.
+        cropView?.alpha  = 0f
+        actionBar?.alpha = 0f
+        Thread {
+            // Wait for prefetch to finish (max 5 s safety net)
+            val deadline = System.currentTimeMillis() + 5000L
+            while (!prefetchDone && System.currentTimeMillis() < deadline) {
+                Thread.sleep(20)
+            }
+            val full = prefetchBitmap
+            prefetchBitmap = null // release large bitmap ASAP
+            if (full == null) {
+                handler.post { restoreUiAfterFailure(); onDone(null) }
+                return@Thread
+            }
+            val scaleX = full.width.toFloat()  / viewW.coerceAtLeast(1)
+            val scaleY = full.height.toFloat() / viewH.coerceAtLeast(1)
+            val bx = (selRect.left    * scaleX).toInt().coerceIn(0, full.width  - 1)
+            val by = (selRect.top     * scaleY).toInt().coerceIn(0, full.height - 1)
+            val bw = (selRect.width() * scaleX).toInt().coerceAtLeast(1).coerceAtMost(full.width  - bx)
+            val bh = (selRect.height()* scaleY).toInt().coerceAtLeast(1).coerceAtMost(full.height - by)
+            val crop = Bitmap.createBitmap(full, bx, by, bw, bh)
+            Log.d(TAG, "captureAndCrop: waited=${prefetchDone}, crop=${bw}x${bh}")
+            handler.post { onDone(crop) }
+        }.start()
+    }
 
     // ── Crop UI ───────────────────────────────────────────────────────────────────
 
-    private fun showCropUi(bmp: Bitmap) {
+    private fun showCropUi() {
         dismissCropUi()
         // FLAG_NOT_FOCUSABLE intentionally omitted so the window can receive
         // focus-change events (home gesture) and key events (back gesture).
@@ -227,38 +333,43 @@ class SnapperService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START }
 
-        val view = SnapCropView(this, bmp).apply {
+        val view = SnapCropView(this).apply {
             onSelectionComplete = { rect -> onCropSelected(rect) }
             onAdjustStarted     = { dismissActionBar() }
             onCancelRequested   = { handler.post { dismissAll(); stopSelfIfIdle() } }
             onDoubleTapPin      = doubleTapPin@{
-                val rect = cropView?.getSelRect()       ?: return@doubleTapPin
-                val snap = cropView?.getCroppedBitmap() ?: return@doubleTapPin
+                val rect = cropView?.getSelRect() ?: return@doubleTapPin
                 lastSelRect = rect
-                // Temporarily store snap so doFloat() can grab it even after cropView changes
-                handler.post { doFloat() }
+                captureAndCrop(rect) { bmp ->
+                    if (bmp != null) handler.post { doFloat(bmp) }
+                    else handler.post { toast("Capture failed"); restoreUiAfterFailure() }
+                }
             }
-            onFullScreenPin     = fullScreenPin@{
+            onFullScreenPin = {
                 handler.post {
+                    // Dismiss Snapper entirely, then fire the native OS screenshot.
+                    // stopSelfIfIdle() is intentionally deferred — calling it before the
+                    // 300 ms delay kills the service and cancels the postDelayed callback.
+                    prefetchBitmap = null
                     dismissAll()
-                    stopSelfIfIdle()
-                    // Task 2: Write bypass flag then inject the native screenshot key combo.
-                    // Our Xposed hook in SystemUI checks the flag and allows the screenshot through.
-                    Thread {
+                    handler.postDelayed({
                         try {
-                            Runtime.getRuntime().exec(arrayOf("su", "-c",
-                                "touch /data/local/tmp/.snapper_bypass && input keyevent 120"))
-                                .waitFor()
+                            if (suProcess?.isAlive != true || suStdin == null) startSuShell()
+                            suStdin?.writeBytes("input keyevent KEYCODE_SYSRQ\n")
+                            suStdin?.flush()
+                            Log.d(TAG, "Native screenshot triggered via su shell")
                         } catch (e: Exception) {
-                            Log.e(TAG, "Native screenshot passthrough failed: ${e.message}")
+                            Log.e(TAG, "Native screenshot failed: ${e.message}")
                         }
-                    }.start()
+                        stopSelfIfIdle()
+                    }, 300L) // let Snapper UI fully disappear before screencap fires
                 }
             }
         }
         windowManager.addView(view, params)
         cropView = view
         view.requestFocus()
+        view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
         Log.d(TAG, "Crop UI shown")
     }
 
@@ -325,25 +436,32 @@ class SnapperService : Service() {
 
     private fun handleCropAction(action: SnapperAction) {
         Log.d(TAG, "Crop action: $action")
-        when (action) {
-            SnapperAction.COPY  -> exportBitmap(cropView?.getCroppedBitmap(), action) { dismissAll(); stopSelfIfIdle() }
-            SnapperAction.SAVE  -> exportBitmap(cropView?.getCroppedBitmap(), action) { dismissAll(); stopSelfIfIdle() }
-            SnapperAction.SHARE -> exportBitmap(cropView?.getCroppedBitmap(), action) { dismissAll(); stopSelfIfIdle() }
-            SnapperAction.OCR   -> {
-                val bmp = cropView?.getCroppedBitmap() ?: run { toast("No selection"); return }
-                dismissAll()
-                doOcr(bmp) { stopSelfIfIdle() }
+        if (action == SnapperAction.CLOSE) { dismissAll(); stopSelfIfIdle(); return }
+        val selRect = cropView?.getSelRect() ?: return
+        if (action == SnapperAction.FLOAT) {
+            lastSelRect = selRect
+            captureAndCrop(selRect) { bmp ->
+                if (bmp != null) handler.post { doFloat(bmp) }
+                else handler.post { toast("Capture failed"); restoreUiAfterFailure() }
             }
-            SnapperAction.FLOAT -> doFloat()
-            SnapperAction.CLOSE -> { dismissAll(); stopSelfIfIdle() }
+            return
+        }
+        captureAndCrop(selRect) { bmp ->
+            if (bmp == null) { handler.post { toast("Capture failed"); restoreUiAfterFailure() }; return@captureAndCrop }
+            when (action) {
+                SnapperAction.COPY  -> handler.post { exportBitmap(bmp, action) { dismissAll(); stopSelfIfIdle() } }
+                SnapperAction.SAVE  -> handler.post { exportBitmap(bmp, action) { dismissAll(); stopSelfIfIdle() } }
+                SnapperAction.SHARE -> handler.post { exportBitmap(bmp, action) { dismissAll(); stopSelfIfIdle() } }
+                SnapperAction.OCR   -> handler.post { dismissAll(); doOcr(bmp) { stopSelfIfIdle() } }
+                else -> {}
+            }
         }
     }
 
     // ── Float action ──────────────────────────────────────────────────────────────
 
-    private fun doFloat() {
-        val rect = lastSelRect ?: return
-        val bmp  = cropView?.getCroppedBitmap() ?: return
+    private fun doFloat(bmp: Bitmap) {
+        val rect = lastSelRect ?: RectF(0f, 0f, bmp.width.toFloat(), bmp.height.toFloat())
         dismissAll()
         createFloatingSnap(bmp, rect)
         saveToHistory(bmp)
@@ -421,7 +539,7 @@ class SnapperService : Service() {
 
                 val db = SnapHistoryDb(this)
                 db.insert(file.absolutePath, ts, bmp.width, bmp.height)
-                db.prune(limit)
+                db.pruneWithFiles(limit) // deletes both DB records and PNG files
                 db.close()
                 Log.d(TAG, "Snap saved to history: ${file.name}")
             } catch (e: Exception) {

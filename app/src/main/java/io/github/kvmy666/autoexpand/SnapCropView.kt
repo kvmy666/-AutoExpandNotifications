@@ -1,7 +1,6 @@
 package io.github.kvmy666.autoexpand
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -20,10 +19,11 @@ import kotlin.math.sqrt
 /**
  * Full-screen crop view for Screen Snapper.
  *
- * Draws the frozen screenshot behind a dark dim overlay. The user draws a
- * rectangle by dragging; the dim is "punched out" inside the selection.
- * Corner handles and edge strips allow resize without constraints — dragging
- * a corner or edge past its opposite side flips the rectangle naturally.
+ * Draws a dark dim overlay over the live screen. The user draws a rectangle
+ * by dragging; the dim is "punched out" inside the selection, showing the
+ * live screen clearly. Corner handles and edge strips allow resize without
+ * constraints — dragging a corner or edge past its opposite side flips the
+ * rectangle naturally. The actual screencap is deferred until user action.
  *
  * Two permanent bottom buttons are always visible:
  *  • Full Screenshot (left)  — pins the entire capture as a floating snap
@@ -32,10 +32,7 @@ import kotlin.math.sqrt
  * When the window loses focus (home gesture) or the back key is pressed,
  * [onCancelRequested] is invoked to let the service clean up.
  */
-class SnapCropView(
-    context: Context,
-    private val screenshot: Bitmap
-) : View(context) {
+class SnapCropView(context: Context) : View(context) {
 
     // ── Callbacks ────────────────────────────────────────────────────────────────
 
@@ -54,24 +51,6 @@ class SnapCropView(
 
     /** Returns a copy of the current selection rect in view px, or null if none. */
     fun getSelRect(): RectF? = if (hasSel) RectF(selRect) else null
-
-    /** Returns the full frozen screenshot bitmap. */
-    fun getFullBitmap(): Bitmap = screenshot
-
-    /**
-     * Returns the portion of [screenshot] that corresponds to the current selection,
-     * mapped from view-px to bitmap-px coordinates. Returns null if no selection.
-     */
-    fun getCroppedBitmap(): Bitmap? {
-        if (!hasSel || width == 0 || height == 0) return null
-        val scaleX = screenshot.width.toFloat()  / width
-        val scaleY = screenshot.height.toFloat() / height
-        val bx = (selRect.left   * scaleX).toInt().coerceIn(0, screenshot.width  - 1)
-        val by = (selRect.top    * scaleY).toInt().coerceIn(0, screenshot.height - 1)
-        val bw = (selRect.width()  * scaleX).toInt().coerceAtLeast(1).coerceAtMost(screenshot.width  - bx)
-        val bh = (selRect.height() * scaleY).toInt().coerceAtLeast(1).coerceAtMost(screenshot.height - by)
-        return Bitmap.createBitmap(screenshot, bx, by, bw, bh)
-    }
 
     // ── Selection state ───────────────────────────────────────────────────────────
 
@@ -172,7 +151,7 @@ class SnapCropView(
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         bitmapDst.set(0f, 0f, w.toFloat(), h.toFloat())
-        Log.d("JeezSnapper", "CropView: view=${w}×${h}  bitmap=${screenshot.width}×${screenshot.height}")
+        Log.d("JeezSnapper", "CropView: view=${w}×${h}")
 
         // Two 52dp buttons, 16dp gap, 16dp from screen bottom, horizontally centred
         val btnSize = dp(52f)
@@ -187,10 +166,7 @@ class SnapCropView(
     // ── Drawing ───────────────────────────────────────────────────────────────────
 
     override fun onDraw(canvas: Canvas) {
-        // 1. Frozen screenshot
-        canvas.drawBitmap(screenshot, null, bitmapDst, null)
-
-        // 2. Dim with selection punched out
+        // 1. Dim with selection punched out (live screen shows through transparent background)
         val sc = canvas.saveLayer(bitmapDst, null)
         canvas.drawRect(bitmapDst, dimPaint)
         if (hasSel) canvas.drawRect(selRect, clearPaint)
@@ -278,6 +254,7 @@ class SnapCropView(
             MotionEvent.ACTION_DOWN -> {
                 if (btnFullRect.contains(x, y) || btnCloseRect.contains(x, y)) {
                     tapOnButton = true
+                    performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
                 } else {
                     tapOnButton = false
                     if (!doubleTapPending) onDown(x, y)

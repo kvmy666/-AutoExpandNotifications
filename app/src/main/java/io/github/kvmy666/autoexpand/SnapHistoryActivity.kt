@@ -24,6 +24,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -80,6 +82,26 @@ private fun SnapHistoryScreen() {
     val context = LocalContext.current
     val db      = remember { SnapHistoryDb(context) }
     var entries by remember { mutableStateOf(db.getAll()) }
+    var showClearConfirm by remember { mutableStateOf(false) }
+
+    if (showClearConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearConfirm = false },
+            title   = { Text("Clear all snaps?") },
+            text    = { Text("This will permanently delete all ${entries.size} saved snaps from storage.") },
+            confirmButton = {
+                Button(onClick = {
+                    showClearConfirm = false
+                    entries.forEach { File(it.filePath).delete() }
+                    db.deleteAll()
+                    entries = emptyList()
+                }) { Text("Delete all") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -87,11 +109,7 @@ private fun SnapHistoryScreen() {
                 title = { Text("Snap History") },
                 actions = {
                     if (entries.isNotEmpty()) {
-                        TextButton(onClick = {
-                            entries.forEach { File(it.filePath).delete() }
-                            db.deleteAll()
-                            entries = emptyList()
-                        }) {
+                        TextButton(onClick = { showClearConfirm = true }) {
                             Text("Clear all")
                         }
                     }

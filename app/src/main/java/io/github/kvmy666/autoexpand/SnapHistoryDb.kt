@@ -77,9 +77,31 @@ class SnapHistoryDb(context: Context) :
         writableDatabase.delete("snap_history", null, null)
     }
 
-    /** Remove records older than [limit] most recent entries. */
+    /** Remove records older than [limit] most recent entries (DB only — no file deletion). */
     fun prune(limit: Int) {
         if (limit <= 0) return
+        writableDatabase.execSQL(
+            """DELETE FROM snap_history WHERE id NOT IN (
+                SELECT id FROM snap_history ORDER BY timestamp DESC LIMIT $limit
+            )"""
+        )
+    }
+
+    /**
+     * Like [prune] but also deletes the actual PNG files for removed entries.
+     * Call this from background threads only.
+     */
+    fun pruneWithFiles(limit: Int) {
+        if (limit <= 0) return
+        val cursor = readableDatabase.rawQuery(
+            """SELECT file_path FROM snap_history WHERE id NOT IN (
+                SELECT id FROM snap_history ORDER BY timestamp DESC LIMIT $limit
+            )""", null
+        )
+        val paths = mutableListOf<String>()
+        while (cursor.moveToNext()) paths.add(cursor.getString(0))
+        cursor.close()
+        paths.forEach { java.io.File(it).delete() }
         writableDatabase.execSQL(
             """DELETE FROM snap_history WHERE id NOT IN (
                 SELECT id FROM snap_history ORDER BY timestamp DESC LIMIT $limit

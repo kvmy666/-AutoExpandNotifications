@@ -41,6 +41,7 @@ class KeyboardHook : IXposedHookLoadPackage {
     @Volatile private var cachedShortcut2 = ""
     @Volatile private var cachedMaxEntries = 500
     @Volatile private var cachedBtnClipboard = true
+    @Volatile private var cachedBtnPaste     = true
     @Volatile private var cachedBtnSelectAll = true
     @Volatile private var cachedBtnCursor = true
     @Volatile private var cachedBtnShortcut = true
@@ -78,6 +79,8 @@ class KeyboardHook : IXposedHookLoadPackage {
                         cachedMaxEntries = value.toIntOrNull() ?: 500
                     key == "btn_clipboard_enabled" && type == "bool" ->
                         cachedBtnClipboard = value == "1"
+                    key == "btn_paste_enabled" && type == "bool" ->
+                        cachedBtnPaste = value == "1"
                     key == "btn_selectall_enabled" && type == "bool" ->
                         cachedBtnSelectAll = value == "1"
                     key == "btn_cursor_enabled" && type == "bool" ->
@@ -489,7 +492,7 @@ class KeyboardHook : IXposedHookLoadPackage {
         }
 
         // Button 5 — Paste 📥 (last Android clipboard item)
-        if (cachedBtnClipboard) {
+        if (cachedBtnPaste) {
             val btn = makeBtn("📥")
             btn.setOnClickListener {
                 btn.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
