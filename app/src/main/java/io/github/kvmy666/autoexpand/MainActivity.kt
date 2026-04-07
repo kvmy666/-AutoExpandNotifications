@@ -19,16 +19,21 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -70,7 +75,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import android.widget.Toast
+import androidx.core.content.FileProvider
 import java.io.File
 
 class MainActivity : ComponentActivity() {
@@ -396,6 +406,8 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                             )
                         }
                     }
+
+                    DebugCard()
 
                 }
 
@@ -876,6 +888,100 @@ private fun SnapperSettingsCard(
     }
 }
 
+
+@Composable
+private fun DebugCard() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var showDialog by remember { mutableStateOf(false) }
+    var isCapturing by remember { mutableStateOf(false) }
+
+    if (showDialog) {
+        AlertDialog(
+            onDismissRequest = { showDialog = false },
+            title = { Text("Debug Capture") },
+            text = {
+                Text(
+                    "Prepare the test sequence:\n\n" +
+                    "1. Trigger a notification (e.g. receive a message)\n" +
+                    "2. Toggle any setting in this app\n" +
+                    "3. Tap OK — logcat will be captured after 30 seconds\n\n" +
+                    "Root access is required."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showDialog = false
+                    isCapturing = true
+                    scope.launch {
+                        delay(30_000)
+                        val file = withContext(Dispatchers.IO) { DebugLogHelper.capture(context) }
+                        isCapturing = false
+                        if (file != null) {
+                            val uri = FileProvider.getUriForFile(
+                                context,
+                                "${context.packageName}.fileprovider",
+                                file
+                            )
+                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(Intent.createChooser(shareIntent, "Share Debug Log"))
+                        } else {
+                            Toast.makeText(context, "Failed — root access required", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }) { Text("OK — Start") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    Card {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.BugReport,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    text = "Debug Logcat",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+            Text(
+                text = "For Xiaomi / MIUI users — diagnose IPC & SELinux issues. Captures system logs filtered for module activity and permission denials.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (isCapturing) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                    Text("Capturing logcat…", style = MaterialTheme.typography.bodySmall)
+                }
+            } else {
+                Button(
+                    onClick = { showDialog = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Start Debug Capture")
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun ToggleRow(

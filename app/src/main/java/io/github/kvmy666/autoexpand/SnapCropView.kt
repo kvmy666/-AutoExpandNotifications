@@ -55,7 +55,8 @@ class SnapCropView(context: Context) : View(context) {
     // ── Selection state ───────────────────────────────────────────────────────────
 
     private val selRect = RectF()
-    private var hasSel  = false
+    private var hasSel     = false
+    private var isDragging = false
 
     /**
      * Anchor point for DRAWING and corner-drag modes.
@@ -161,6 +162,10 @@ class SnapCropView(context: Context) : View(context) {
         val btnY    = h - dp(16f) - btnSize
         btnFullRect.set(startX,                btnY, startX + btnSize,  btnY + btnSize)
         btnCloseRect.set(startX + btnSize + gap, btnY, startX + totalW, btnY + btnSize)
+
+        // Exclude the entire crop view from system edge-gesture detection so
+        // touches at the screen edges route to us instead of triggering Back.
+        systemGestureExclusionRects = listOf(android.graphics.Rect(0, 0, w, h))
     }
 
     // ── Drawing ───────────────────────────────────────────────────────────────────
@@ -252,6 +257,7 @@ class SnapCropView(context: Context) : View(context) {
 
         when (event.action) {
             MotionEvent.ACTION_DOWN -> {
+                isDragging = true
                 if (btnFullRect.contains(x, y) || btnCloseRect.contains(x, y)) {
                     tapOnButton = true
                     performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
@@ -263,19 +269,23 @@ class SnapCropView(context: Context) : View(context) {
             MotionEvent.ACTION_MOVE -> {
                 if (!tapOnButton && !doubleTapPending) onMove(x, y)
             }
-            MotionEvent.ACTION_UP -> when {
-                tapOnButton -> {
-                    tapOnButton = false
-                    if (btnFullRect.contains(x, y))       onFullScreenPin?.invoke()
-                    else if (btnCloseRect.contains(x, y)) onCancelRequested?.invoke()
+            MotionEvent.ACTION_UP -> {
+                isDragging = false
+                when {
+                    tapOnButton -> {
+                        tapOnButton = false
+                        if (btnFullRect.contains(x, y))       onFullScreenPin?.invoke()
+                        else if (btnCloseRect.contains(x, y)) onCancelRequested?.invoke()
+                    }
+                    doubleTapPending -> {
+                        doubleTapPending = false
+                        onDoubleTapPin?.invoke()
+                    }
+                    else -> onUp(x, y)
                 }
-                doubleTapPending -> {
-                    doubleTapPending = false
-                    onDoubleTapPin?.invoke()
-                }
-                else -> onUp(x, y)
             }
             MotionEvent.ACTION_CANCEL -> {
+                isDragging       = false
                 tapOnButton      = false
                 doubleTapPending = false
                 dragMode         = DragMode.NONE
@@ -389,7 +399,12 @@ class SnapCropView(context: Context) : View(context) {
      */
     override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
         super.onWindowFocusChanged(hasWindowFocus)
-        if (!hasWindowFocus) onCancelRequested?.invoke()
+        if (!hasWindowFocus && !isDragging) onCancelRequested?.invoke()
+    }
+
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        systemGestureExclusionRects = emptyList()
     }
 
     /** Intercepts the back key/gesture while this window is focused. */

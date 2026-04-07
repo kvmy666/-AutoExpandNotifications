@@ -3,7 +3,6 @@ package io.github.kvmy666.autoexpand
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -12,17 +11,16 @@ import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
+import de.robv.android.xposed.XSharedPreferences
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 
 class MainHook : IXposedHookLoadPackage {
 
     private var appContext: Context? = null  // captured from SystemUI process
-    private val PROVIDER_URI = Uri.parse("content://io.github.kvmy666.autoexpand.prefs")
 
-    // Cached prefs
-    private var cachedBoolPrefs   = mutableMapOf<String, Boolean>()
-    private var cachedStringPrefs = mutableMapOf<String, String>()
-    private var cachedExcludedApps = emptySet<String>()
+    // XSharedPreferences — reads prefs XML directly; survives app-process death (Xiaomi SmartPower)
+    private val xprefs = XSharedPreferences("io.github.kvmy666.autoexpand", "prefs")
+
     private var lastCacheTime = 0L
     private val CACHE_INTERVAL_MS = 2000L
 
@@ -36,54 +34,26 @@ class MainHook : IXposedHookLoadPackage {
     // Guard: suppress setExpandedWhenPinned sync during setHeadsUp init
     @Volatile private var inSetHeadsUp = false
 
-    private fun refreshCacheIfNeeded() {
-        val ctx = appContext ?: return
+    private fun reloadIfStale() {
         val now = System.currentTimeMillis()
         if (now - lastCacheTime < CACHE_INTERVAL_MS) return
         lastCacheTime = now
-
-        try {
-            val cursor = ctx.contentResolver.query(PROVIDER_URI, null, null, null, null)
-            if (cursor != null) {
-                val newBools    = mutableMapOf<String, Boolean>()
-                val newStrings  = mutableMapOf<String, String>()
-                var newExcluded = emptySet<String>()
-
-                while (cursor.moveToNext()) {
-                    val key   = cursor.getString(0)
-                    val type  = cursor.getString(1)
-                    val value = cursor.getString(2)
-                    when (type) {
-                        "bool"       -> newBools[key] = value == "1"
-                        "string"     -> newStrings[key] = value
-                        "string_set" -> if (key == "excluded_apps") {
-                            newExcluded = if (value.isEmpty()) emptySet()
-                            else value.split("\n").toSet()
-                        }
-                    }
-                }
-                cursor.close()
-
-                cachedBoolPrefs   = newBools
-                cachedStringPrefs = newStrings
-                cachedExcludedApps = newExcluded
-            }
-        } catch (_: Throwable) {}
+        try { xprefs.reload() } catch (_: Throwable) {}
     }
 
     private fun isFeatureEnabled(key: String): Boolean {
-        refreshCacheIfNeeded()
-        return cachedBoolPrefs[key] ?: true
+        reloadIfStale()
+        return try { xprefs.getBoolean(key, true) } catch (_: Throwable) { true }
     }
 
     private fun getExcludedApps(): Set<String> {
-        refreshCacheIfNeeded()
-        return cachedExcludedApps
+        reloadIfStale()
+        return try { xprefs.getStringSet("excluded_apps", emptySet()) ?: emptySet() } catch (_: Throwable) { emptySet() }
     }
 
     private fun getIntPref(key: String, default: Int): Int {
-        refreshCacheIfNeeded()
-        return cachedStringPrefs[key]?.toIntOrNull() ?: default
+        reloadIfStale()
+        return try { xprefs.getString(key, null)?.toIntOrNull() ?: default } catch (_: Throwable) { default }
     }
 
     private fun getNotificationPackage(row: Any): String? {
@@ -386,7 +356,7 @@ class MainHook : IXposedHookLoadPackage {
                                 System.currentTimeMillis().toString()
                             )
                         } catch (_: Throwable) {}
-                        try { refreshCacheIfNeeded() } catch (_: Throwable) {}
+                        try { reloadIfStale() } catch (_: Throwable) {}
                     }
                 }
             )

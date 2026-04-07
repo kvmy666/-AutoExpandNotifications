@@ -2,4 +2,5 @@
 <paths>
     <cache-path name="snaps" path="snaps/" />
     <files-path name="snaps_history" path="snaps/history/" />
+    <external-files-path name="debug_logs" path="." />
 </paths>
