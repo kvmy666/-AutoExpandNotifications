@@ -21,8 +21,11 @@ android {
         applicationId = "io.github.kvmy666.autoexpand"
         minSdk = 35
         targetSdk = 36
-        versionCode = 20006
-        versionName = "2.0.6"
+        versionCode = 30000
+        versionName = "3.0.0"
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
     }
 
     signingConfigs {
@@ -42,9 +45,16 @@ android {
     }
 
     buildTypes {
+        debug {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             signingConfig = signingConfigs.getByName("release")
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
 
@@ -72,5 +82,5 @@ dependencies {
     implementation(libs.compose.ui)
     implementation("androidx.compose.material:material-icons-extended")
     implementation(libs.activity.compose)
-    implementation(libs.mlkit.text.recognition)
+    implementation("com.google.android.gms:play-services-mlkit-text-recognition:19.0.1")
 }

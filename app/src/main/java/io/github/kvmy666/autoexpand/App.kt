@@ -14,14 +14,21 @@ class App : Application() {
 
     private fun createNotificationChannels() {
         val manager = getSystemService(NotificationManager::class.java)
-        val channel = NotificationChannel(
+        manager.createNotificationChannel(NotificationChannel(
             SnapperService.CHANNEL_ID,
             "Screen Snapper",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
             description = "Keeps the Screen Snapper service running"
             setShowBadge(false)
-        }
-        manager.createNotificationChannel(channel)
+        })
+        manager.createNotificationChannel(NotificationChannel(
+            StatusBarZonesService.CHANNEL_ID,
+            "Status Bar Zones",
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = "Keeps the tap zones service running"
+            setShowBadge(false)
+        })
     }
 }

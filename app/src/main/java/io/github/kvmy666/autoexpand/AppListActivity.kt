@@ -167,6 +167,7 @@ private fun AppListScreen(prefs: SharedPreferences, onBack: () -> Unit) {
                             }
                             prefs.edit().putStringSet("excluded_apps", excludedApps).apply()
                             MainActivity.makePrefsWorldReadable(context)
+                            MainActivity.broadcastPref(context, "excluded_apps", excludedApps.joinToString("\n"))
                         }
 
                         Row(
