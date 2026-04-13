@@ -5,7 +5,6 @@ import android.content.Context
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.inputmethodservice.InputMethodService
-import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
@@ -25,13 +24,16 @@ import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
+import java.io.File
 import java.util.concurrent.Executors
+import org.json.JSONObject
 
 class KeyboardHook : IXposedHookLoadPackage {
 
     private val TAG = "AutoExpand"
     private val GBOARD_PKG = "com.google.android.inputmethod.latin"
-    private val PROVIDER_URI = Uri.parse("content://io.github.kvmy666.autoexpand.prefs")
+    private val PREFS_FILE = "/data/local/tmp/jeez_prefs.json"
+    @Volatile private var filePrefCache: Map<String, String>? = null
     private val dbExecutor = Executors.newSingleThreadExecutor()
 
     // Cached prefs (refreshed every 2s)
@@ -61,36 +63,24 @@ class KeyboardHook : IXposedHookLoadPackage {
         if (now - lastCacheTime < CACHE_INTERVAL_MS) return
         lastCacheTime = now
         try {
-            val cursor = ctx.contentResolver.query(PROVIDER_URI, null, null, null, null) ?: return
-            while (cursor.moveToNext()) {
-                val key = cursor.getString(0)
-                val type = cursor.getString(1)
-                val value = cursor.getString(2)
-                when {
-                    key == "keyboard_enhancer_enabled" && type == "bool" ->
-                        cachedEnabled = value == "1"
-                    key == "toolbar_height_multiplier" && type == "string" ->
-                        cachedMultiplier = value.toFloatOrNull() ?: 1.0f
-                    key == "shortcut_text_1" && type == "string" ->
-                        cachedShortcut1 = value
-                    key == "shortcut_text_2" && type == "string" ->
-                        cachedShortcut2 = value
-                    key == "clipboard_max_entries" && type == "string" ->
-                        cachedMaxEntries = value.toIntOrNull() ?: 500
-                    key == "btn_clipboard_enabled" && type == "bool" ->
-                        cachedBtnClipboard = value == "1"
-                    key == "btn_paste_enabled" && type == "bool" ->
-                        cachedBtnPaste = value == "1"
-                    key == "btn_selectall_enabled" && type == "bool" ->
-                        cachedBtnSelectAll = value == "1"
-                    key == "btn_cursor_enabled" && type == "bool" ->
-                        cachedBtnCursor = value == "1"
-                    key == "btn_shortcut_enabled" && type == "bool" ->
-                        cachedBtnShortcut = value == "1"
-                }
-            }
-            cursor.close()
+            val text = File(PREFS_FILE).readText()
+            val json = JSONObject(text)
+            val map = mutableMapOf<String, String>()
+            for (key in json.keys()) map[key] = json.getString(key)
+            filePrefCache = map
         } catch (_: Throwable) {}
+        filePrefCache?.let { cache ->
+            cachedEnabled      = cache["keyboard_enhancer_enabled"] == "1"
+            cachedMultiplier   = cache["toolbar_height_multiplier"]?.toFloatOrNull() ?: 1.0f
+            cachedShortcut1    = cache["shortcut_text_1"] ?: cachedShortcut1
+            cachedShortcut2    = cache["shortcut_text_2"] ?: cachedShortcut2
+            cachedMaxEntries   = cache["clipboard_max_entries"]?.toIntOrNull() ?: cachedMaxEntries
+            cachedBtnClipboard = cache["btn_clipboard_enabled"] == "1"
+            cachedBtnPaste     = cache["btn_paste_enabled"] == "1"
+            cachedBtnSelectAll = cache["btn_selectall_enabled"] == "1"
+            cachedBtnCursor    = cache["btn_cursor_enabled"] == "1"
+            cachedBtnShortcut  = cache["btn_shortcut_enabled"] == "1"
+        }
     }
 
     // ─────────────────────────────────────────────────────
@@ -610,8 +600,18 @@ class KeyboardHook : IXposedHookLoadPackage {
                             setPadding((16f * dp).toInt(), (32f * dp).toInt(), (16f * dp).toInt(), (32f * dp).toInt())
                         })
                     } else {
-                        entries.forEach { entry ->
+                        val displayLimit = 50
+                        entries.take(displayLimit).forEach { entry ->
                             buildClipboardRow(ctx, dp, entry, db, ims, popup, listContainer) { reloadList() }
+                        }
+                        if (entries.size > displayLimit) {
+                            listContainer.addView(TextView(ctx).apply {
+                                text = "…and ${entries.size - displayLimit} more items"
+                                setTextColor(Color.parseColor("#88FFFFFF"))
+                                textSize = 13f
+                                gravity = Gravity.CENTER
+                                setPadding(0, (12f * dp).toInt(), 0, (12f * dp).toInt())
+                            })
                         }
                     }
                 }
