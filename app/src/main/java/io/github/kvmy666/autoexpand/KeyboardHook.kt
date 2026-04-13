@@ -70,16 +70,18 @@ class KeyboardHook : IXposedHookLoadPackage {
             filePrefCache = map
         } catch (_: Throwable) {}
         filePrefCache?.let { cache ->
-            cachedEnabled      = cache["keyboard_enhancer_enabled"] == "1"
-            cachedMultiplier   = cache["toolbar_height_multiplier"]?.toFloatOrNull() ?: 1.0f
+            // String/float/int prefs: keep cached value if key absent
+            cachedMultiplier   = cache["toolbar_height_multiplier"]?.toFloatOrNull() ?: cachedMultiplier
             cachedShortcut1    = cache["shortcut_text_1"] ?: cachedShortcut1
             cachedShortcut2    = cache["shortcut_text_2"] ?: cachedShortcut2
             cachedMaxEntries   = cache["clipboard_max_entries"]?.toIntOrNull() ?: cachedMaxEntries
-            cachedBtnClipboard = cache["btn_clipboard_enabled"] == "1"
-            cachedBtnPaste     = cache["btn_paste_enabled"] == "1"
-            cachedBtnSelectAll = cache["btn_selectall_enabled"] == "1"
-            cachedBtnCursor    = cache["btn_cursor_enabled"] == "1"
-            cachedBtnShortcut  = cache["btn_shortcut_enabled"] == "1"
+            // Boolean prefs: use ?. so a missing key keeps the default (true) instead of flipping to false
+            cachedEnabled      = cache["keyboard_enhancer_enabled"]?.let { it == "1" } ?: cachedEnabled
+            cachedBtnClipboard = cache["btn_clipboard_enabled"]?.let { it == "1" } ?: cachedBtnClipboard
+            cachedBtnPaste     = cache["btn_paste_enabled"]?.let { it == "1" } ?: cachedBtnPaste
+            cachedBtnSelectAll = cache["btn_selectall_enabled"]?.let { it == "1" } ?: cachedBtnSelectAll
+            cachedBtnCursor    = cache["btn_cursor_enabled"]?.let { it == "1" } ?: cachedBtnCursor
+            cachedBtnShortcut  = cache["btn_shortcut_enabled"]?.let { it == "1" } ?: cachedBtnShortcut
         }
     }
 
