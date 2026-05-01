@@ -27,8 +27,10 @@ class MainHook : IXposedHookLoadPackage {
     private var lastCacheTime = 0L
     private val CACHE_INTERVAL_MS = 2000L
 
-    private val PREFS_FILE     = "/data/local/tmp/jeez_prefs.json"
-    private val HEARTBEAT_FILE = "/data/local/tmp/jeez_heartbeat"
+    private val PREFS_FILE     = "/data/local/tmp/tweaks_prefs.json"
+    private val HEARTBEAT_FILE = "/data/local/tmp/tweaks_heartbeat"
+    private val HUD_TAG        = "TweaksHud"
+    private fun ts() = System.nanoTime() / 1_000_000L
     @Volatile private var filePrefCache: Map<String, String>? = null
     @Volatile private var fileObserver: FileObserver? = null
 
@@ -36,6 +38,7 @@ class MainHook : IXposedHookLoadPackage {
     private val zoneHandler by lazy { android.os.Handler(android.os.Looper.getMainLooper()) }
     @Volatile private var activeZoneSide: String? = null
     @Volatile private var zoneDownY = 0f
+    @Volatile private var zoneDownRawY = 0f
     private val leftZoneTracker  by lazy { ZoneTapTracker("left") }
     private val rightZoneTracker by lazy { ZoneTapTracker("right") }
 
@@ -88,11 +91,21 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     private fun dispatchZoneGesture(side: String, suffix: String, ctx: android.content.Context) {
-        val actionKey = getStringPref("zones_${side}_${suffix}_action", "no_action")
+        val actionKey    = getStringPref("zones_${side}_${suffix}_action", "no_action")
         if (actionKey == "no_action") return
-        val pkg    = getStringPref("zones_${side}_open_app_pkg", "")
-        val action = ZoneAction.fromKey(actionKey, pkg)
-        Log.d("JeezZones", "hook gesture $side/$suffix → $actionKey")
+        val pkg          = getStringPref("zones_${side}_open_app_pkg", "")
+        val shortcutData = getStringPref("zones_${side}_${suffix}_shortcut", "")
+        val action       = ZoneAction.fromKey(actionKey, pkg, shortcutData)
+        Log.d("Zones", "hook gesture $side/$suffix → $actionKey")
+        // Write hook-side diag for non-technical user debugging (read by DebugLogHelper)
+        if (actionKey == "launch_shortcut") {
+            try {
+                java.io.File("/data/local/tmp/tweaks_hook_diag.txt").writeText(
+                    "gesture=$side/$suffix\nactionKey=$actionKey\n" +
+                    "shortcutData=$shortcutData\nactionType=${action::class.simpleName}\n"
+                )
+            } catch (_: Throwable) {}
+        }
         if (getStringPref("zones_haptic_enabled", "1") == "1") {
             try {
                 val vib = ctx.getSystemService(android.content.Context.VIBRATOR_SERVICE)
@@ -114,9 +127,6 @@ class MainHook : IXposedHookLoadPackage {
     @Volatile private var f1SwipeTime = 0L
     @Volatile private var f1CurrentRow: Any? = null
 
-    // Guard: suppress setExpandedWhenPinned sync during setHeadsUp init
-    @Volatile private var inSetHeadsUp = false
-
     private fun reloadIfStale() {
         val now = System.currentTimeMillis()
         if (now - lastCacheTime < CACHE_INTERVAL_MS) return
@@ -132,25 +142,24 @@ class MainHook : IXposedHookLoadPackage {
             val map = mutableMapOf<String, String>()
             for (key in json.keys()) map[key] = json.getString(key)
             filePrefCache = map
-            Log.d("JeezSnapper", "DIAG: file prefs loaded, keys=${map.size}")
         } catch (e: Throwable) {
-            Log.d("JeezSnapper", "DIAG: file prefs load failed: $e")
+            Log.d("Snapper", "DIAG: file prefs load failed: $e")
         }
     }
 
     private fun startFileObserver() {
         try {
-            val fileName = "jeez_prefs.json"
+            val fileName = "tweaks_prefs.json"
             val observer = object : FileObserver(File("/data/local/tmp"), CLOSE_WRITE or MOVED_TO) {
                 override fun onEvent(event: Int, path: String?) {
-                    if (path == fileName) { Log.d("JeezSnapper", "DIAG: FileObserver fired"); loadFilePrefs() }
+                    if (path == fileName) loadFilePrefs()
                 }
             }
             observer.startWatching()
             fileObserver = observer
-            Log.d("JeezSnapper", "DIAG: FileObserver started")
+            Log.d("Snapper", "DIAG: FileObserver started")
         } catch (e: Throwable) {
-            Log.d("JeezSnapper", "DIAG: FileObserver start failed: $e")
+            Log.d("Snapper", "DIAG: FileObserver start failed: $e")
         }
     }
 
@@ -159,21 +168,29 @@ class MainHook : IXposedHookLoadPackage {
             val file = File(HEARTBEAT_FILE)
             while (true) {
                 try { file.writeText(System.currentTimeMillis().toString()) }
-                catch (e: Throwable) { Log.d("JeezSnapper", "DIAG: heartbeat write failed: $e") }
+                catch (e: Throwable) { Log.d("Snapper", "DIAG: heartbeat write failed: $e") }
                 Thread.sleep(60_000)
             }
         }
         t.isDaemon = true
-        t.name = "jeez-heartbeat"
+        t.name = "tweaks-heartbeat"
         t.start()
     }
 
     private fun isFeatureEnabled(key: String): Boolean {
         reloadIfStale()
         val fileVal = filePrefCache?.get(key)
-        Log.d("JeezSnapper", "DIAG: isFeatureEnabled($key) fileVal=$fileVal xprefsCanRead=${xprefs.file.canRead()}")
         fileVal?.let { return it == "1" }
         return try { xprefs.getBoolean(key, true) } catch (_: Throwable) { true }
+    }
+
+    // Kill-switches default OFF (opt-in). Using isFeatureEnabled here would default ON,
+    // disabling every HUD hook for any user whose prefs file hasn't been written with the key yet.
+    private fun isKillSwitchActive(key: String): Boolean {
+        reloadIfStale()
+        val fileVal = filePrefCache?.get(key)
+        fileVal?.let { return it == "1" }
+        return try { xprefs.getBoolean(key, false) } catch (_: Throwable) { false }
     }
 
     private fun getExcludedApps(): Set<String> {
@@ -200,6 +217,82 @@ class MainHook : IXposedHookLoadPackage {
         }
     }
 
+    /**
+     * True if the row's SBN carries FLAG_GROUP_SUMMARY. Robust on first paint —
+     * doesn't depend on children being attached yet or on NotificationChildrenContainer
+     * hooks firing (some OEM SystemUIs use a different class name).
+     */
+    private fun isGroupSummaryRow(row: Any): Boolean = try {
+        val entry = XposedHelpers.callMethod(row, "getEntry")
+        val sbn = XposedHelpers.callMethod(entry, "getSbn")
+        val notif = XposedHelpers.callMethod(sbn, "getNotification") as android.app.Notification
+        val isSummary = (notif.flags and android.app.Notification.FLAG_GROUP_SUMMARY) != 0
+        // Only treat as a "real" group when children are actually attached.
+        // WhatsApp etc. tag single-chat HUDs with FLAG_GROUP_SUMMARY before any
+        // child arrives — those should auto-expand like normal notifications.
+        isSummary && getRowChildCount(row) > 0
+    } catch (_: Throwable) { false }
+
+    /** True when the given row is a child of a heads-up parent. */
+    private fun parentHeadsUp(child: Any): Boolean = try {
+        val parent = XposedHelpers.getObjectField(child, "mNotificationParent") ?: return false
+        XposedHelpers.getBooleanField(parent, "mIsHeadsUp")
+    } catch (_: Throwable) { false }
+
+    /** Resource (entry, package) for a view id, or (null, null). */
+    private fun resourceEntryAndPkg(view: View): Pair<String?, String?> {
+        if (view.id == View.NO_ID) return null to null
+        val res = view.context.resources
+        val entry = try { res.getResourceEntryName(view.id) } catch (_: Throwable) { null }
+        val pkg   = try { res.getResourcePackageName(view.id) } catch (_: Throwable) { null }
+        return entry to pkg
+    }
+
+    private fun getRowChildCount(row: Any): Int = try {
+        val container = XposedHelpers.getObjectField(row, "mChildrenContainer")
+        if (container != null) XposedHelpers.callMethod(container, "getNotificationChildCount") as? Int ?: 0 else 0
+    } catch (_: Throwable) { 0 }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun getNotificationChildren(row: Any): List<View> {
+        return try {
+            val container = XposedHelpers.getObjectField(row, "mChildrenContainer") ?: return emptyList()
+            (try { XposedHelpers.callMethod(container, "getAttachedChildren") } catch (_: Throwable) { null } as? List<View>)
+                ?: (try { XposedHelpers.callMethod(container, "getNotificationChildren") } catch (_: Throwable) { null } as? List<View>)
+                ?: emptyList()
+        } catch (_: Throwable) { emptyList() }
+    }
+
+    /** Strict variant: must be the actual NotificationExpandButton with id android:expand_button.
+     *  Skips alternate_expand_target (which on some OEMs routes to the row's launch click). */
+    private fun findStrictExpandButton(view: View): View? = findExpandButtonImpl(view, strict = true)
+
+    /** DFS for the system expand button on a row, skipping nested rows so we
+     *  click the parent's button rather than a child's. */
+    private fun findExpandButton(view: View): View? = findExpandButtonImpl(view, strict = false)
+
+    private fun findExpandButtonImpl(view: View, strict: Boolean): View? {
+        try {
+            if (view.visibility != View.VISIBLE) return null
+            val (entry, pkg) = resourceEntryAndPkg(view)
+            val matches = pkg == "android" && view.hasOnClickListeners() && when {
+                strict -> entry == "expand_button" &&
+                    view.javaClass.name == "com.android.internal.widget.NotificationExpandButton"
+                else -> entry == "expand_button" || entry == "alternate_expand_target"
+            }
+            if (matches) return view
+            if (view is android.view.ViewGroup) {
+                for (i in 0 until view.childCount) {
+                    val child = view.getChildAt(i) ?: continue
+                    if (child.javaClass.name.endsWith("ExpandableNotificationRow")) continue
+                    val found = findExpandButtonImpl(child, strict)
+                    if (found != null) return found
+                }
+            }
+        } catch (_: Throwable) {}
+        return null
+    }
+
     private fun getNotificationPackageFromContentView(view: Any): String? {
         return try {
             val row = XposedHelpers.getObjectField(view, "mContainingNotification")
@@ -210,9 +303,75 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     private fun shouldSkipNotification(featureKey: String, pkg: String?): Boolean {
+        // Master kill-switch for HUD hooks. When ON, every HUD-expand path is skipped
+        // so OEM HUD layouts remain untouched (escape hatch for ROMs where our pass
+        // produces a blank or oversized HUD).
+        // Note: the disable_headsup_hooks_enabled kill-switch is NOT consulted here.
+        // It only gates the grouped-HUD expand path (see expandGroupIfNeeded and the
+        // addNotification HU branch). Single notifications still expand normally when
+        // the kill-switch is ON — only group parents stay at OEM-default (collapsed).
         if (!isFeatureEnabled(featureKey)) return true
         if (pkg != null && pkg in getExcludedApps()) return true
         return false
+    }
+
+    /**
+     * State-aware grouped HUD pass. Runs once per HUD lifetime.
+     * Idempotent: only clicks the parent arrow when collapsed, only clicks a child arrow
+     * when expanded — so re-entry from setHeadsUp re-fires can't bounce the state.
+     */
+    private fun expandGroupIfNeeded(rowView: View, rowObj: Any, pkg: String?) {
+        // Master kill-switch: when ON, leave grouped HUDs at OEM default (collapsed parent).
+        // Singles bypass this function entirely, so their auto-expand path is unaffected.
+        if (isKillSwitchActive("disable_headsup_hooks_enabled")) return
+        val rowId = System.identityHashCode(rowObj)
+        val count = getRowChildCount(rowObj)
+        Log.d(HUD_TAG, "[${ts()}] expandGroupIfNeeded ENTER row=$rowId pkg=$pkg count=$count")
+        if (count == 0) {
+            Log.d(HUD_TAG, "[${ts()}] not grouped yet row=$rowId pkg=$pkg (deferring to addNotification)")
+            return
+        }
+        XposedHelpers.setAdditionalInstanceField(rowObj, "aeIsGroup", true)
+
+        val parentExpanded = try {
+            XposedHelpers.callMethod(rowObj, "isExpanded") as? Boolean
+        } catch (_: Throwable) { null } ?: false
+        if (!parentExpanded) {
+            // Direct state set is more reliable on OPlus HUDs than performClick — the HUD
+            // overlay sometimes ignores button-click expansion until first user interaction.
+            val ok = try {
+                XposedHelpers.callMethod(rowObj, "setUserExpanded", true, true); true
+            } catch (_: Throwable) {
+                try { XposedHelpers.callMethod(rowObj, "setUserExpanded", true); true } catch (_: Throwable) { false }
+            }
+            if (!ok) findExpandButton(rowView)?.performClick()
+        }
+        Log.d(HUD_TAG, "[${ts()}] grouped row=$rowId pkg=$pkg children=$count parentWasExpanded=$parentExpanded")
+
+        var stateSet = 0
+        var clicked = 0
+        for (child in getNotificationChildren(rowObj)) {
+            val cid = System.identityHashCode(child)
+            val before = try { (XposedHelpers.callMethod(child, "getIntrinsicHeight") as? Int) ?: -1 } catch (_: Throwable) { -1 }
+            val ok = collapseChildNoAnim(child)
+            if (ok) stateSet++
+            else { findStrictExpandButton(child)?.performClick(); clicked++ }
+            val after = try { (XposedHelpers.callMethod(child, "getIntrinsicHeight") as? Int) ?: -1 } catch (_: Throwable) { -1 }
+            Log.d(HUD_TAG, "[${ts()}] expandGroupIfNeeded child=$cid ok=$ok h=$before→$after")
+        }
+        Log.d(HUD_TAG, "[${ts()}] children collapsed row=$rowId stateSet=$stateSet clicked=$clicked total=$count")
+    }
+
+    /** Direct state-setter on a child row. No animation. Returns true if call landed. */
+    private fun collapseChildNoAnim(child: Any): Boolean {
+        try {
+            XposedHelpers.callMethod(child, "setUserExpanded", false, false)
+            return true
+        } catch (_: Throwable) {}
+        return try {
+            XposedHelpers.callMethod(child, "setUserExpanded", false)
+            true
+        } catch (_: Throwable) { false }
     }
 
     /**
@@ -222,21 +381,22 @@ class MainHook : IXposedHookLoadPackage {
      */
     private fun toggleHeadsUpExpandState(row: Any) {
         try {
+            // Grouped HUDs are handled exclusively through the system arrow.
+            val isGroup = XposedHelpers.getAdditionalInstanceField(row, "aeIsGroup") as? Boolean ?: false
+            if (isGroup) {
+                (row as? View)?.let { findExpandButton(it)?.performClick() }
+                return
+            }
             val isCollapsed = XposedHelpers.getAdditionalInstanceField(row, "aeCollapsed") as? Boolean ?: false
             val newExpanded = isCollapsed // collapsed→expand, expanded→collapse
 
             // Set state FIRST so our height hooks return the correct values
             XposedHelpers.setAdditionalInstanceField(row, "aeCollapsed", !newExpanded)
             XposedHelpers.setBooleanField(row, "mExpandedWhenPinned", newExpanded)
-
-            // Query the correct target height (our hooks will use updated state)
             val targetHeight = XposedHelpers.callMethod(row, "getIntrinsicHeight") as Int
 
-            // Directly set the actual visual height on the row
-            // setActualHeight internally: mActualHeight = h, updateClipping(), notifyHeightChanged()
             XposedHelpers.callMethod(row, "setActualHeight", targetHeight)
 
-            // Force layout pass on row and parent (OPlus window)
             (row as? View)?.let { rowView ->
                 rowView.requestLayout()
                 (rowView.parent as? View)?.requestLayout()
@@ -245,9 +405,19 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
-        when (lpparam.packageName) {
-            "android"              -> handleSystemServer(lpparam)
-            "com.android.systemui" -> handleSystemUi(lpparam)
+        // Top-level safety net: any uncaught throwable must NOT propagate
+        // to Zygote/system_server. Silent fail > bootloop.
+        try {
+            when (lpparam.packageName) {
+                "android"              -> try { handleSystemServer(lpparam) } catch (t: Throwable) {
+                    Log.e("AutoExpand", "system_server hook init failed: $t")
+                }
+                "com.android.systemui" -> try { handleSystemUi(lpparam) } catch (t: Throwable) {
+                    Log.e("AutoExpand", "SystemUI hook init failed: $t")
+                }
+            }
+        } catch (t: Throwable) {
+            Log.e("AutoExpand", "handleLoadPackage top-level threw: $t")
         }
     }
 
@@ -288,13 +458,16 @@ class MainHook : IXposedHookLoadPackage {
     @Volatile private var chordTriggered  = false
     @Volatile private var powerDownTime   = 0L
     @Volatile private var volumeDownTime  = 0L
-    private companion object { const val CHORD_WINDOW_MS = 150L }
+    private companion object {
+        const val CHORD_WINDOW_MS = 150L
+        const val GROUP_TAG = "TweaksGroup"
+    }
 
     private fun handleSystemServer(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
             installChordHooks(lpparam)
         } catch (t: Throwable) {
-            Log.e("JeezSnapper", "handleSystemServer crashed: $t")
+            Log.e("Snapper", "handleSystemServer crashed: $t")
         }
     }
 
@@ -332,7 +505,7 @@ class MainHook : IXposedHookLoadPackage {
                                                 try { XposedHelpers.callMethod(param.thisObject, "cancelPowerKeyLongPress") } catch (_: Throwable) {}
                                                 try { XposedHelpers.setBooleanField(param.thisObject, "mPowerKeyDown", false) } catch (_: Throwable) {}
                                                 param.setResult(0)
-                                                Log.d("JeezSnapper", "POWER_UP consumed — screen stays on")
+                                                Log.d("Snapper", "POWER_UP consumed — screen stays on")
                                             }
                                             // else: pass through — normal screen-off
                                         }
@@ -353,14 +526,14 @@ class MainHook : IXposedHookLoadPackage {
                                                 if (ctx != null) {
                                                     try {
                                                         launchSnapper(ctx)
-                                                        Log.d("JeezSnapper", "Snapper launched (interceptKeyBQ / Power-first)")
+                                                        Log.d("Snapper", "Snapper launched (interceptKeyBQ / Power-first)")
                                                     } catch (e: Throwable) {
-                                                        Log.e("JeezSnapper", "launch failed: ${e.message}")
+                                                        Log.e("Snapper", "launch failed: ${e.message}")
                                                         chordTriggered = false
                                                         param.result = null
                                                     }
                                                 } else {
-                                                    Log.e("JeezSnapper", "mContext null (interceptKeyBQ)")
+                                                    Log.e("Snapper", "mContext null (interceptKeyBQ)")
                                                     chordTriggered = false
                                                     param.result = null
                                                 }
@@ -374,16 +547,16 @@ class MainHook : IXposedHookLoadPackage {
                                     }
                                 }
                             } catch (t: Throwable) {
-                                Log.e("JeezSnapper", "interceptKeyBQ hook threw: $t")
+                                Log.e("Snapper", "interceptKeyBQ hook threw: $t")
                                 param.result = null
                             }
                         }
                     }
                 )
-                Log.d("JeezSnapper", "Hook1 (interceptKeyBQ) registered on $cls")
+                Log.d("Snapper", "Hook1 (interceptKeyBQ) registered on $cls")
                 break
             } catch (e: Throwable) {
-                Log.e("JeezSnapper", "Hook1 FAILED on $cls: $e")
+                Log.e("Snapper", "Hook1 FAILED on $cls: $e")
             }
         }
 
@@ -407,7 +580,7 @@ class MainHook : IXposedHookLoadPackage {
 
                                 // Block the native screenshot (both action=1 and action=2)
                                 param.setResult(null)
-                                Log.d("JeezSnapper", "handleKeyGestureEvent SCREENSHOT_CHORD blocked")
+                                Log.d("Snapper", "handleKeyGestureEvent SCREENSHOT_CHORD blocked")
 
                                 // Launch Snapper only on simultaneous press (Vol-first path)
                                 // Both keys must have been pressed within CHORD_WINDOW_MS of each other.
@@ -420,28 +593,28 @@ class MainHook : IXposedHookLoadPackage {
                                     if (ctx != null) {
                                         try {
                                             launchSnapper(ctx)
-                                            Log.d("JeezSnapper", "Snapper launched (handleKeyGesture / Vol-first)")
+                                            Log.d("Snapper", "Snapper launched (handleKeyGesture / Vol-first)")
                                         } catch (e: Throwable) {
-                                            Log.e("JeezSnapper", "launch failed (handleKeyGesture): ${e.message}")
+                                            Log.e("Snapper", "launch failed (handleKeyGesture): ${e.message}")
                                             chordTriggered = false
                                         }
                                     } else {
-                                        Log.e("JeezSnapper", "mContext null (handleKeyGesture)")
+                                        Log.e("Snapper", "mContext null (handleKeyGesture)")
                                         chordTriggered = false
                                     }
                                 }
                             } catch (t: Throwable) {
-                                Log.e("JeezSnapper", "handleKeyGestureEvent hook threw: $t")
+                                Log.e("Snapper", "handleKeyGestureEvent hook threw: $t")
                             }
                         }
                     }
                 )
                 if (hooks.isNotEmpty()) {
-                    Log.d("JeezSnapper", "Hook2 (handleKeyGestureEvent) registered ${hooks.size} methods on $cls")
+                    Log.d("Snapper", "Hook2 (handleKeyGestureEvent) registered ${hooks.size} methods on $cls")
                     break
                 }
             } catch (e: Throwable) {
-                Log.e("JeezSnapper", "Hook2 FAILED on $cls: $e")
+                Log.e("Snapper", "Hook2 FAILED on $cls: $e")
             }
         }
     }
@@ -485,7 +658,7 @@ class MainHook : IXposedHookLoadPackage {
                         try {
                             val app = param.thisObject as android.app.Application
                             appContext = app
-                            Log.d("JeezSnapper", "DIAG: SystemUI hook init — appContext captured, pkg=${app.packageName}")
+                            Log.d("Snapper", "DIAG: SystemUI hook init — appContext captured, pkg=${app.packageName}")
                             loadFilePrefs()
                             startFileObserver()
                             startHeartbeatThread()
@@ -498,7 +671,7 @@ class MainHook : IXposedHookLoadPackage {
                                 )
                             } catch (_: Throwable) {}
                         } catch (e: Throwable) {
-                            Log.d("JeezSnapper", "DIAG: SystemUI hook init FAILED: $e")
+                            Log.d("Snapper", "DIAG: SystemUI hook init FAILED: $e")
                         }
                         try { reloadIfStale() } catch (_: Throwable) {}
                     }
@@ -506,75 +679,102 @@ class MainHook : IXposedHookLoadPackage {
             )
         } catch (_: Throwable) {}
 
-        // =====================================================
-        // SHADE HOOKS
-        // =====================================================
+        // === On child attach to a group (HU parent only):
+        //  - Collapse the child before first layout (kills expanded-frame flicker).
+        try {
+            val containerClass = "com.android.systemui.statusbar.notification.row.NotificationChildrenContainer"
+            XposedHelpers.findAndHookMethod(
+                containerClass, lpparam.classLoader,
+                "addNotification",
+                XposedHelpers.findClass(rowClass, lpparam.classLoader),
+                Int::class.javaPrimitiveType,
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        try {
+                            val notifParent = XposedHelpers.getObjectField(param.thisObject, "mContainingNotification") ?: return
+                            val pkg = getNotificationPackage(notifParent)
+                            val child = param.args[0] ?: return
+                            val parentHU = try { XposedHelpers.getBooleanField(notifParent, "mIsHeadsUp") } catch (_: Throwable) { false }
+                            val onKeyguard = try { XposedHelpers.getBooleanField(notifParent, "mOnKeyguard") } catch (_: Throwable) { false }
+                            val parentId = System.identityHashCode(notifParent)
+                            val childIdx = try { XposedHelpers.callMethod(notifParent, "getNotificationChildCount") as Int } catch (_: Throwable) { -1 }
+                            val childCls = child.javaClass.simpleName
+                            val childParentRef = try {
+                                XposedHelpers.getObjectField(child, "mNotificationParent")?.let { System.identityHashCode(it) }
+                            } catch (_: Throwable) { null }
+                            Log.d(HUD_TAG, "[${ts()}] addNotification ENTER parent=$parentId pkg=$pkg parentHU=$parentHU onKG=$onKeyguard childIdx=$childIdx childCls=$childCls childParentRef=$childParentRef match=${childParentRef == parentId}")
 
+                            if (parentHU) {
+                                if (shouldSkipNotification("expand_headsup_enabled", pkg) ||
+                                    isKillSwitchActive("disable_headsup_hooks_enabled")) {
+                                    Log.d(HUD_TAG, "[${ts()}] addNotification EXIT parent=$parentId branch=HU skipped"); return
+                                }
+                                XposedHelpers.setAdditionalInstanceField(notifParent, "aeIsGroup", true)
+                                // Expand parent so the compact group list is visible from first paint.
+                                try { XposedHelpers.callMethod(notifParent, "setUserExpanded", true, true) } catch (_: Throwable) {}
+                                val ok = collapseChildNoAnim(child)
+                                val h = try { (XposedHelpers.callMethod(child, "getIntrinsicHeight") as? Int) ?: -1 } catch (_: Throwable) { -1 }
+                                Log.d(HUD_TAG, "[${ts()}] addNotification EXIT parent=$parentId branch=HU ok=$ok childH=$h pkg=$pkg")
+                                return
+                            }
+                        } catch (_: Throwable) {}
+                    }
+                }
+            )
+        } catch (_: Throwable) {}
+
+        // =====================================================
+        // SHADE / LOCK SCREEN — group parent auto-expand
+        // Trigger: setSystemExpanded(false) fires on the group parent
+        // every time shade/LS renders it. We click the parent's
+        // expand-button arrow once per row lifetime. The system
+        // renders children collapsed naturally when the parent is
+        // expanded in shade/LS, so children need no extra work.
+        // =====================================================
         try {
             XposedHelpers.findAndHookMethod(
                 rowClass, lpparam.classLoader,
                 "setSystemExpanded", Boolean::class.javaPrimitiveType,
                 object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val pkg = getNotificationPackage(param.thisObject)
-                        val enabled = isFeatureEnabled("expand_shade_enabled")
-                        val excluded = pkg != null && pkg in getExcludedApps()
-                        if (!enabled || excluded) {
-                            param.args[0] = false
-                            return
-                        }
-                        param.args[0] = true
-                    }
-                }
-            )
-        } catch (_: Throwable) {}
-
-        try {
-            XposedHelpers.findAndHookMethod(
-                rowClass, lpparam.classLoader,
-                "setSystemChildExpanded", Boolean::class.javaPrimitiveType,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val pkg = getNotificationPackage(param.thisObject)
-                        val enabled = isFeatureEnabled("expand_shade_enabled")
-                        val excluded = pkg != null && pkg in getExcludedApps()
-                        if (!enabled || excluded) {
-                            param.args[0] = false
-                            return
-                        }
-                        param.args[0] = true
-                    }
-                }
-            )
-        } catch (_: Throwable) {}
-
-        try {
-            XposedHelpers.findAndHookMethod(
-                rowClass, lpparam.classLoader,
-                "setExpandable", Boolean::class.javaPrimitiveType,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val pkg = getNotificationPackage(param.thisObject)
-                        if (shouldSkipNotification("expand_shade_enabled", pkg)) return
-                        param.args[0] = true
-                    }
-                }
-            )
-        } catch (_: Throwable) {}
-
-        // =====================================================
-        // LOCK SCREEN HOOK
-        // =====================================================
-
-        try {
-            XposedHelpers.findAndHookMethod(
-                rowClass, lpparam.classLoader,
-                "setOnKeyguard", Boolean::class.javaPrimitiveType,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val pkg = getNotificationPackage(param.thisObject)
-                        if (shouldSkipNotification("expand_lockscreen_enabled", pkg)) return
-                        param.args[0] = false
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        try {
+                            val row = param.thisObject
+                            val rowView = row as? View ?: return
+                            val isHU = try { XposedHelpers.getBooleanField(row, "mIsHeadsUp") } catch (_: Throwable) { false }
+                            if (isHU) return
+                            // Skip child rows inside a grouped notification — their parent is expanded
+                            // by the addNotification hook; forcing setUserExpanded here would undo that.
+                            val isChild = try { XposedHelpers.callMethod(row, "isChildInGroup") as? Boolean ?: false } catch (_: Throwable) { false }
+                            if (isChild) return
+                            val onKG = try { XposedHelpers.getBooleanField(row, "mOnKeyguard") } catch (_: Throwable) { false }
+                            val pkg = getNotificationPackage(row)
+                            val featureKey = if (onKG) "expand_lockscreen_enabled" else "expand_shade_enabled"
+                            if (shouldSkipNotification(featureKey, pkg)) return
+                            val already = XposedHelpers.getAdditionalInstanceField(row, "aeAutoExpanded") as? Boolean ?: false
+                            if (already) return
+                            val isExpanded = try { XposedHelpers.callMethod(row, "isExpanded") as? Boolean ?: false } catch (_: Throwable) { false }
+                            if (isExpanded) {
+                                XposedHelpers.setAdditionalInstanceField(row, "aeAutoExpanded", true)
+                                return
+                            }
+                            XposedHelpers.setAdditionalInstanceField(row, "aeAutoExpanded", true)
+                            // Defer to next frame — running synchronously during the layout pass
+                            // that just called setSystemExpanded(false) gets undone by that pass.
+                            rowView.post {
+                                try {
+                                    val ok = try {
+                                        XposedHelpers.callMethod(row, "setUserExpanded", true, true); true
+                                    } catch (_: Throwable) {
+                                        try { XposedHelpers.callMethod(row, "setUserExpanded", true); true } catch (_: Throwable) { false }
+                                    }
+                                    if (!ok) findStrictExpandButton(rowView)?.performClick()
+                                    val ne = try { XposedHelpers.callMethod(row, "isExpanded") as? Boolean ?: false } catch (_: Throwable) { false }
+                                    Log.d(HUD_TAG, "[${ts()}] shade/LS post-expand row=${System.identityHashCode(row)} pkg=$pkg onKG=$onKG ok=$ok nowExpanded=$ne")
+                                    // If state still didn't take, clear flag so a subsequent setSystemExpanded fire retries.
+                                    if (!ne) XposedHelpers.setAdditionalInstanceField(row, "aeAutoExpanded", false)
+                                } catch (_: Throwable) {}
+                            }
+                        } catch (_: Throwable) {}
                     }
                 }
             )
@@ -603,7 +803,19 @@ class MainHook : IXposedHookLoadPackage {
                             if (isHeadsUp && result == 2) {
                                 val row = XposedHelpers.getObjectField(param.thisObject, "mContainingNotification")
                                 if (row != null) {
+                                    val aeGroupFlag = XposedHelpers.getAdditionalInstanceField(row, "aeIsGroup") as? Boolean ?: false
+                                    val isGroup = aeGroupFlag || isGroupSummaryRow(row)
                                     val collapsed = XposedHelpers.getAdditionalInstanceField(row, "aeCollapsed") as? Boolean ?: false
+                                    Log.d(HUD_TAG, "[${ts()}] calcVisibleType row=${System.identityHashCode(row)} pkg=$pkg result=$result isGroup=$isGroup aeCollapsed=$collapsed willOverride=${!isGroup && !collapsed}")
+                                    // Recovery path for OEMs whose NotificationChildrenContainer.addNotification
+                                    // we don't hook (e.g. Xiaomi 17). Children attached after setHeadsUp(true)
+                                    // deferred — run the expand pass now so the parent gets setUserExpanded(true)
+                                    // and children render in the compact group list.
+                                    if (!aeGroupFlag && isGroup && row is View &&
+                                        !shouldSkipNotification("expand_headsup_enabled", pkg)) {
+                                        try { expandGroupIfNeeded(row, row, pkg) } catch (_: Throwable) {}
+                                    }
+                                    if (isGroup) return
                                     if (collapsed) return
                                 }
                                 val expandedChild = XposedHelpers.getObjectField(param.thisObject, "mExpandedChild")
@@ -617,7 +829,7 @@ class MainHook : IXposedHookLoadPackage {
             )
         } catch (_: Throwable) {}
 
-        // getIntrinsicHeight — force expanded height
+        // getIntrinsicHeight — force expanded height (skip grouped summaries — let system size them)
         try {
             XposedHelpers.findAndHookMethod(
                 rowClass, lpparam.classLoader,
@@ -629,6 +841,8 @@ class MainHook : IXposedHookLoadPackage {
                             if (shouldSkipNotification("expand_headsup_enabled", pkg)) return
                             val isHeadsUp = XposedHelpers.getBooleanField(param.thisObject, "mIsHeadsUp")
                             if (!isHeadsUp) return
+                            val aeGroupFlag = XposedHelpers.getAdditionalInstanceField(param.thisObject, "aeIsGroup") as? Boolean ?: false
+                            if (aeGroupFlag || isGroupSummaryRow(param.thisObject)) return
                             val collapsed = XposedHelpers.getAdditionalInstanceField(param.thisObject, "aeCollapsed") as? Boolean ?: false
                             if (collapsed) return
                             val privateLayout = XposedHelpers.getObjectField(param.thisObject, "mPrivateLayout")
@@ -647,7 +861,7 @@ class MainHook : IXposedHookLoadPackage {
             )
         } catch (_: Throwable) {}
 
-        // getPinnedHeadsUpHeight — force expanded height for heads-up window sizing
+        // getPinnedHeadsUpHeight — force expanded height for heads-up window sizing (skip grouped summaries)
         try {
             XposedHelpers.findAndHookMethod(
                 rowClass, lpparam.classLoader,
@@ -659,6 +873,8 @@ class MainHook : IXposedHookLoadPackage {
                             if (shouldSkipNotification("expand_headsup_enabled", pkg)) return
                             val isHeadsUp = XposedHelpers.getBooleanField(param.thisObject, "mIsHeadsUp")
                             if (!isHeadsUp) return
+                            val aeGroupFlag = XposedHelpers.getAdditionalInstanceField(param.thisObject, "aeIsGroup") as? Boolean ?: false
+                            if (aeGroupFlag || isGroupSummaryRow(param.thisObject)) return
                             val collapsed = XposedHelpers.getAdditionalInstanceField(param.thisObject, "aeCollapsed") as? Boolean ?: false
                             if (collapsed) return
                             val maxExpand = XposedHelpers.callMethod(param.thisObject, "getMaxExpandHeight") as Int
@@ -672,35 +888,45 @@ class MainHook : IXposedHookLoadPackage {
             )
         } catch (_: Throwable) {}
 
-        // setHeadsUp — mark notification for auto-expand on arrival
+        // setHeadsUp — set expand/collapse state before first draw, no post-draw manipulation
         try {
             XposedHelpers.findAndHookMethod(
                 rowClass, lpparam.classLoader,
                 "setHeadsUp", Boolean::class.javaPrimitiveType,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (param.args[0] as Boolean) {
-                            val pkg = getNotificationPackage(param.thisObject)
-                            if (shouldSkipNotification("expand_headsup_enabled", pkg)) return
-                            inSetHeadsUp = true
+                        val v = param.args[0] as Boolean
+                        val pkg = getNotificationPackage(param.thisObject)
+                        if (shouldSkipNotification("expand_headsup_enabled", pkg)) return
+                        val rowId = System.identityHashCode(param.thisObject)
+                        val cc = getRowChildCount(param.thisObject)
+                        if (v) {
+                            val alreadyGroup = XposedHelpers.getAdditionalInstanceField(param.thisObject, "aeIsGroup") as? Boolean ?: false
+                            val aeCollapsed = XposedHelpers.getAdditionalInstanceField(param.thisObject, "aeCollapsed")
+                            Log.d(HUD_TAG, "[${ts()}] setHeadsUp(true) row=$rowId pkg=$pkg children=$cc aeGroup=$alreadyGroup aeCollapsed=$aeCollapsed")
+                            if (!alreadyGroup) {
+                                XposedHelpers.setAdditionalInstanceField(param.thisObject, "aeIsGroup", false)
+                            }
                             XposedHelpers.setAdditionalInstanceField(param.thisObject, "aeCollapsed", false)
-                            try { XposedHelpers.setBooleanField(param.thisObject, "mExpandedWhenPinned", true) } catch (_: Throwable) {}
+                        } else {
+                            Log.d(HUD_TAG, "[${ts()}] setHeadsUp(false) row=$rowId pkg=$pkg children=$cc — resetting aeIsGroup/aeAutoExpanded")
+                            XposedHelpers.setAdditionalInstanceField(param.thisObject, "aeIsGroup", false)
+                            XposedHelpers.setAdditionalInstanceField(param.thisObject, "aeAutoExpanded", false)
                         }
                     }
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        if (param.args[0] as Boolean) {
-                            inSetHeadsUp = false
-                            val pkg = getNotificationPackage(param.thisObject)
-                            if (shouldSkipNotification("expand_headsup_enabled", pkg)) return
-                            try {
-                                XposedHelpers.setBooleanField(param.thisObject, "mExpandedWhenPinned", true)
-                                XposedHelpers.callMethod(param.thisObject, "notifyHeightChanged", false)
-                            } catch (_: Throwable) {}
-                        }
+                        if (param.args[0] as Boolean != true) return
+                        val pkg = getNotificationPackage(param.thisObject)
+                        if (shouldSkipNotification("expand_headsup_enabled", pkg)) return
+                        val alreadyGroup = XposedHelpers.getAdditionalInstanceField(param.thisObject, "aeIsGroup") as? Boolean ?: false
+                        if (alreadyGroup) return
+                        val rowView = param.thisObject as? View ?: return
+                        expandGroupIfNeeded(rowView, param.thisObject, pkg)
                     }
                 }
             )
         } catch (_: Throwable) {}
+
 
         // setExpandedWhenPinned — sync aeCollapsed BEFORE original runs
         try {
@@ -709,7 +935,8 @@ class MainHook : IXposedHookLoadPackage {
                 "setExpandedWhenPinned",
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (inSetHeadsUp) return
+                        val isGroup = XposedHelpers.getAdditionalInstanceField(param.thisObject, "aeIsGroup") as? Boolean ?: false
+                        if (isGroup) return
                         val value = param.args[0] as Boolean
                         XposedHelpers.setAdditionalInstanceField(param.thisObject, "aeCollapsed", !value)
                     }
@@ -775,7 +1002,8 @@ class MainHook : IXposedHookLoadPackage {
                         f1HasToggled = true
                         try {
                             if (param.args.size >= 2) {
-                                toggleHeadsUpExpandState(param.args[1])
+                                val row = param.args[1]
+                                toggleHeadsUpExpandState(row)
                             }
                         } catch (_: Throwable) {}
                     }
@@ -831,6 +1059,7 @@ class MainHook : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         try {
                             if (!isFeatureEnabled("expand_headsup_enabled")) return
+                            if (isKillSwitchActive("disable_headsup_hooks_enabled")) return
                             val maxLines = getIntPref("headsup_max_lines", 5)
                             if (maxLines <= 0) return
                             val requested = param.args[0] as Int
@@ -871,7 +1100,6 @@ class MainHook : IXposedHookLoadPackage {
         val x = ev.x
         val y = ev.y
         val h = view.height.takeIf { it > 0 } ?: return
-        if (y > h) return
 
         val screenW    = view.resources.displayMetrics.widthPixels
         val leftW      = (screenW * getIntPref("zones_left_width_pct",  25) / 100f).toInt()
@@ -879,20 +1107,23 @@ class MainHook : IXposedHookLoadPackage {
 
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                if (y > h) return
                 zoneDownY = y
+                zoneDownRawY = ev.rawY
                 activeZoneSide = when {
                     x < leftW      -> "left"
                     x > rightStart -> "right"
                     else           -> null
                 }
-                Log.d("JeezZones", "DOWN x=$x y=$y leftW=$leftW rightStart=$rightStart side=$activeZoneSide")
                 when (activeZoneSide) {
                     "left"  -> leftZoneTracker.onDown(ctx)
                     "right" -> rightZoneTracker.onDown(ctx)
                 }
             }
             MotionEvent.ACTION_MOVE -> {
-                if (activeZoneSide != null && kotlin.math.abs(y - zoneDownY) > 20) {
+                if (activeZoneSide != null &&
+                    (y > h || kotlin.math.abs(y - zoneDownY) > 20 || kotlin.math.abs(ev.rawY - zoneDownRawY) > 20)
+                ) {
                     leftZoneTracker.cancel(); rightZoneTracker.cancel(); activeZoneSide = null
                 }
             }
@@ -925,22 +1156,22 @@ class MainHook : IXposedHookLoadPackage {
                             val lp     = param.args[1] as? android.view.WindowManager.LayoutParams ?: return
                             if (lp.type != android.view.WindowManager.LayoutParams.TYPE_STATUS_BAR) return
 
-                            Log.d("JeezZones", "STATUS_BAR view attached: ${view.javaClass.name}")
+                            Log.d("Zones", "STATUS_BAR view attached: ${view.javaClass.name}")
                             val ctx = view.context ?: appContext ?: return
                             view.setOnTouchListener { v, ev ->
-                                try { handleZoneTouch(ev, v, ctx) } catch (t: Throwable) { Log.e("JeezZones", "touch: $t") }
+                                try { handleZoneTouch(ev, v, ctx) } catch (t: Throwable) { Log.e("Zones", "touch: $t") }
                                 false // don't consume — status bar swipe still works
                             }
-                            Log.d("JeezZones", "zone OnTouchListener installed on status bar")
+                            Log.d("Zones", "zone OnTouchListener installed on status bar")
                         } catch (t: Throwable) {
-                            Log.e("JeezZones", "addView hook error: $t")
+                            Log.e("Zones", "addView hook error: $t")
                         }
                     }
                 }
             )
-            Log.d("JeezZones", "WindowManagerImpl.addView hook installed")
+            Log.d("Zones", "WindowManagerImpl.addView hook installed")
         } catch (e: Throwable) {
-            Log.e("JeezZones", "WindowManagerImpl.addView hook failed: $e")
+            Log.e("Zones", "WindowManagerImpl.addView hook failed: $e")
         }
 
         // Also try direct class name hook as secondary path
@@ -962,15 +1193,15 @@ class MainHook : IXposedHookLoadPackage {
                                 val ctx  = view.context ?: appContext ?: return
                                 handleZoneTouch(ev, view, ctx)
                             } catch (t: Throwable) {
-                                Log.e("JeezZones", "dispatchTouchEvent hook: $t")
+                                Log.e("Zones", "dispatchTouchEvent hook: $t")
                             }
                         }
                     }
                 )
-                Log.d("JeezZones", "zone dispatchTouchEvent hook installed on $cls")
+                Log.d("Zones", "zone dispatchTouchEvent hook installed on $cls")
                 break
             } catch (_: Throwable) {
-                Log.d("JeezZones", "zone hook skip $cls")
+                Log.d("Zones", "zone hook skip $cls")
             }
         }
 
@@ -999,13 +1230,13 @@ class MainHook : IXposedHookLoadPackage {
                                         val view2 = param2.thisObject as android.view.View
                                         val ctx2  = view2.context ?: appContext ?: return
                                         handleZoneTouch(ev, view2, ctx2)
-                                    } catch (t: Throwable) { Log.e("JeezZones", "dynamic hook: $t") }
+                                    } catch (t: Throwable) { Log.e("Zones", "dynamic hook: $t") }
                                 }
                             })
                             hooked = true
-                            Log.d("JeezZones", "dynamic dispatchTouchEvent hook installed on ${cls.name}")
+                            Log.d("Zones", "dynamic dispatchTouchEvent hook installed on ${cls.name}")
                         } catch (t: Throwable) {
-                            Log.e("JeezZones", "dynamic hook setup: $t")
+                            Log.e("Zones", "dynamic hook setup: $t")
                         }
                     }
                 }
@@ -1026,13 +1257,13 @@ class MainHook : IXposedHookLoadPackage {
                         val key = intent.getStringExtra(ActionDispatcher.EXTRA_ACTION_KEY) ?: return
                         handlePrivilegedZoneAction(ctx, key)
                     } catch (t: Throwable) {
-                        Log.e("JeezZones", "privileged action failed: $t")
+                        Log.e("Zones", "privileged action failed: $t")
                     }
                 }
             }, filter, android.content.Context.RECEIVER_NOT_EXPORTED)
-            Log.d("JeezZones", "zone privileged action receiver registered")
+            Log.d("Zones", "zone privileged action receiver registered")
         } catch (t: Throwable) {
-            Log.e("JeezZones", "zone receiver registration failed: $t")
+            Log.e("Zones", "zone receiver registration failed: $t")
         }
     }
 
@@ -1044,27 +1275,27 @@ class MainHook : IXposedHookLoadPackage {
                     val wm = ctx.getSystemService(android.content.Context.WIFI_SERVICE)
                         as android.net.wifi.WifiManager
                     wm.setWifiEnabled(!wm.isWifiEnabled)
-                } catch (t: Throwable) { Log.e("JeezZones", "wifi toggle: $t") }
+                } catch (t: Throwable) { Log.e("Zones", "wifi toggle: $t") }
             }
             "toggle_bluetooth" -> {
                 try {
                     val ba = android.bluetooth.BluetoothAdapter.getDefaultAdapter() ?: return
                     if (ba.isEnabled) ba.disable() else ba.enable()
-                } catch (t: Throwable) { Log.e("JeezZones", "bt toggle: $t") }
+                } catch (t: Throwable) { Log.e("Zones", "bt toggle: $t") }
             }
             "toggle_mobile_data" -> {
                 try {
                     val tm = ctx.getSystemService(android.content.Context.TELEPHONY_SERVICE)
                         as android.telephony.TelephonyManager
                     XposedHelpers.callMethod(tm, "setDataEnabled", !tm.isDataEnabled)
-                } catch (t: Throwable) { Log.e("JeezZones", "mobile data toggle: $t") }
+                } catch (t: Throwable) { Log.e("Zones", "mobile data toggle: $t") }
             }
             "toggle_power_saver" -> {
                 try {
                     val pm = ctx.getSystemService(android.content.Context.POWER_SERVICE)
                         as android.os.PowerManager
                     XposedHelpers.callMethod(pm, "setPowerSaveModeEnabled", !pm.isPowerSaveMode)
-                } catch (t: Throwable) { Log.e("JeezZones", "power saver toggle: $t") }
+                } catch (t: Throwable) { Log.e("Zones", "power saver toggle: $t") }
             }
         }
     }

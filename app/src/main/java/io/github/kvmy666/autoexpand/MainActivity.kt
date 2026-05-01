@@ -1,3 +1,4 @@
+
 package io.github.kvmy666.autoexpand
 
 import android.content.Context
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -34,7 +36,10 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.TextButton
@@ -44,6 +49,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
@@ -81,6 +87,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.compose.runtime.produceState
+import java.util.concurrent.TimeUnit
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.PixelFormat
@@ -113,7 +121,7 @@ class MainActivity : ComponentActivity() {
         fun isModuleActive(context: Context): Boolean {
             // Primary: heartbeat file written by hook thread (works on Xiaomi HyperOS)
             try {
-                val file = File("/data/local/tmp/jeez_heartbeat")
+                val file = File("/data/local/tmp/tweaks_heartbeat")
                 if (file.exists()) {
                     val ts = file.readText().trim().toLongOrNull()
                     if (ts != null && System.currentTimeMillis() - ts < 3 * 60 * 1000L) return true
@@ -141,15 +149,15 @@ class MainActivity : ComponentActivity() {
                         else -> value.toString()
                     })
                 }
-                val tmpFile = File(context.cacheDir, "jeez_prefs_tmp.json")
+                val tmpFile = File(context.cacheDir, "tweaks_prefs_tmp.json")
                 tmpFile.writeText(json.toString())
-                val cmd = "cp ${tmpFile.absolutePath} /data/local/tmp/jeez_prefs.json && chmod 644 /data/local/tmp/jeez_prefs.json"
+                val cmd = "cp ${tmpFile.absolutePath} /data/local/tmp/tweaks_prefs.json && chmod 644 /data/local/tmp/tweaks_prefs.json"
                 val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
                 proc.waitFor()
                 proc.destroy()
-                Log.d("JeezSnapper", "DIAG: prefs file written, keys=${json.length()}")
+                Log.d("Snapper", "DIAG: prefs file written, keys=${json.length()}")
             } catch (e: Throwable) {
-                Log.d("JeezSnapper", "DIAG: writePrefsFile failed (no root?): $e")
+                Log.d("Snapper", "DIAG: writePrefsFile failed (no root?): $e")
             }
         }
 
@@ -295,9 +303,14 @@ private fun SettingsScreen(prefs: SharedPreferences) {
     // ── Navigation state ──────────────────────────────────────────────────────
     var selectedFeature by remember { mutableStateOf<String?>(null) }
 
+    // ── What's New dialog ─────────────────────────────────────────────────────
+    var showWhatsNew by remember { mutableStateOf(!prefs.getBoolean("whats_new_seen_3_1_0", false)) }
+    var whatsNewDontShow by remember { mutableStateOf(false) }
+
     // ── Notifications state ───────────────────────────────────────────────────
     var shadeEnabled       by remember { mutableStateOf(prefs.getBoolean("expand_shade_enabled", true)) }
     var headsUpEnabled     by remember { mutableStateOf(prefs.getBoolean("expand_headsup_enabled", true)) }
+    var disableHeadsupHooks by remember { mutableStateOf(prefs.getBoolean("disable_headsup_hooks_enabled", false)) }
     var lockscreenEnabled  by remember { mutableStateOf(prefs.getBoolean("expand_lockscreen_enabled", true)) }
     var backHapticEnabled  by remember { mutableStateOf(prefs.getBoolean("disable_back_haptic_enabled", true)) }
     var headsupPopupEnabled by remember { mutableStateOf(prefs.getBoolean("disable_headsup_popup_enabled", true)) }
@@ -329,6 +342,15 @@ private fun SettingsScreen(prefs: SharedPreferences) {
     var zRLong    by remember { mutableStateOf(prefs.getString("zones_right_long_press_action",  "no_action") ?: "no_action") }
     var zLAppPkg  by remember { mutableStateOf(prefs.getString("zones_left_open_app_pkg",   "") ?: "") }
     var zRAppPkg  by remember { mutableStateOf(prefs.getString("zones_right_open_app_pkg",  "") ?: "") }
+    // Per-gesture shortcut bindings ("pkg::id" or "")
+    var zLSingleShortcut by remember { mutableStateOf(prefs.getString("zones_left_single_tap_shortcut",  "") ?: "") }
+    var zLDoubleShortcut by remember { mutableStateOf(prefs.getString("zones_left_double_tap_shortcut",  "") ?: "") }
+    var zLTripleShortcut by remember { mutableStateOf(prefs.getString("zones_left_triple_tap_shortcut",  "") ?: "") }
+    var zLLongShortcut   by remember { mutableStateOf(prefs.getString("zones_left_long_press_shortcut",  "") ?: "") }
+    var zRSingleShortcut by remember { mutableStateOf(prefs.getString("zones_right_single_tap_shortcut", "") ?: "") }
+    var zRDoubleShortcut by remember { mutableStateOf(prefs.getString("zones_right_double_tap_shortcut", "") ?: "") }
+    var zRTripleShortcut by remember { mutableStateOf(prefs.getString("zones_right_triple_tap_shortcut", "") ?: "") }
+    var zRLongShortcut   by remember { mutableStateOf(prefs.getString("zones_right_long_press_shortcut", "") ?: "") }
 
     // ── Keyboard Enhancer state ───────────────────────────────────────────────
     var kbEnhancerEnabled   by remember { mutableStateOf(prefs.getBoolean("keyboard_enhancer_enabled", true)) }
@@ -341,6 +363,19 @@ private fun SettingsScreen(prefs: SharedPreferences) {
     var btnSelectAllEnabled by remember { mutableStateOf(prefs.getBoolean("btn_selectall_enabled", true)) }
     var btnCursorEnabled    by remember { mutableStateOf(prefs.getBoolean("btn_cursor_enabled", true)) }
     var btnShortcutEnabled  by remember { mutableStateOf(prefs.getBoolean("btn_shortcut_enabled", true)) }
+
+    // ── Root detection ────────────────────────────────────────────────────────
+    val rootAvailable by produceState(initialValue = true) {
+        value = withContext(Dispatchers.IO) {
+            try {
+                val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+                val out = p.inputStream.bufferedReader().readText()
+                p.waitFor(3, TimeUnit.SECONDS)
+                p.destroy()
+                out.contains("uid=0")
+            } catch (_: Throwable) { false }
+        }
+    }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -370,6 +405,36 @@ private fun SettingsScreen(prefs: SharedPreferences) {
     }
 
     BackHandler(enabled = selectedFeature != null) { selectedFeature = null }
+
+    if (showWhatsNew) {
+        AlertDialog(
+            onDismissRequest = {
+                if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_1_0", true).apply()
+                showWhatsNew = false
+            },
+            title = { Text("What's New in v3.1.0") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("• Status Bar Zones now linked to the app — implement anything from the status bar")
+                    Text("• Fixed heads-up notification blank screen")
+                    Text("• Delete all entries in the Clipboard Vault at once")
+                    Text("• More shortcuts available in the status bar")
+                    Text("• Telegram group — join the community")
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = whatsNewDontShow, onCheckedChange = { whatsNewDontShow = it })
+                        Text("Don't show this again", modifier = Modifier.padding(start = 4.dp))
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_1_0", true).apply()
+                    showWhatsNew = false
+                }) { Text("Got it") }
+            }
+        )
+    }
 
     Scaffold(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
@@ -403,6 +468,7 @@ private fun SettingsScreen(prefs: SharedPreferences) {
             val isActive = remember { MainActivity.isModuleActive(context) }
             HomeScreen(
                 isActive             = isActive,
+                rootAvailable        = rootAvailable,
                 shadeEnabled         = shadeEnabled,
                 snapperMasterEnabled = snapperMasterEnabled,
                 zonesEnabled         = zonesEnabled,
@@ -456,6 +522,12 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                                     checked = lockscreenEnabled,
                                     onCheckedChange = { lockscreenEnabled = it; onToggle("expand_lockscreen_enabled", it) }
                                 )
+                                ToggleRow(
+                                    title = "Disable Heads-Up Hooks",
+                                    description = "Master kill-switch — when ON, no auto-expand or HUD layout hooks run. Use this if your ROM produces a blank or oversized HUD.",
+                                    checked = disableHeadsupHooks,
+                                    onCheckedChange = { disableHeadsupHooks = it; onToggle("disable_headsup_hooks_enabled", it) }
+                                )
                             }
                         }
 
@@ -496,9 +568,6 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                             }
                         }
 
-                        if (BuildConfig.DEBUG) {
-                            DebugCard()
-                        }
                     }
 
                     // ── Keyboard Enhancer ─────────────────────────────────────────
@@ -620,6 +689,13 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                                 snapperMasterEnabled = v
                                 prefs.edit().putBoolean("enable_snapper_entirely", v).apply()
                                 MainActivity.makePrefsWorldReadable(context)
+                                MainActivity.broadcastPref(context, "enable_snapper_entirely", if (v) "1" else "0")
+                                if (!v) {
+                                    val svc = Intent(context, SnapperService::class.java)
+                                    svc.action = SnapperService.ACTION_HIDE_EDGE_BUTTON
+                                    try { context.startForegroundService(svc) } catch (_: Throwable) {}
+                                    try { context.stopService(Intent(context, SnapperService::class.java)) } catch (_: Throwable) {}
+                                }
                             },
                             onMethodChange    = { method ->
                                 snapperMethod = method
@@ -674,6 +750,18 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                             zRSingle = zRSingle, zRDouble = zRDouble,
                             zRTriple = zRTriple, zRLong   = zRLong,
                             zLAppPkg = zLAppPkg, zRAppPkg = zRAppPkg,
+                            zLShortcuts = mapOf(
+                                "single_tap_action" to zLSingleShortcut,
+                                "double_tap_action" to zLDoubleShortcut,
+                                "triple_tap_action" to zLTripleShortcut,
+                                "long_press_action" to zLLongShortcut,
+                            ),
+                            zRShortcuts = mapOf(
+                                "single_tap_action" to zRSingleShortcut,
+                                "double_tap_action" to zRDoubleShortcut,
+                                "triple_tap_action" to zRTripleShortcut,
+                                "long_press_action" to zRLongShortcut,
+                            ),
                             onEnabledChange = { v ->
                                 zonesEnabled = v
                                 prefs.edit().putBoolean("zones_enabled", v).apply()
@@ -723,6 +811,21 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                                 }
                                 MainActivity.makePrefsWorldReadable(context)
                                 MainActivity.writePrefsFile(context)
+                            },
+                            onShortcutChange = { shortcutPrefKey, shortcutData ->
+                                prefs.edit().putString(shortcutPrefKey, shortcutData).apply()
+                                when (shortcutPrefKey) {
+                                    "zones_left_single_tap_shortcut"  -> zLSingleShortcut = shortcutData
+                                    "zones_left_double_tap_shortcut"  -> zLDoubleShortcut = shortcutData
+                                    "zones_left_triple_tap_shortcut"  -> zLTripleShortcut = shortcutData
+                                    "zones_left_long_press_shortcut"  -> zLLongShortcut   = shortcutData
+                                    "zones_right_single_tap_shortcut" -> zRSingleShortcut = shortcutData
+                                    "zones_right_double_tap_shortcut" -> zRDoubleShortcut = shortcutData
+                                    "zones_right_triple_tap_shortcut" -> zRTripleShortcut = shortcutData
+                                    "zones_right_long_press_shortcut" -> zRLongShortcut   = shortcutData
+                                }
+                                MainActivity.makePrefsWorldReadable(context)
+                                MainActivity.writePrefsFile(context)
                             }
                         )
                     }
@@ -766,12 +869,15 @@ private fun ZonesTab(
     zLSingle: String, zLDouble: String, zLTriple: String, zLLong: String,
     zRSingle: String, zRDouble: String, zRTriple: String, zRLong: String,
     zLAppPkg: String, zRAppPkg: String,
+    zLShortcuts: Map<String, String>,
+    zRShortcuts: Map<String, String>,
     onEnabledChange: (Boolean) -> Unit,
     onPreviewActiveChange: (Boolean) -> Unit,
     onLeftPctChange: (Int) -> Unit,
     onRightPctChange: (Int) -> Unit,
     onPreviewDone: () -> Unit,
     onActionChange: (prefKey: String, value: String, appPkg: String?) -> Unit,
+    onShortcutChange: (shortcutPrefKey: String, shortcutData: String) -> Unit,
 ) {
     val context = LocalContext.current
     // Use application context — Activity context WindowManager can produce
@@ -841,11 +947,11 @@ private fun ZonesTab(
             try {
                 wm.addView(lv, zonePreviewParams(lw, sbHeightPx, 0))
                 holder.left = lv
-            } catch (t: Throwable) { Log.e("JeezZones", "preview left addView failed: $t") }
+            } catch (t: Throwable) { Log.e("Zones", "preview left addView failed: $t") }
             try {
                 wm.addView(rv, zonePreviewParams(rw, sbHeightPx, screenW - rw))
                 holder.right = rv
-            } catch (t: Throwable) { Log.e("JeezZones", "preview right addView failed: $t") }
+            } catch (t: Throwable) { Log.e("Zones", "preview right addView failed: $t") }
         }
         onDispose {
             holder.left?.let  { v -> try { wm.removeView(v) } catch (_: Throwable) {} ; holder.left  = null }
@@ -903,6 +1009,320 @@ private fun ZonesTab(
             confirmButton = {},
             dismissButton = { TextButton(onClick = { appPickerFor = null }) { Text("Cancel") } }
         )
+    }
+
+    // Shortcut picker ─────────────────────────────────────────────────────────
+    data class ShortcutEntry(
+        val packageName: String,
+        val shortcutId: String,
+        val label: String,
+        val appName: String,
+    )
+
+    var shortcutPickerFor by remember { mutableStateOf<String?>(null) }
+    val shortcutList = remember { mutableStateListOf<ShortcutEntry>() }
+    var shortcutSearch by remember { mutableStateOf("") }
+    var shortcutsLoaded by remember { mutableStateOf(false) }
+    var shortcutTimedOut by remember { mutableStateOf(false) }
+
+    LaunchedEffect(shortcutPickerFor) {
+        if (shortcutPickerFor == null) return@LaunchedEffect
+        shortcutList.clear(); shortcutSearch = ""; shortcutsLoaded = false; shortcutTimedOut = false
+        var dbError = false
+        val diag = StringBuilder("=== Anywhere Picker Diagnostic ===\n")
+
+        fun runSu(cmd: String): Triple<Int, String, String> = try {
+            val p = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+            val out = p.inputStream.bufferedReader().readText()
+            val err = p.errorStream.bufferedReader().readText()
+            val exit = p.waitFor(); p.destroy()
+            Triple(exit, out, err)
+        } catch (t: Throwable) { Triple(-1, "", t.toString()) }
+
+        // Parse one Row line from `content query` output.
+        // Format: "Row: N _id=VALUE, app_name=VALUE, param_1=..., param_2=..., description=..."
+        // Projection flag is often ignored by the content tool, so all columns may appear.
+        // We only need _id and app_name — find each value by stopping at the next ", word=" boundary.
+        fun parseContentRow(line: String): Triple<String, String, String>? {
+            val row = line.substringAfter("Row:").trimStart().dropWhile { it.isDigit() }.trimStart()
+            val idStart   = row.indexOf("_id=");        if (idStart < 0) return null
+            val nameStart = row.indexOf(", app_name="); if (nameStart < 0) return null
+            val id = row.substring(idStart + 4, nameStart).trim()
+            val nameValueStart = nameStart + 11  // skip ", app_name="
+            // Stop at the next ", identifier=" — works regardless of column order
+            val nameEnd = Regex(",\\s*[A-Za-z_]\\w*=").find(row, nameValueStart)?.range?.first ?: row.length
+            val name = row.substring(nameValueStart, nameEnd).trim()
+            if (id.isBlank() || id == "NULL" || name.isBlank()) return null
+            return Triple(id, name, "")
+        }
+
+        val entries = withContext(Dispatchers.IO) {
+            // ── Stage 1: ContentProvider query via root 'content' CLI ────────────────
+            // Anywhere exports a ContentProvider (authority: com.absinthe.anywhere_.coreprovider,
+            // table: anywhere_table, id col: _id, name col: app_name).
+            // Running via 'su -c content query' bypasses the READ permission entirely —
+            // no SELinux file access, no DB copying, works even if Anywhere is not running.
+            val authority = "com.absinthe.anywhere_.coreprovider"
+            val (cpExit, cpOut, cpErr) = runSu(
+                "content query --uri 'content://$authority/anywhere_table'" +
+                " --projection '_id:app_name:description' 2>&1"
+            )
+            diag.appendLine("Stage1 exit=$cpExit")
+            if (cpErr.isNotBlank()) diag.appendLine("  err: ${cpErr.take(300)}")
+            diag.appendLine("  out: ${cpOut.take(600)}")
+
+            val cpEntries = cpOut.lines()
+                .filter { it.trimStart().startsWith("Row:") }
+                .mapNotNull { line ->
+                    val (id, name, desc) = parseContentRow(line) ?: return@mapNotNull null
+                    ShortcutEntry("com.absinthe.anywhere_", id, name, desc)
+                }
+            diag.appendLine("Stage1 parsed: ${cpEntries.size} entries")
+
+            if (cpEntries.isNotEmpty()) {
+                return@withContext cpEntries.sortedBy { it.label.lowercase() }
+            }
+
+            // ── Stage 2: Direct SQLite fallback ──────────────────────────────────────
+            // Only reached if ContentProvider returned 0 rows.
+            // Anywhere's Room DB is named "anywhere_database" (no .db extension).
+            diag.appendLine("Stage1 empty — trying SQLite fallback")
+            var cacheDb: java.io.File? = null
+            try {
+                val (pmExit, pmOut, _) = runSu("pm list packages -U 2>&1 | grep anywhere")
+                val anywhereUid = pmOut.trim().substringAfter("uid:", "").trim().takeIf { it.isNotBlank() }
+                diag.appendLine("uid from pm: $anywhereUid")
+
+                val srcDbPath = "/data/user/0/com.absinthe.anywhere_/databases/anywhere_database"
+                val tmpPath   = "/data/local/tmp/anywhere_db_tmp"
+                val lsCmd = if (anywhereUid != null)
+                    "su $anywhereUid -c 'ls $srcDbPath 2>&1'" else "ls $srcDbPath 2>&1"
+                val (lsExit, lsOut, _) = runSu(lsCmd)
+                diag.appendLine("ls db: exit=$lsExit out='${lsOut.trim()}'")
+
+                if (lsExit != 0) {
+                    diag.appendLine("FALLBACK FAIL: DB not at expected path"); dbError = true
+                    return@withContext emptyList<ShortcutEntry>()
+                }
+
+                val cpAsUid = if (anywhereUid != null)
+                    "su $anywhereUid -c 'cp $srcDbPath $tmpPath' && chmod 644 $tmpPath"
+                else "cp $srcDbPath $tmpPath && chmod 644 $tmpPath"
+                val (cpTmpExit, _, cpTmpErr) = runSu(cpAsUid)
+                diag.appendLine("cp to tmp: exit=$cpTmpExit err='${cpTmpErr.trim()}'")
+
+                cacheDb = java.io.File(context.cacheDir, "anywhere_tmp.db")
+                val (cpCacheExit, _, cpCacheErr) = runSu(
+                    "cp $tmpPath '${cacheDb.absolutePath}' && chmod 644 '${cacheDb.absolutePath}' && rm -f $tmpPath"
+                )
+                diag.appendLine("cp to cache: exit=$cpCacheExit err='${cpCacheErr.trim()}'")
+
+                if (cpCacheExit != 0 || !cacheDb.exists()) {
+                    diag.appendLine("FALLBACK FAIL: copy to cache failed"); dbError = true
+                    return@withContext emptyList<ShortcutEntry>()
+                }
+
+                val db = android.database.sqlite.SQLiteDatabase.openDatabase(
+                    cacheDb.absolutePath, null, android.database.sqlite.SQLiteDatabase.OPEN_READONLY
+                )
+                val cur = db.rawQuery("SELECT _id, app_name, description FROM anywhere_table", null)
+                val results = mutableListOf<ShortcutEntry>()
+                while (cur.moveToNext()) {
+                    val id   = cur.getString(0)?.trim()?.takeIf { it.isNotBlank() } ?: continue
+                    val name = cur.getString(1)?.trim()?.takeIf { it.isNotBlank() } ?: continue
+                    val desc = cur.getString(2)?.trim() ?: ""
+                    results.add(ShortcutEntry("com.absinthe.anywhere_", id, name, desc))
+                }
+                cur.close(); db.close()
+                diag.appendLine("Fallback rows: ${results.size}")
+                if (results.isEmpty()) dbError = true
+                results.sortedBy { it.label.lowercase() }
+            } catch (t: Throwable) {
+                diag.appendLine("EXCEPTION: $t\n${t.stackTraceToString()}"); dbError = true; emptyList()
+            } finally {
+                try { cacheDb?.delete() } catch (_: Throwable) {}
+            }
+        }
+        try {
+            val diagFile = java.io.File(context.getExternalFilesDir(null), "anywhere_diag.txt")
+            diagFile.writeText(diag.toString())
+        } catch (_: Throwable) {}
+        shortcutList.addAll(entries)
+        shortcutsLoaded = true
+        shortcutTimedOut = dbError
+    }
+
+    if (shortcutPickerFor != null) {
+        val filteredShortcuts = if (shortcutSearch.isBlank()) shortcutList
+            else shortcutList.filter { it.label.contains(shortcutSearch, ignoreCase = true) }
+
+        AlertDialog(
+            onDismissRequest = { shortcutPickerFor = null; shortcutSearch = "" },
+            title = { Text("Pick an Anywhere Shortcut") },
+            text = {
+                Column {
+                    if (!shortcutsLoaded) {
+                        // Loading
+                        Box(modifier = Modifier.fillMaxWidth().padding(24.dp),
+                            contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator()
+                        }
+                    } else if (shortcutTimedOut) {
+                        Text(
+                            "Could not read Anywhere data. Make sure Anywhere is installed and has been opened at least once.",
+                            modifier = Modifier.padding(8.dp),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    } else if (shortcutList.isEmpty()) {
+                        val anywhereInstalled = remember {
+                            try { context.packageManager.getPackageInfo("com.absinthe.anywhere_", 0); true }
+                            catch (_: Exception) { false }
+                        }
+                        Text(
+                            if (anywhereInstalled)
+                                "No cards in Anywhere yet. Create a card in Anywhere first, then come back here."
+                            else
+                                "Anywhere is not installed. Install it from the \"Power up with Anywhere\" card.",
+                            modifier = Modifier.padding(8.dp),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    } else {
+                        OutlinedTextField(
+                            value = shortcutSearch,
+                            onValueChange = { shortcutSearch = it },
+                            label = { Text("Search") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                        )
+                        LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
+                            items(filteredShortcuts) { sc ->
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            val actionPrefKey = shortcutPickerFor ?: return@clickable
+                                            val shortcutPrefKey = actionPrefKey.replace("_action", "_shortcut")
+                                            onActionChange(actionPrefKey, "launch_shortcut", null)
+                                            // Store pkg::id::label so bound row can show card name
+                                            onShortcutChange(shortcutPrefKey,
+                                                "${sc.packageName}::${sc.shortcutId}::${sc.label}")
+                                            shortcutPickerFor = null
+                                            shortcutSearch = ""
+                                        }
+                                        .padding(vertical = 8.dp, horizontal = 4.dp)
+                                ) {
+                                    Text(
+                                        text = sc.label,
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    if (sc.appName.isNotBlank()) {
+                                        Text(
+                                            text = sc.appName,   // description stored in appName field
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                HorizontalDivider()
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { shortcutPickerFor = null; shortcutSearch = "" }) { Text("Cancel") }
+            }
+        )
+    }
+
+    // Introduction card ───────────────────────────────────────────────────────
+    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF1C1C1E))) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Status Bar Zones", style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary)
+            Text(
+                "Trigger actions by tapping the empty space next to your camera cutout. " +
+                "Quick access to flashlight, ringer modes, and any system shortcut — " +
+                "without unlocking your phone or opening any app.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+
+    // Anywhere Integration card ───────────────────────────────────────────────
+    val anywhereInstalled = remember {
+        try { context.packageManager.getPackageInfo("com.absinthe.anywhere_", 0); true }
+        catch (_: Exception) { false }
+    }
+    val anywhereGreen = Color(0xFF4CAF50)
+    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF0F2318))) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Power up with Anywhere", style = MaterialTheme.typography.titleSmall,
+                color = anywhereGreen)
+            Text(
+                "Anywhere is a free, open-source app that lets you create shortcuts for almost any action " +
+                "on your phone — toggle VPN, run shell commands, launch hidden activities, and much more. " +
+                "Combined with Status Bar Zones, you can trigger any of these with a single tap.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (anywhereInstalled) {
+                Text("Anywhere is installed ✓",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = anywhereGreen)
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW,
+                                Uri.parse("https://github.com/zhaobozhen/Anywhere-/releases/tag/2.5.5"))
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }) {
+                        Text("Download APK ↗")
+                    }
+                    Button(onClick = {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/zhaobozhen/Anywhere-"))
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }) {
+                        Text("GitHub ↗")
+                    }
+                }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("How to create your first shortcut:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface)
+                val steps = listOf(
+                    "Open Anywhere → tap the green + button",
+                    "Pick a card type: App (Activity), URL Scheme, Shell, Broadcast, etc.",
+                    "Configure the card (e.g. pick WireGuard's main activity)",
+                    "Tap the green checkmark to save",
+                    "Return here → open any gesture dropdown",
+                    "Select \"Anywhere — Launch Shortcut...\"",
+                    "Pick your card from the list",
+                    "Tap the zone to trigger the card — no home screen shortcut needed",
+                )
+                steps.forEachIndexed { i, step ->
+                    Text(
+                        text = "${i + 1}. $step",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 8.dp)
+                    )
+                }
+                Text(
+                    "Done — tap the zone to trigger your shortcut.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = anywhereGreen,
+                    modifier = Modifier.padding(start = 8.dp, top = 4.dp)
+                )
+            }
+        }
     }
 
     // Master toggle + size adjust card ────────────────────────────────────────
@@ -978,8 +1398,10 @@ private fun ZonesTab(
         singleAction = zLSingle, doubleAction = zLDouble,
         tripleAction = zLTriple, longAction   = zLLong,
         appPkg = zLAppPkg, prefPrefix = "zones_left",
+        shortcutDataMap = zLShortcuts,
         onActionChange = onActionChange,
-        onPickApp = { appPickerFor = it }
+        onPickApp = { appPickerFor = it },
+        onPickShortcut = { shortcutPickerFor = it }
     )
 
     // Right Zone Actions ──────────────────────────────────────────────────────
@@ -988,8 +1410,10 @@ private fun ZonesTab(
         singleAction = zRSingle, doubleAction = zRDouble,
         tripleAction = zRTriple, longAction   = zRLong,
         appPkg = zRAppPkg, prefPrefix = "zones_right",
+        shortcutDataMap = zRShortcuts,
         onActionChange = onActionChange,
-        onPickApp = { appPickerFor = it }
+        onPickApp = { appPickerFor = it },
+        onPickShortcut = { shortcutPickerFor = it }
     )
 
     // Haptic Feedback ─────────────────────────────────────────────────────────
@@ -1010,6 +1434,7 @@ private fun ZonesTab(
             }
         )
     }
+
 }
 
 @Composable
@@ -1019,8 +1444,10 @@ private fun ZoneSideCard(
     tripleAction: String, longAction:   String,
     appPkg: String,
     prefPrefix: String,
+    shortcutDataMap: Map<String, String>,
     onActionChange: (prefKey: String, value: String, appPkg: String?) -> Unit,
     onPickApp: (prefKey: String) -> Unit,
+    onPickShortcut: (prefKey: String) -> Unit,
 ) {
     Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF1C1C1E))) {
         Column(modifier = Modifier.padding(vertical = 4.dp)) {
@@ -1041,15 +1468,17 @@ private fun ZoneSideCard(
             gestures.forEachIndexed { idx, (keyLabel, currentKey) ->
                 val (keySuffix, label) = keyLabel
                 val prefKey = "${prefPrefix}_${keySuffix}"
+                val shortcutData = shortcutDataMap[keySuffix] ?: ""
                 ActionDropdownRow(
-                    label       = label,
-                    currentKey  = currentKey,
-                    appPkg      = appPkg,
-                    onSelect    = { selected ->
-                        if (selected == "open_app") {
-                            onPickApp(prefKey)
-                        } else {
-                            onActionChange(prefKey, selected, null)
+                    label        = label,
+                    currentKey   = currentKey,
+                    appPkg       = appPkg,
+                    shortcutData = shortcutData,
+                    onSelect     = { selected ->
+                        when (selected) {
+                            "open_app"       -> onPickApp(prefKey)
+                            "launch_shortcut" -> onPickShortcut(prefKey)
+                            else             -> onActionChange(prefKey, selected, null)
                         }
                     }
                 )
@@ -1067,11 +1496,43 @@ private fun ActionDropdownRow(
     label: String,
     currentKey: String,
     appPkg: String,
+    shortcutData: String = "",
     onSelect: (String) -> Unit,
 ) {
+    val context = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
-    val displayName = ZoneAction.ALL.firstOrNull { it.first == currentKey }?.second ?: "No Action"
-    val appLabel    = if (currentKey == "open_app" && appPkg.isNotBlank()) " ($appPkg)" else ""
+
+    // Build the right-side display text
+    val displayText: String
+    val displayColor: androidx.compose.ui.graphics.Color
+
+    if (currentKey == "launch_shortcut") {
+        if (shortcutData.isBlank()) {
+            displayText = "Anywhere — Launch Shortcut..."
+            displayColor = Color(0xFF4CAF50)
+        } else {
+            val parts = shortcutData.split("::", limit = 3)
+            val pkg   = parts.getOrElse(0) { "" }
+            val sid   = parts.getOrElse(1) { "" }
+            val lbl   = parts.getOrElse(2) { "" }
+            val pkgInstalled = remember(pkg) {
+                try { context.packageManager.getPackageInfo(pkg, 0); true }
+                catch (_: Exception) { false }
+            }
+            if (pkgInstalled) {
+                displayText = "Anywhere — ${lbl.ifBlank { sid }}"
+                displayColor = Color(0xFF4CAF50)
+            } else {
+                displayText = "Card unavailable — re-bind"
+                displayColor = MaterialTheme.colorScheme.error
+            }
+        }
+    } else {
+        val baseName = ZoneAction.ALL.firstOrNull { it.first == currentKey }?.second ?: "No Action"
+        val appLabel = if (currentKey == "open_app" && appPkg.isNotBlank()) " ($appPkg)" else ""
+        displayText = baseName + appLabel
+        displayColor = MaterialTheme.colorScheme.onSurfaceVariant
+    }
 
     Row(
         modifier = Modifier
@@ -1088,19 +1549,26 @@ private fun ActionDropdownRow(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = displayName + appLabel,
+                text = displayText,
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = displayColor,
                 maxLines = 1
             )
             Spacer(modifier = Modifier.width(4.dp))
             Text("▼", style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
             ZoneAction.ALL.forEach { (key, name) ->
                 DropdownMenuItem(
-                    text = { Text(name) },
+                    text = {
+                        Text(name,
+                            color = if (key == "launch_shortcut") Color(0xFF4CAF50)
+                                    else Color.Unspecified)
+                    },
                     onClick = { expanded = false; onSelect(key) }
                 )
             }
@@ -1281,6 +1749,7 @@ private fun GuideCard(title: String, sections: List<Pair<String, String>>) {
 @Composable
 private fun HomeScreen(
     isActive: Boolean,
+    rootAvailable: Boolean,
     shadeEnabled: Boolean,
     snapperMasterEnabled: Boolean,
     zonesEnabled: Boolean,
@@ -1292,30 +1761,65 @@ private fun HomeScreen(
     var showSupportDialog by remember { mutableStateOf(false) }
 
     if (showSupportDialog) {
+        val openPayPal: (String) -> Unit = { amount ->
+            showSupportDialog = false
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse("https://paypal.me/kroomfahd/$amount"))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        }
         AlertDialog(
             onDismissRequest = { showSupportDialog = false },
-            title = { Text("Support the Developer") },
+            title = { Text("Buy me a coffee ☕") },
             text = {
-                Text(
-                    "Hi — I'm a software engineering student building this module in my free time. " +
-                    "I pay for everything out of my own pocket, and this project takes real time and effort to maintain.\n\n" +
-                    "If Jeez Tweaks has been useful to you, any support is genuinely appreciated " +
-                    "— but please know that the module is and will always be completely free to use. " +
-                    "You don't owe me anything for using it.\n\n" +
-                    "Thank you for trying it out either way. 🙏"
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        "Pick an amount — opens PayPal.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = { openPayPal("1.99") },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("$1.99") }
+                        Button(
+                            onClick = { openPayPal("5") },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("$5") }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = { openPayPal("10") },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("$10") }
+                        Button(
+                            onClick = { openPayPal("20") },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("$20") }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "Or send via username:",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                            cm.setPrimaryClip(android.content.ClipData.newPlainText("username", "@kroomfahd"))
+                            android.widget.Toast.makeText(context, "Copied @kroomfahd", android.widget.Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("@kroomfahd — tap to copy") }
+                }
             },
             confirmButton = {
-                TextButton(onClick = {
-                    showSupportDialog = false
-                    context.startActivity(
-                        Intent(Intent.ACTION_VIEW, Uri.parse("https://paypal.me/kroomfahd"))
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    )
-                }) { Text("Continue to PayPal") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showSupportDialog = false }) { Text("Maybe later") }
+                TextButton(onClick = { showSupportDialog = false }) { Text("Close") }
             }
         )
     }
@@ -1325,6 +1829,27 @@ private fun HomeScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 12.dp)
     ) {
+        if (!rootAvailable) {
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            "Root access not detected",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Text(
+                            "Some features (zone gestures, screenshot, lock screen) require root to work. " +
+                            "Grant root access in your root manager and reopen the app.\n\n" +
+                            "This app is 100% safe — no internet access, no remote servers, no analytics. " +
+                            "Everything runs locally on your device.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+            }
+        }
         item {
             Card(
                 colors = CardDefaults.cardColors(
@@ -1347,7 +1872,7 @@ private fun HomeScreen(
             FeatureCard(
                 icon      = Icons.Default.Notifications,
                 iconColor = Color(0xFF2196F3),
-                title     = "Notifications",
+                title     = "Notification Tweak",
                 subtitle  = "Auto-expand in shade, heads-up, lock screen",
                 isEnabled = shadeEnabled,
                 onClick   = { onNavigate("notifications") }
@@ -1357,7 +1882,7 @@ private fun HomeScreen(
             FeatureCard(
                 icon      = Icons.Default.Keyboard,
                 iconColor = Color(0xFF4CAF50),
-                title     = "Keyboard Enhancer",
+                title     = "Gboard Tweak",
                 subtitle  = "Clipboard, shortcuts, cursor tools in Gboard",
                 isEnabled = kbEnhancerEnabled,
                 onClick   = { onNavigate("keyboard") }
@@ -1367,7 +1892,7 @@ private fun HomeScreen(
             FeatureCard(
                 icon      = Icons.Default.CameraAlt,
                 iconColor = Color(0xFFFF9800),
-                title     = "Screen Snapper",
+                title     = "Snapper Tweak",
                 subtitle  = "Pin cropped screenshots on screen",
                 isEnabled = snapperMasterEnabled,
                 onClick   = { onNavigate("snapper") }
@@ -1377,53 +1902,85 @@ private fun HomeScreen(
             FeatureCard(
                 icon      = Icons.Default.TouchApp,
                 iconColor = Color(0xFF9C27B0),
-                title     = "Status Bar Zones",
+                title     = "Status Bar Tweak",
                 subtitle  = "Tap the status bar to trigger quick actions",
                 isEnabled = zonesEnabled,
                 onClick   = { onNavigate("zones") }
             )
         }
         item {
-            FeatureCard(
-                icon      = Icons.Default.Favorite,
-                iconColor = Color(0xFFE91E63),
-                title     = "Support the Developer",
-                subtitle  = "Help keep this project alive",
-                isEnabled = null,
-                onClick   = { showSupportDialog = true }
-            )
-        }
-        item {
-            FeatureCard(
-                icon      = Icons.Default.BugReport,
-                iconColor = Color(0xFFF44336),
-                title     = "Report a Problem",
-                subtitle  = "Contact me on Telegram",
-                isEnabled = null,
-                onClick   = {
-                    try {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                SmallActionCard(
+                    icon      = Icons.Default.Favorite,
+                    iconColor = Color(0xFFE91E63),
+                    label     = "Support Dev",
+                    modifier  = Modifier.weight(1f),
+                    onClick   = { showSupportDialog = true }
+                )
+                SmallActionCard(
+                    icon      = Icons.Default.Star,
+                    iconColor = Color(0xFFFFC107),
+                    label     = "Star on GitHub",
+                    modifier  = Modifier.weight(1f),
+                    onClick   = {
                         context.startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse("tg://resolve?domain=kvmy1"))
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
-                    } catch (_: Exception) {
-                        context.startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/kvmy1"))
+                            Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/kvmy666/AutoExpandNotifications"))
                                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         )
                     }
-                }
-            )
+                )
+            }
         }
         item {
-            FeatureCard(
-                icon      = Icons.Default.Info,
-                iconColor = Color(0xFF9E9E9E),
-                title     = "Guide",
-                subtitle  = "How to use Jeez Tweaks",
-                isEnabled = null,
-                onClick   = { onNavigate("guide") }
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                SmallActionCard(
+                    icon      = Icons.Default.BugReport,
+                    iconColor = Color(0xFFF44336),
+                    label     = "Report Problem",
+                    modifier  = Modifier.weight(1f),
+                    onClick   = {
+                        try {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse("tg://resolve?domain=kvmy1"))
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        } catch (_: Exception) {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/kvmy1"))
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        }
+                    }
+                )
+                SmallActionCard(
+                    icon      = Icons.Default.Send,
+                    iconColor = Color(0xFF29B6F6),
+                    label     = "Telegram Group",
+                    modifier  = Modifier.weight(1f),
+                    onClick   = {
+                        try {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse("tg://resolve?domain=autoExpand"))
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        } catch (_: Exception) {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/autoExpand"))
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        }
+                    }
+                )
+            }
+        }
+        if (io.github.kvmy666.autoexpand.BuildConfig.DEBUG) {
+            item { DebugCard() }
         }
     }
 }
@@ -1481,6 +2038,38 @@ private fun FeatureCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun SmallActionCard(
+    icon: ImageVector,
+    iconColor: Color,
+    label: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Card(
+        onClick = onClick,
+        modifier = modifier,
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF1C1C1E))
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(iconColor.copy(alpha = 0.15f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(icon, contentDescription = null, tint = iconColor, modifier = Modifier.size(20.dp))
+            }
+            Text(label, style = MaterialTheme.typography.labelMedium, textAlign = TextAlign.Center)
         }
     }
 }
@@ -1653,48 +2242,46 @@ private fun SnapperSettingsCard(
 @Composable
 private fun DebugCard() {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     var showDialog by remember { mutableStateOf(false) }
     var isCapturing by remember { mutableStateOf(false) }
+    var countdown by remember { mutableStateOf(30) }
+
+    // Countdown + capture runs while isCapturing is true
+    LaunchedEffect(isCapturing) {
+        if (!isCapturing) return@LaunchedEffect
+        for (i in 30 downTo 1) { countdown = i; delay(1000) }
+        val file = withContext(Dispatchers.IO) { DebugLogHelper.capture(context) }
+        isCapturing = false; countdown = 30
+        if (file != null) {
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            context.startActivity(Intent.createChooser(
+                Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }, "Share Debug Log"
+            ))
+        } else {
+            Toast.makeText(context, "Capture failed — root may be needed", Toast.LENGTH_LONG).show()
+        }
+    }
 
     if (showDialog) {
         AlertDialog(
             onDismissRequest = { showDialog = false },
-            title = { Text("Debug Capture") },
+            title = { Text("Capture Debug Logs") },
             text = {
                 Text(
-                    "Prepare the test sequence:\n\n" +
-                    "1. Trigger a notification (e.g. receive a message)\n" +
-                    "2. Toggle any setting in this app\n" +
-                    "3. Tap OK — logcat will be captured after 30 seconds\n\n" +
+                    "1. Tap Start — a 30-second timer begins\n" +
+                    "2. Do the action that is NOT working\n" +
+                    "   (e.g. long-press your status bar zone)\n" +
+                    "3. Wait for the timer to finish\n" +
+                    "4. Share the log file that appears\n\n" +
                     "Root access is required."
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
-                    showDialog = false
-                    isCapturing = true
-                    scope.launch {
-                        delay(30_000)
-                        val file = withContext(Dispatchers.IO) { DebugLogHelper.capture(context) }
-                        isCapturing = false
-                        if (file != null) {
-                            val uri = FileProvider.getUriForFile(
-                                context,
-                                "${context.packageName}.fileprovider",
-                                file
-                            )
-                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/plain"
-                                putExtra(Intent.EXTRA_STREAM, uri)
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                            }
-                            context.startActivity(Intent.createChooser(shareIntent, "Share Debug Log"))
-                        } else {
-                            Toast.makeText(context, "Failed — root access required", Toast.LENGTH_LONG).show()
-                        }
-                    }
-                }) { Text("OK — Start") }
+                TextButton(onClick = { showDialog = false; isCapturing = true }) { Text("Start") }
             },
             dismissButton = {
                 TextButton(onClick = { showDialog = false }) { Text("Cancel") }
@@ -1708,35 +2295,21 @@ private fun DebugCard() {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Default.BugReport,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Text(
-                    text = "Debug Logcat",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.primary
-                )
+                Icon(Icons.Default.BugReport, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Text("Capture Debug Logs", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
             }
             Text(
-                text = "For Xiaomi / MIUI users — diagnose IPC & SELinux issues. Captures system logs filtered for module activity and permission denials.",
+                text = "30-second log snapshot. Tap Start, reproduce the failing action, then share the file.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             if (isCapturing) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                    Text("Capturing logcat…", style = MaterialTheme.typography.bodySmall)
+                    Text("Recording… ${countdown}s remaining", style = MaterialTheme.typography.bodySmall)
                 }
             } else {
-                Button(
-                    onClick = { showDialog = true },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+                Button(onClick = { showDialog = true }, modifier = Modifier.fillMaxWidth()) {
                     Text("Start Debug Capture")
                 }
             }

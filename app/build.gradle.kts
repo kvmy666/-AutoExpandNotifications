@@ -21,8 +21,8 @@ android {
         applicationId = "io.github.kvmy666.autoexpand"
         minSdk = 35
         targetSdk = 36
-        versionCode = 30002
-        versionName = "3.0.2"
+        versionCode = 30100
+        versionName = "3.1.0"
         ndk {
             abiFilters += "arm64-v8a"
         }
