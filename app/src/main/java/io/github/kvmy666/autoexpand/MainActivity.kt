@@ -1966,12 +1966,12 @@ private fun HomeScreen(
                     onClick   = {
                         try {
                             context.startActivity(
-                                Intent(Intent.ACTION_VIEW, Uri.parse("tg://resolve?domain=autoExpand"))
+                                Intent(Intent.ACTION_VIEW, Uri.parse("tg://resolve?domain=autoexpandNotification"))
                                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             )
                         } catch (_: Exception) {
                             context.startActivity(
-                                Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/autoExpand"))
+                                Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/autoexpandNotification"))
                                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             )
                         }
