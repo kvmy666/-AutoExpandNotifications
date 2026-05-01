@@ -152,7 +152,7 @@ class SnapCropView(context: Context) : View(context) {
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         bitmapDst.set(0f, 0f, w.toFloat(), h.toFloat())
-        Log.d("JeezSnapper", "CropView: view=${w}×${h}")
+        Log.d("Snapper", "CropView: view=${w}×${h}")
 
         // Two 52dp buttons, 16dp gap, 16dp from screen bottom, horizontally centred
         val btnSize = dp(52f)
@@ -384,7 +384,7 @@ class SnapCropView(context: Context) : View(context) {
             }
         }
         if (hasSel) {
-            Log.d("JeezSnapper",
+            Log.d("Snapper",
                 "Selection: ${selRect.toShortString()} — ${selRect.width().toInt()}×${selRect.height().toInt()}px")
             onSelectionComplete?.invoke(RectF(selRect))
         }

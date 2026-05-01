@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">AutoExpandNotifications</string>
+    <string name="app_name">Auto Expand</string>
 
     <!-- Module status -->
     <string name="module_active">Module is active</string>

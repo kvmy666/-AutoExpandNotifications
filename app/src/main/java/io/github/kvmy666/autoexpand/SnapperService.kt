@@ -47,7 +47,7 @@ class SnapperService : Service() {
         const val ACTION_FLOAT_SNAP       = "io.github.kvmy666.autoexpand.ACTION_FLOAT_SNAP"
         const val EXTRA_SNAP_PATH         = "snap_path"
         private const val NOTIFICATION_ID = 1001
-        private const val TAG             = "JeezSnapper"
+        private const val TAG             = "Snapper"
         private const val FILE_PROVIDER   = "io.github.kvmy666.autoexpand.fileprovider"
     }
 

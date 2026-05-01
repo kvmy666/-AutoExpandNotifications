@@ -132,6 +132,10 @@ class ClipboardDatabase(
         writableDatabase.execSQL("DELETE FROM $TABLE WHERE $COL_ID = $id")
     }
 
+    fun deleteAll() {
+        writableDatabase.execSQL("DELETE FROM $TABLE")
+    }
+
     fun updateMaxEntries(max: Int) {
         maxEntries = max
         pruneOldEntries(writableDatabase)

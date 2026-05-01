@@ -32,7 +32,7 @@ class KeyboardHook : IXposedHookLoadPackage {
 
     private val TAG = "AutoExpand"
     private val GBOARD_PKG = "com.google.android.inputmethod.latin"
-    private val PREFS_FILE = "/data/local/tmp/jeez_prefs.json"
+    private val PREFS_FILE = "/data/local/tmp/tweaks_prefs.json"
     @Volatile private var filePrefCache: Map<String, String>? = null
     private val dbExecutor = Executors.newSingleThreadExecutor()
 
@@ -91,7 +91,12 @@ class KeyboardHook : IXposedHookLoadPackage {
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (lpparam.packageName != GBOARD_PKG) return
+        try { installKeyboardHooks(lpparam) } catch (t: Throwable) {
+            XposedBridge.log("$TAG KeyboardHook init failed (silent): $t")
+        }
+    }
 
+    private fun installKeyboardHooks(lpparam: XC_LoadPackage.LoadPackageParam) {
         XposedBridge.log("$TAG KeyboardHook loaded in $GBOARD_PKG")
 
         // ── Phase 1: Reconnaissance logging ──────────────
@@ -564,7 +569,16 @@ class KeyboardHook : IXposedHookLoadPackage {
             setPadding((8f * dp).toInt(), (4f * dp).toInt(), (8f * dp).toInt(), (4f * dp).toInt())
             setBackgroundColor(Color.parseColor("#33FFFFFF"))
         }
+        val deleteAllBtn = TextView(ctx).apply {
+            text = "🗑 Delete all"
+            setTextColor(Color.parseColor("#FFAAAA"))
+            textSize = 11f
+            setPadding((8f * dp).toInt(), (4f * dp).toInt(), (8f * dp).toInt(), (4f * dp).toInt())
+            setBackgroundColor(Color.parseColor("#33FFFFFF"))
+        }
         sortRow.addView(sortBtn)
+        sortRow.addView(View(ctx), LinearLayout.LayoutParams(0, 1, 1f))
+        sortRow.addView(deleteAllBtn)
         outerContainer.addView(sortRow)
 
         // ── Scrollable list ──
@@ -633,6 +647,15 @@ class KeyboardHook : IXposedHookLoadPackage {
             sortBtn.text = sortLabels[idx]
             reloadList()
         }
+        deleteAllBtn.setOnClickListener {
+            try {
+                showDeleteAllConfirm(ctx, dp, deleteAllBtn) {
+                    dbExecutor.submit { db.deleteAll(); deleteAllBtn.post { reloadList() } }
+                }
+            } catch (t: Throwable) {
+                XposedBridge.log("$TAG [KB] deleteAll confirm failed: ${t.message}")
+            }
+        }
 
         reloadList()
         anchor.post { popup.showAtLocation(anchor, Gravity.BOTTOM or Gravity.START, 0, anchor.height) }
@@ -694,6 +717,58 @@ class KeyboardHook : IXposedHookLoadPackage {
             setBackgroundColor(Color.parseColor("#22FFFFFF"))
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (1f * dp).toInt())
         })
+    }
+
+    // PopupWindow-based confirm (AlertDialog needs Activity context — IME has none).
+    // Mirrors showEntryOptions: WRAP_CONTENT height + showAsDropDown to stay anchored
+    // inside the IME window, avoiding BadTokenException from showAtLocation.
+    private fun showDeleteAllConfirm(ctx: Context, dp: Float, anchor: View, onConfirm: () -> Unit) {
+        val container = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#FF2A2A3E"))
+            setPadding((14f * dp).toInt(), (12f * dp).toInt(), (14f * dp).toInt(), (8f * dp).toInt())
+        }
+        val msg = TextView(ctx).apply {
+            text = "Delete all clipboard items?\nThis cannot be undone."
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            setPadding(0, 0, 0, (10f * dp).toInt())
+        }
+        val btnRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+        }
+        val popup = PopupWindow(
+            container,
+            (240f * dp).toInt(),
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            true
+        ).apply {
+            setBackgroundDrawable(ColorDrawable(Color.parseColor("#FF2A2A3E")))
+            isOutsideTouchable = true
+            elevation = 16f * dp
+        }
+        val cancelBtn = TextView(ctx).apply {
+            text = "Cancel"
+            setTextColor(Color.parseColor("#AAFFFFFF"))
+            textSize = 13f
+            setPadding((12f * dp).toInt(), (8f * dp).toInt(), (12f * dp).toInt(), (8f * dp).toInt())
+            setOnClickListener { popup.dismiss() }
+        }
+        val confirmBtn = TextView(ctx).apply {
+            text = "Delete all"
+            setTextColor(Color.parseColor("#FF5555"))
+            textSize = 13f
+            setPadding((12f * dp).toInt(), (8f * dp).toInt(), (12f * dp).toInt(), (8f * dp).toInt())
+            setOnClickListener { popup.dismiss(); onConfirm() }
+        }
+        btnRow.addView(cancelBtn)
+        btnRow.addView(confirmBtn)
+        container.addView(msg)
+        container.addView(btnRow)
+        try { popup.showAsDropDown(anchor) } catch (t: Throwable) {
+            XposedBridge.log("$TAG [KB] showDeleteAllConfirm.showAsDropDown failed: ${t.message}")
+        }
     }
 
     // Uses PopupWindow instead of AlertDialog — AlertDialog requires Activity context, IME has none

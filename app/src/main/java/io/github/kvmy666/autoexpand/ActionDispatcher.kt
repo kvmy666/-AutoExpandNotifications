@@ -2,15 +2,20 @@ package io.github.kvmy666.autoexpand
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.content.pm.LauncherApps
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
+import android.os.Process
+import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Log
+import android.view.KeyEvent
 
 object ActionDispatcher {
 
-    private const val TAG = "JeezZones"
+    private const val TAG = "Zones"
     const val ACTION_PRIVILEGED = "io.github.kvmy666.autoexpand.ZONE_PRIVILEGED_ACTION"
     const val EXTRA_ACTION_KEY  = "zone_action_key"
 
@@ -38,7 +43,16 @@ object ActionDispatcher {
                 is ZoneAction.RingerVibrate     -> setRinger(context, AudioManager.RINGER_MODE_VIBRATE)
                 is ZoneAction.RingerSilent      -> setRinger(context, AudioManager.RINGER_MODE_SILENT)
                 is ZoneAction.CycleRinger       -> cycleRinger(context)
+                is ZoneAction.MediaPlayPause    -> dispatchMediaKey(context, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
+                is ZoneAction.MediaNext         -> dispatchMediaKey(context, KeyEvent.KEYCODE_MEDIA_NEXT)
+                is ZoneAction.MediaPrev         -> dispatchMediaKey(context, KeyEvent.KEYCODE_MEDIA_PREVIOUS)
+                is ZoneAction.BrightnessUp      -> adjustBrightness(context, +1)
+                is ZoneAction.BrightnessDown    -> adjustBrightness(context, -1)
+                is ZoneAction.OpenRecents       -> openRecents()
+                is ZoneAction.OpenCamera        -> openCamera(context)
+                is ZoneAction.ToggleAirplaneMode -> toggleAirplaneMode()
                 // Privileged actions handled by the SystemUI hook via broadcast
+                is ZoneAction.LaunchShortcut    -> launchShortcut(action.packageName, action.shortcutId, context)
                 is ZoneAction.ToggleWifi,
                 is ZoneAction.ToggleBluetooth,
                 is ZoneAction.ToggleMobileData,
@@ -201,6 +215,97 @@ object ActionDispatcher {
             am.ringerMode = mode
         } catch (t: Throwable) {
             Log.e(TAG, "setRinger failed: $t")
+        }
+    }
+
+    private fun launchShortcut(packageName: String, shortcutId: String, context: Context) {
+        if (packageName.isBlank() || shortcutId.isBlank()) return
+        try {
+            if (packageName == "com.absinthe.anywhere_") {
+                // Deep links don't need root — fire directly from SystemUI context.
+                // Using su am start broke on KernelSU (su not on SystemUI's PATH).
+                context.startActivity(
+                    Intent(Intent.ACTION_VIEW, Uri.parse("anywhere://open?sid=$shortcutId"))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            } else {
+                val la = context.getSystemService(LauncherApps::class.java)
+                la.startShortcut(packageName, shortcutId, null, null, Process.myUserHandle())
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "launchShortcut $packageName/$shortcutId failed: $t")
+        }
+    }
+
+    private fun dispatchMediaKey(context: Context, keyCode: Int) {
+        try {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP,   keyCode))
+        } catch (t: Throwable) {
+            Log.e(TAG, "mediaKey $keyCode failed: $t")
+        }
+    }
+
+    private fun openRecents() {
+        try {
+            Runtime.getRuntime().exec(arrayOf("su", "-c", "input keyevent 187"))
+        } catch (t: Throwable) {
+            Log.e(TAG, "openRecents failed: $t")
+        }
+    }
+
+    private fun openCamera(context: Context) {
+        try {
+            context.startActivity(
+                Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (t: Throwable) {
+            Log.e(TAG, "openCamera failed: $t")
+        }
+    }
+
+    private fun toggleAirplaneMode() {
+        try {
+            val get = Runtime.getRuntime().exec(arrayOf("su", "-c", "settings get global airplane_mode_on"))
+            val current = get.inputStream.bufferedReader().readLine()?.trim() ?: "0"
+            get.waitFor(); get.destroy()
+            val next = if (current == "1") "0" else "1"
+            val cmd = "settings put global airplane_mode_on $next && " +
+                      "am broadcast -a android.intent.action.AIRPLANE_MODE --ez state ${next == "1"}"
+            val set = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+            set.waitFor(); set.destroy()
+        } catch (t: Throwable) {
+            Log.e(TAG, "toggleAirplaneMode failed: $t")
+        }
+    }
+
+    // Adjust screen brightness in 12 steps (0..255). Direction: +1 up, -1 down.
+    // Switches off auto-brightness so the change actually sticks.
+    private fun adjustBrightness(context: Context, direction: Int) {
+        try {
+            if (!Settings.System.canWrite(context)) {
+                context.startActivity(
+                    Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS)
+                        .setData(Uri.parse("package:${context.packageName}"))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+                return
+            }
+            val cr = context.contentResolver
+            try {
+                Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL)
+            } catch (_: Throwable) {}
+            val current = try {
+                Settings.System.getInt(cr, Settings.System.SCREEN_BRIGHTNESS)
+            } catch (_: Throwable) { 128 }
+            val step = 255 / 12
+            val next = (current + direction * step).coerceIn(1, 255)
+            Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS, next)
+        } catch (t: Throwable) {
+            Log.e(TAG, "adjustBrightness failed: $t")
         }
     }
 

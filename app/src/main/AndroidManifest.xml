@@ -69,7 +69,7 @@
         <!-- Module description -->
         <meta-data
             android:name="xposeddescription"
-            android:value="Notification &amp; System Tweaks + Keyboard Enhancer for OxygenOS — auto-expand notifications, disable heads-up popup, mute back gesture haptic, Gboard toolbar with clipboard manager" />
+            android:value="Auto Expand — auto-expand notifications (shade · heads-up · lock screen), Screen Snapper, Gboard toolbar with clipboard, Status Bar Zones. Tested on OnePlus + Xiaomi 17." />
 
         <!-- Minimum Xposed API version -->
         <meta-data

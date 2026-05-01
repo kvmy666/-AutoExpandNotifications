@@ -1,16 +1,27 @@
-# Jeez Tweaks
+# Auto Expand
 
-Notification Tweaks · Screen Snapper · Keyboard Enhancer · Status Bar Zones for OxygenOS
+Notification Tweak · Gboard Tweak · Snapper Tweak · Status Bar Tweak — four useful tweaks to enhance your Android experience.
 
-![GitHub release](https://img.shields.io/github/v/release/kvmy666/-AutoExpandNotifications?style=flat-square)
-![License](https://img.shields.io/github/license/kvmy666/-AutoExpandNotifications?style=flat-square)
+[![GitHub release](https://img.shields.io/github/v/release/kvmy666/-AutoExpandNotifications?style=flat-square)](https://github.com/kvmy666/-AutoExpandNotifications/releases)
+[![License](https://img.shields.io/github/license/kvmy666/-AutoExpandNotifications?style=flat-square)](LICENSE)
 ![Android](https://img.shields.io/badge/Android-16%2B-green?style=flat-square)
+[![Star on GitHub](https://img.shields.io/github/stars/kvmy666/-AutoExpandNotifications?style=flat-square&logo=github)](https://github.com/kvmy666/-AutoExpandNotifications/stargazers)
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-PayPal-FFDD00?style=flat-square&logo=paypal)](https://paypal.me/kroomfahd)
 
 ---
 
 ## About
 
-An LSPosed/Xposed module that brings powerful system-level enhancements to OnePlus devices running OxygenOS 16. Auto-expand notifications everywhere, capture and float screen regions as overlays, inject a clipboard toolbar into Gboard, and assign quick actions to invisible tap zones on the status bar — all configurable from a clean home-screen-style settings UI, all 100% local with no network access.
+**Auto Expand** is an LSPosed/Xposed module that bundles **four useful tweaks** to make daily Android use faster and less cluttered:
+
+1. **Notification Tweak** — auto-expands every notification (shade, heads-up, lock screen) so you read full text + actions without tapping. Grouped notifications expand the parent and keep children in the compact list style.
+2. **Gboard Tweak** — adds a customizable toolbar below Gboard with clipboard history, paste, select-all, cursor jump, and text shortcuts.
+3. **Snapper Tweak** — zero-delay screen-region capture you can crop, float on top of any app, save, share, or OCR. Triggered by an edge button or the Power+Volume-Down chord.
+4. **Status Bar Tweak** — invisible tap zones around the camera cutout. Single / double / triple tap and long-press each map to one of 21 quick actions (flashlight, Wi-Fi, screenshot, lock screen, open app, etc.).
+
+Everything is configurable from a clean home-screen-style settings UI, 100% local, no network access. The module hooks SystemUI directly, so it works on most Android 16 ROMs that use AOSP-derived notification internals. Every hook is wrapped in try/catch — if anything fails, it fails silently. No bootloop risk.
+
+> **If you find this useful, [star the repo](https://github.com/kvmy666/-AutoExpandNotifications) and consider [buying me a coffee](https://paypal.me/kroomfahd) — it keeps the project alive.**
 
 ## Screenshots
 
@@ -22,14 +33,14 @@ An LSPosed/Xposed module that brings powerful system-level enhancements to OnePl
 
 ## Features
 
-### Auto-Expand Notifications
-Automatically expand all notifications in three contexts:
+### Notification Tweak (Auto-Expand)
+Automatically expand notifications in three contexts:
 - **Notification Shade** — full text and action buttons visible the moment you pull down
-- **Heads-Up Banners** — incoming banners arrive fully expanded; swipe down to collapse, swipe down again to expand
+- **Heads-Up Banners** — incoming banners arrive fully expanded; supports grouped HUDs (parent expanded, children pre-collapsed, no flicker)
 - **Lock Screen** — expanded notifications by default; can be disabled for privacy
 
 ### Heads-Up Max Lines
-Caps the number of visible text lines in auto-expanded heads-up banners so long messages don't fill your entire screen. Set your preferred limit in the Notifications tab (default: 5 lines, 0 = unlimited).
+Caps the number of visible text lines in auto-expanded heads-up banners so long messages don't fill your entire screen. (default: 5 lines, 0 = unlimited).
 
 ### Disable Heads-Up Popup
 Prevents the mini-window / freeform app launch when swiping down on a heads-up notification.
@@ -45,12 +56,12 @@ Choose specific apps whose notifications should NOT be auto-expanded.
 
 ---
 
-### Screen Snapper
+### Snapper Tweak
 A zero-delay screen capture and annotation tool built directly into the system. Requires the **Display over other apps** overlay permission.
 
-**Activation** — three modes selectable in the Snapper screen:
+**Activation** — three modes:
 - **Software** — floating edge button on the left or right side of the screen
-- **Hardware** — Power + Volume Down chord, intercepted at `system_server` level. Native OxygenOS screenshot is fully suppressed; only Snapper fires
+- **Hardware** — Power + Volume Down chord, intercepted at `system_server` level. The native screenshot is fully suppressed; only Snapper fires
 - **Both** — edge button and chord active simultaneously
 
 **Capture flow**
@@ -69,7 +80,7 @@ A zero-delay screen capture and annotation tool built directly into the system. 
 
 ---
 
-### Keyboard Enhancer (Gboard Toolbar)
+### Gboard Tweak (Keyboard Toolbar)
 Injects a customizable toolbar below Gboard. Each button can be individually enabled or disabled. Toolbar height is adjustable via a slider.
 
 - **Clipboard** — scrollable clipboard history popup. Pin entries with a long-press.
@@ -80,7 +91,7 @@ Injects a customizable toolbar below Gboard. Each button can be individually ena
 
 ---
 
-### Status Bar Zones *(New in v3.0.0)*
+### Status Bar Tweak
 Invisible tap zones on the left and right sides of the status bar, around the camera cutout. Assign any of 21 quick actions to each zone gesture.
 
 **Gestures per zone:** single tap · double tap · triple tap · long press
@@ -93,16 +104,6 @@ Invisible tap zones on the left and right sides of the status bar, around the ca
 
 ---
 
-## Settings App (v3.0.0)
-
-The settings app now uses a **home screen card navigation** instead of a bottom tab bar, matching the OnePlus Settings visual style (pure black background, dark gray cards, colored icons).
-
-- **Home** — all features listed as tappable cards with live ON/OFF state
-- **Back navigation** — tap any card to enter a feature; use the back arrow or system back to return
-- **Guide** — collapsible explanations for every feature, with a Status Bar Zones section
-
----
-
 ## Privacy
 
 Everything this module does happens entirely on your device. No data is collected, no network requests are made, no analytics are included. No internet permission is declared.
@@ -111,11 +112,23 @@ Everything this module does happens entirely on your device. No data is collecte
 
 ## Requirements
 
-- OnePlus device running **OxygenOS 16** (Android 16)
+- Android device running **Android 16**
 - **Root access** (Magisk / KernelSU / APatch)
 - **LSPosed** framework (Irena or compatible fork)
 - **Zygisk** enabled
-- **Display over other apps** permission (required for Screen Snapper and Zone size preview)
+- **Display over other apps** permission (required for Snapper Tweak and Zone size preview)
+
+---
+
+## Tested On
+
+| Device | OS | Status |
+|---|---|---|
+| OnePlus 15 | OxygenOS 16 (Android 16) | Fully working |
+| Xiaomi 17 | HyperOS / Android 16 | Fully working |
+| Other OnePlus Android 16 devices | OxygenOS 16 | Expected to work |
+
+> Built against AOSP-derived SystemUI internals. May work on other Android 16 ROMs (Pixel, ColorOS, OneUI 8, etc.) but compatibility is not guaranteed. Hooks fail silently — installing on an unsupported ROM will not bootloop, the affected feature will just be inactive.
 
 ---
 
@@ -123,62 +136,52 @@ Everything this module does happens entirely on your device. No data is collecte
 
 1. Download the latest APK from [Releases](https://github.com/kvmy666/-AutoExpandNotifications/releases)
 2. Install the APK on your device
-3. Open **LSPosed Manager** → **Modules** → find **Jeez Tweaks** → enable it
-4. Tap the module to open its scope. Enable **all three** processes:
-   - **`android`** (System Framework) — required for Screen Snapper hardware chord + Status Bar Zones
-   - **`com.android.systemui`** (System UI) — required for Notifications + Status Bar Zones
-   - **`com.google.android.inputmethod.latin`** (Gboard) — required for Keyboard Enhancer
+3. Open **LSPosed Manager** → **Modules** → find **Auto Expand** → enable it
+4. Tap the module to open its scope. Enable the processes you need:
+   - **`android`** (System Framework) — required for Snapper Tweak hardware chord + Status Bar Tweak
+   - **`com.android.systemui`** (System UI) — required for Notifications + Status Bar Tweak
+   - **`com.google.android.inputmethod.latin`** (Gboard) — required for Gboard Tweak
 5. **Reboot** your device
-6. Open the **Jeez Tweaks** app to configure features
-7. For **Screen Snapper**: grant *Display over other apps* when the red warning card appears in the Snapper screen
-8. For **Status Bar Zones**: grant *Display over other apps* (same permission, needed for zone size preview)
-
-> **Tip:** If the Status Bar Zones feature is enabled but taps don't fire actions, check logcat for `JeezZones` tags to confirm the hook is active in SystemUI.
+6. Open the **Auto Expand** app to configure features
+7. For **Snapper Tweak** / **Status Bar Tweak**: grant *Display over other apps* when prompted
 
 ---
 
-## Tested On
+## Support the Project
 
-| Device | OS Version | Status |
-|---|---|---|
-| OnePlus 15 | OxygenOS 16.0.3.501 (Android 16) | Fully Working |
+If Auto Expand is useful to you, two things go a long way:
 
-> Built and tested specifically for OxygenOS 16. It may work on other OxygenOS versions or OnePlus devices, but compatibility is not guaranteed.
+- ⭐ **[Star the repo on GitHub](https://github.com/kvmy666/-AutoExpandNotifications)** — visibility helps more people find it
+- ☕ **[Buy me a coffee via PayPal](https://paypal.me/kroomfahd)** — pick any amount, or send to `@kroomfahd`
 
 ---
 
 ## Changelog
 
+### v3.0.x
+- Renamed to **Auto Expand**
+- Grouped heads-up notifications: parent expanded, children pre-collapsed at attach-time (no flicker)
+- Group notification expand in shade and lock screen
+- Donation UI: 4 PayPal amount buttons + copy `@kroomfahd` username
+- "Star on GitHub" card on the home screen
+- Top-level hook safety net — no bootloop on hook init failure
+- README rewritten for general Android 16 audience
+
 ### v3.0.0
-- **Status Bar Zones** — invisible tap zones on left/right of the status bar; assign 21 quick actions to single tap / double tap / triple tap / long press on each side
-- **Haptic feedback** for zone taps — tick for taps, heavy-click for long press; configurable
-- **Zone size preview** — live colored overlays on the status bar when adjusting zone widths
-- **Home screen navigation** — card-based UI replacing the 5-tab bottom bar; pure black OnePlus-style theme
-- **Support the Developer** card — PayPal donation link with dismissable dialog
-- **Report a Problem** card — opens Telegram `@kvmy1` directly from the app
-- **APK size reduced** from 102 MB → 53 MB — ABI stripped to arm64-v8a, ML Kit switched to Play Services (no bundled model), R8 minification enabled
-- **Battery optimization** — heartbeat write interval doubled (30 s → 60 s); StatusBarZonesService confirmed zero-poll architecture
+- **Status Bar Tweak** — invisible tap zones with 21 quick actions
+- **Haptic feedback** for zone taps; configurable
+- **Zone size preview** — live colored overlays on the status bar
+- **Home screen navigation** — card-based UI, pure black theme
+- **APK size reduced** from 102 MB → 53 MB (arm64-v8a only, R8, ML Kit on Play Services)
 
-### v2.0.6
-- XSharedPreferences IPC for Xiaomi SmartPower compatibility
-
-### v2.0.4
-- Snapper tab shows visible red warning card when overlay permission is missing
-
-### v2.0.3
-- All `windowManager.addView()` calls wrapped in try-catch
-
-### v2.0.2
+### v2.0.x
+- Snapper Tweak, Heads-Up Max Lines, hardware chord interception
+- XSharedPreferences IPC for Xiaomi compatibility
+- Master toggle for Snapper Tweak
 - Crop coordinate fix; Gemini hardening
 
-### v2.0.1
-- Master toggle for Screen Snapper
-
-### v2.0.0
-- Screen Snapper, Heads-Up Max Lines, hardware chord interception, bottom navigation UI redesign
-
-### v1.2.x and earlier
-- Keyboard Enhancer (Gboard toolbar), clipboard history, ungroup notifications, initial release
+### v1.x
+- Gboard Tweak (Gboard toolbar), clipboard history, ungroup notifications, initial release
 
 ---
 
@@ -187,17 +190,11 @@ Everything this module does happens entirely on your device. No data is collecte
 **Q: Do I need to reboot after changing settings?**
 A: Yes, a reboot is required for toggle changes to take effect. The app shows a reminder.
 
-**Q: Which LSPosed scope processes do I need to enable?**
-A: Enable all three — `android`, `com.android.systemui`, and `com.google.android.inputmethod.latin`. Missing any one disables the corresponding feature.
-
-**Q: Status Bar Zones are enabled but nothing happens when I tap.**
-A: Confirm the SystemUI hook is active (LSPosed should show it hooked). The zones only fire inside the status bar area — not below it. Try assigning the flashlight to single tap to test.
-
-**Q: The zone preview overlay doesn't appear at the top of the screen.**
-A: Grant the *Display over other apps* permission and try again.
-
 **Q: Will this cause a bootloop?**
-A: Every hook is wrapped in a try-catch. If something fails, it fails silently. Still recommended to have bootloop protection in place.
+A: Every hook is wrapped in try/catch with a top-level safety net. If a hook fails, it fails silently — the affected feature is inactive, the system keeps running. Still recommended to have bootloop protection in place.
+
+**Q: My ROM isn't OxygenOS or HyperOS — will it work?**
+A: It will not bootloop. Whether each feature works depends on whether your ROM uses AOSP-style SystemUI internals. Try it; if a feature is silent, that hook didn't find its target.
 
 **Q: The keyboard toolbar doesn't appear after enabling it.**
 A: Force-stop Gboard after enabling the toolbar in the settings app, then open any text field.
@@ -205,14 +202,11 @@ A: Force-stop Gboard after enabling the toolbar in the settings app, then open a
 **Q: The hardware chord triggers Snapper but also takes a native screenshot.**
 A: Make sure **Hardware** or **Both** is selected and reboot. The hook intercepts the chord at `system_server` before the native handler sees it.
 
-**Q: Can I use this with Oxygen Customizer?**
-A: Yes, they hook different parts of SystemUI and should not conflict.
-
 ---
 
 ## Contributing
 
-Contributions are welcome! If you've tested this on a different OnePlus device or OxygenOS version, please open an issue to report compatibility.
+Contributions and compatibility reports are welcome — open an issue if you've tested on a different device or ROM.
 
 ## Contact
 
@@ -220,7 +214,7 @@ Contributions are welcome! If you've tested this on a different OnePlus device o
 
 ## License
 
-This project is licensed under the GPL-3.0 License — see the [LICENSE](LICENSE) file for details.
+GPL-3.0 — see the [LICENSE](LICENSE) file.
 
 ## Disclaimer
 
