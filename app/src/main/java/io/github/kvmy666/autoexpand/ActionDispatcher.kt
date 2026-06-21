@@ -19,6 +19,11 @@ object ActionDispatcher {
     const val ACTION_PRIVILEGED = "io.github.kvmy666.autoexpand.ZONE_PRIVILEGED_ACTION"
     const val EXTRA_ACTION_KEY  = "zone_action_key"
 
+    // `input keyevent` codes fired via root for actions with no public API.
+    private const val KEYEVENT_SCREENSHOT = 120  // KEYCODE_SYSRQ
+    private const val KEYEVENT_LOCK       = 223  // KEYCODE_SLEEP
+    private const val KEYEVENT_RECENTS    = 187  // KEYCODE_APP_SWITCH
+
     // Tracks torch state since CameraManager doesn't expose a simple getter
     private var torchOn = false
     private var torchCameraId: String? = null
@@ -159,7 +164,7 @@ object ActionDispatcher {
 
     private fun takeScreenshot() {
         try {
-            Runtime.getRuntime().exec(arrayOf("su", "-c", "input keyevent 120"))
+            Runtime.getRuntime().exec(arrayOf("su", "-c", "input keyevent $KEYEVENT_SCREENSHOT"))
         } catch (t: Throwable) {
             Log.e(TAG, "takeScreenshot failed: $t")
         }
@@ -167,7 +172,7 @@ object ActionDispatcher {
 
     private fun lockScreen() {
         try {
-            Runtime.getRuntime().exec(arrayOf("su", "-c", "input keyevent 223"))
+            Runtime.getRuntime().exec(arrayOf("su", "-c", "input keyevent $KEYEVENT_LOCK"))
         } catch (t: Throwable) {
             Log.e(TAG, "lockScreen failed: $t")
         }
@@ -252,7 +257,7 @@ object ActionDispatcher {
 
     private fun openRecents() {
         try {
-            Runtime.getRuntime().exec(arrayOf("su", "-c", "input keyevent 187"))
+            Runtime.getRuntime().exec(arrayOf("su", "-c", "input keyevent $KEYEVENT_RECENTS"))
         } catch (t: Throwable) {
             Log.e(TAG, "openRecents failed: $t")
         }

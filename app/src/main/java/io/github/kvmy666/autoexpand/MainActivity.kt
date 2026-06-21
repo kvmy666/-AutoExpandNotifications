@@ -13,6 +13,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.clickable
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -77,6 +82,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import kotlin.math.ln
@@ -113,6 +119,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.core.content.FileProvider
 import java.io.File
@@ -300,15 +307,7 @@ class MainActivity : ComponentActivity() {
         writePrefsFile(this)
 
         setContent {
-            val colorScheme = darkColorScheme(
-                background       = Color(0xFF000000),
-                surface          = Color(0xFF000000),
-                surfaceVariant   = Color(0xFF1C1C1E),
-                onBackground     = Color(0xFFFFFFFF),
-                onSurface        = Color(0xFFFFFFFF),
-                onSurfaceVariant = Color(0xFF8E8E93),
-            )
-            MaterialTheme(colorScheme = colorScheme) {
+            MaterialTheme(colorScheme = appDarkColorScheme()) {
                 SettingsScreen(prefs)
             }
         }
@@ -452,14 +451,17 @@ private fun SettingsScreen(prefs: SharedPreferences) {
             },
             title = { Text("What's New in v3.2.0") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("New features", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text("New features", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
                     Text("• Trackpad Stick (🕹️) — press and drag the joystick to move the cursor in any direction")
                     Text("• Undo — restore deleted text (backspace, cut, select-all). One undo brings back the whole word, plus an ↩️ toolbar button and Shake to Undo")
                     Text("• Vibration Strength — set the intensity of trackpad and shake-undo haptics")
                     Text("• Shake Sensitivity — choose how hard a shake triggers undo")
                     Spacer(Modifier.height(4.dp))
-                    Text("Fixes", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                    Text("Fixes", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
                     Text("• Grouped notifications expand correctly again after the system update")
                     Text("• Reopening the shade now expands notifications instantly every time")
                     Text("• Settings now reach the system reliably (new sync method)")
@@ -514,7 +516,8 @@ private fun SettingsScreen(prefs: SharedPreferences) {
         },
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
-        if (selectedFeature == null) {
+      Crossfade(targetState = selectedFeature, animationSpec = tween(260), label = "screen") { feature ->
+        if (feature == null) {
             val isActive = remember { MainActivity.isModuleActive(context) }
             HomeScreen(
                 isActive             = isActive,
@@ -535,76 +538,84 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                     .padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                when (selectedFeature) {
+                when (feature) {
 
                     // ── Notifications ─────────────────────────────────────────────
                     "notifications" -> {
-                        Card {
-                            Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                                ToggleRow(
-                                    title = stringResource(R.string.expand_shade_title),
-                                    description = stringResource(R.string.expand_shade_desc),
-                                    checked = shadeEnabled,
-                                    onCheckedChange = { shadeEnabled = it; onToggle("expand_shade_enabled", it) }
-                                )
-                                ToggleRow(
-                                    title = stringResource(R.string.expand_headsup_title),
-                                    description = stringResource(R.string.expand_headsup_desc),
-                                    checked = headsUpEnabled,
-                                    onCheckedChange = { headsUpEnabled = it; onToggle("expand_headsup_enabled", it) }
-                                )
-                                OutlinedTextField(
-                                    value           = headsUpMaxLines,
-                                    onValueChange   = { v ->
-                                        headsUpMaxLines = v.filter { it.isDigit() }
-                                        prefs.edit().putString("headsup_max_lines", headsUpMaxLines).apply()
-                                        MainActivity.makePrefsWorldReadable(context)
-                                    },
-                                    label           = { Text(stringResource(R.string.headsup_max_lines_title)) },
-                                    supportingText  = { Text(stringResource(R.string.headsup_max_lines_desc)) },
-                                    modifier        = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                    singleLine      = true
-                                )
-                                ToggleRow(
-                                    title = stringResource(R.string.expand_lockscreen_title),
-                                    description = stringResource(R.string.expand_lockscreen_desc),
-                                    checked = lockscreenEnabled,
-                                    onCheckedChange = { lockscreenEnabled = it; onToggle("expand_lockscreen_enabled", it) }
-                                )
-                                ToggleRow(
-                                    title = "Disable Heads-Up Hooks",
-                                    description = "Master kill-switch — when ON, no auto-expand or HUD layout hooks run. Use this if your ROM produces a blank or oversized HUD.",
-                                    checked = disableHeadsupHooks,
-                                    onCheckedChange = { disableHeadsupHooks = it; onToggle("disable_headsup_hooks_enabled", it) }
-                                )
-                            }
+                        // ── Auto-expand ──
+                        SettingsCard {
+                            SectionLabel("Auto-expand")
+                            ToggleRow(
+                                title = stringResource(R.string.expand_shade_title),
+                                description = stringResource(R.string.expand_shade_desc),
+                                checked = shadeEnabled,
+                                onCheckedChange = { shadeEnabled = it; onToggle("expand_shade_enabled", it) }
+                            )
+                            ToggleRow(
+                                title = stringResource(R.string.expand_headsup_title),
+                                description = stringResource(R.string.expand_headsup_desc),
+                                checked = headsUpEnabled,
+                                onCheckedChange = { headsUpEnabled = it; onToggle("expand_headsup_enabled", it) }
+                            )
+                            OutlinedTextField(
+                                value           = headsUpMaxLines,
+                                onValueChange   = { v ->
+                                    headsUpMaxLines = v.filter { it.isDigit() }
+                                    prefs.edit().putString("headsup_max_lines", headsUpMaxLines).apply()
+                                    MainActivity.makePrefsWorldReadable(context)
+                                },
+                                label           = { Text(stringResource(R.string.headsup_max_lines_title)) },
+                                supportingText  = { Text(stringResource(R.string.headsup_max_lines_desc)) },
+                                modifier        = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine      = true
+                            )
+                            ToggleRow(
+                                title = stringResource(R.string.expand_lockscreen_title),
+                                description = stringResource(R.string.expand_lockscreen_desc),
+                                checked = lockscreenEnabled,
+                                onCheckedChange = { lockscreenEnabled = it; onToggle("expand_lockscreen_enabled", it) }
+                            )
                         }
 
-                        Card {
-                            Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                                ToggleRow(
-                                    title = stringResource(R.string.disable_headsup_popup_title),
-                                    description = stringResource(R.string.disable_headsup_popup_desc),
-                                    checked = headsupPopupEnabled,
-                                    onCheckedChange = { headsupPopupEnabled = it; onToggle("disable_headsup_popup_enabled", it) }
-                                )
-                                ToggleRow(
-                                    title = stringResource(R.string.ungroup_notifications_title),
-                                    description = stringResource(R.string.ungroup_notifications_desc),
-                                    checked = ungroupEnabled,
-                                    onCheckedChange = { ungroupEnabled = it; onToggle("ungroup_notifications_enabled", it) }
-                                )
-                                ToggleRow(
-                                    title = stringResource(R.string.disable_back_haptic_title),
-                                    description = stringResource(R.string.disable_back_haptic_desc),
-                                    checked = backHapticEnabled,
-                                    onCheckedChange = { backHapticEnabled = it; onToggle("disable_back_haptic_enabled", it) }
-                                )
-                            }
+                        // ── Behavior ──
+                        SettingsCard {
+                            SectionLabel("Behavior")
+                            ToggleRow(
+                                title = stringResource(R.string.disable_headsup_popup_title),
+                                description = stringResource(R.string.disable_headsup_popup_desc),
+                                checked = headsupPopupEnabled,
+                                onCheckedChange = { headsupPopupEnabled = it; onToggle("disable_headsup_popup_enabled", it) }
+                            )
+                            ToggleRow(
+                                title = stringResource(R.string.ungroup_notifications_title),
+                                description = stringResource(R.string.ungroup_notifications_desc),
+                                checked = ungroupEnabled,
+                                onCheckedChange = { ungroupEnabled = it; onToggle("ungroup_notifications_enabled", it) }
+                            )
+                            ToggleRow(
+                                title = stringResource(R.string.disable_back_haptic_title),
+                                description = stringResource(R.string.disable_back_haptic_desc),
+                                checked = backHapticEnabled,
+                                onCheckedChange = { backHapticEnabled = it; onToggle("disable_back_haptic_enabled", it) }
+                            )
                         }
 
-                        Card(onClick = { context.startActivity(Intent(context, AppListActivity::class.java)) }) {
+                        // ── Advanced (master kill-switch, set apart so it isn't toggled by mistake) ──
+                        SettingsCard {
+                            SectionLabel("Advanced", color = MaterialTheme.colorScheme.error)
+                            ToggleRow(
+                                title = "Disable Heads-Up Hooks",
+                                description = "Master kill-switch — when ON, no auto-expand or HUD layout hooks run. Use this if your ROM produces a blank or oversized HUD.",
+                                checked = disableHeadsupHooks,
+                                onCheckedChange = { disableHeadsupHooks = it; onToggle("disable_headsup_hooks_enabled", it) }
+                            )
+                        }
+
+                        VaultCard(
+                            onClick = { context.startActivity(Intent(context, AppListActivity::class.java)) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
                             Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
                                 Text(text = stringResource(R.string.excluded_apps_title), style = MaterialTheme.typography.bodyLarge)
                                 Text(
@@ -622,272 +633,190 @@ private fun SettingsScreen(prefs: SharedPreferences) {
 
                     // ── Keyboard Enhancer ─────────────────────────────────────────
                     "keyboard" -> {
-                        Card {
-                            Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                                Text(
-                                    text = stringResource(R.string.keyboard_enhancer_title),
-                                    style = MaterialTheme.typography.titleSmall,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                                ToggleRow(
-                                    title = stringResource(R.string.keyboard_enhancer_enabled_title),
-                                    description = stringResource(R.string.keyboard_enhancer_enabled_desc),
-                                    checked = kbEnhancerEnabled,
-                                    onCheckedChange = { kbEnhancerEnabled = it; onToggle("keyboard_enhancer_enabled", it) }
-                                )
-                                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
-                                    // Stepper: step -10..+10 (default 0). scale = 2^(step/10), so
-                                    // 0 → 1.0× (auto base), +10 → 2.0×, -10 → 0.5×. The scale float
-                                    // is stored in the existing toolbar_height_multiplier pref; the
-                                    // displayed step is derived back from it.
-                                    val safeMult = if (toolbarMultiplier > 0f && toolbarMultiplier.isFinite()) toolbarMultiplier else 1.0f
-                                    val step = (10.0 * (ln(safeMult.toDouble()) / ln(2.0)))
-                                        .roundToInt().coerceIn(-10, 10)
-                                    Text(
-                                        text = stringResource(R.string.keyboard_toolbar_height_title) +
-                                            ": ${"%.2f".format(toolbarMultiplier)}×  (step $step)",
-                                        style = MaterialTheme.typography.bodyLarge
-                                    )
-                                    Text(
-                                        text = stringResource(R.string.keyboard_toolbar_height_desc),
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    fun applyStep(newStep: Int) {
-                                        val s = newStep.coerceIn(-10, 10)
-                                        val scale = 2.0.pow(s / 10.0).toFloat()
-                                        toolbarMultiplier = scale
-                                        onStringPref("toolbar_height_multiplier", scale.toString())
-                                    }
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                        modifier = Modifier.padding(top = 8.dp)
-                                    ) {
-                                        OutlinedButton(onClick = { applyStep(step - 1) }, enabled = step > -10) {
-                                            Text("−", style = MaterialTheme.typography.titleLarge)
-                                        }
-                                        Text(
-                                            text = if (step > 0) "+$step" else "$step",
-                                            style = MaterialTheme.typography.titleMedium,
-                                            textAlign = TextAlign.Center,
-                                            modifier = Modifier.width(48.dp)
-                                        )
-                                        OutlinedButton(onClick = { applyStep(step + 1) }, enabled = step < 10) {
-                                            Text("+", style = MaterialTheme.typography.titleLarge)
-                                        }
-                                    }
-                                }
-                                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
-                                    // Independent "Button size" stepper (width + glyph), separate
-                                    // from toolbar height. scale = 2^(step/10), stored in
-                                    // toolbar_button_multiplier. 0 = default, +10 = 2×, -10 = half.
-                                    val safeBtn = if (buttonMultiplier > 0f && buttonMultiplier.isFinite()) buttonMultiplier else 1.0f
-                                    val bStep = (10.0 * (ln(safeBtn.toDouble()) / ln(2.0)))
-                                        .roundToInt().coerceIn(-10, 10)
-                                    Text(
-                                        text = "Button size: ${"%.2f".format(buttonMultiplier)}×  (step $bStep)",
-                                        style = MaterialTheme.typography.bodyLarge
-                                    )
-                                    Text(
-                                        text = "Width and emoji size of each toolbar button, independent of height",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    fun applyBtnStep(newStep: Int) {
-                                        val s = newStep.coerceIn(-10, 10)
-                                        val scale = 2.0.pow(s / 10.0).toFloat()
-                                        buttonMultiplier = scale
-                                        onStringPref("toolbar_button_multiplier", scale.toString())
-                                    }
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                        modifier = Modifier.padding(top = 8.dp)
-                                    ) {
-                                        OutlinedButton(onClick = { applyBtnStep(bStep - 1) }, enabled = bStep > -10) {
-                                            Text("−", style = MaterialTheme.typography.titleLarge)
-                                        }
-                                        Text(
-                                            text = if (bStep > 0) "+$bStep" else "$bStep",
-                                            style = MaterialTheme.typography.titleMedium,
-                                            textAlign = TextAlign.Center,
-                                            modifier = Modifier.width(48.dp)
-                                        )
-                                        OutlinedButton(onClick = { applyBtnStep(bStep + 1) }, enabled = bStep < 10) {
-                                            Text("+", style = MaterialTheme.typography.titleLarge)
-                                        }
-                                    }
-                                }
-                                Text(
-                                    text = stringResource(R.string.keyboard_buttons_title),
-                                    style = MaterialTheme.typography.labelLarge,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                ToggleRow(
-                                    title = stringResource(R.string.btn_clipboard_title),
-                                    description = stringResource(R.string.btn_clipboard_desc),
-                                    checked = btnClipboardEnabled,
-                                    onCheckedChange = { btnClipboardEnabled = it; onToggle("btn_clipboard_enabled", it) }
-                                )
-                                ToggleRow(
-                                    title = "Show full text",
-                                    description = "Clipboard items show their full text. Turn off to show only the first 3 lines.",
-                                    checked = clipFullText,
-                                    onCheckedChange = { clipFullText = it; onToggle("clip_full_text_enabled", it) }
-                                )
-                                ToggleRow(
-                                    title = "Paste Button",
-                                    description = "Show a quick-paste button (📥) that pastes the last clipboard item",
-                                    checked = btnPasteEnabled,
-                                    onCheckedChange = { btnPasteEnabled = it; onToggle("btn_paste_enabled", it) }
-                                )
-                                ToggleRow(
-                                    title = stringResource(R.string.btn_selectall_title),
-                                    description = stringResource(R.string.btn_selectall_desc),
-                                    checked = btnSelectAllEnabled,
-                                    onCheckedChange = { btnSelectAllEnabled = it; onToggle("btn_selectall_enabled", it) }
-                                )
-                                ToggleRow(
-                                    title = stringResource(R.string.btn_cursor_title),
-                                    description = stringResource(R.string.btn_cursor_desc),
-                                    checked = btnCursorEnabled,
-                                    onCheckedChange = { btnCursorEnabled = it; onToggle("btn_cursor_enabled", it) }
-                                )
-                                ToggleRow(
-                                    title = "Trackpad Stick",
-                                    description = "Show the joystick button (🕹️) — press and drag to move the cursor in any direction.",
-                                    checked = btnTrackpadEnabled,
-                                    onCheckedChange = { btnTrackpadEnabled = it; onToggle("btn_trackpad_enabled", it) }
-                                )
-                                if (btnTrackpadEnabled) {
-                                    ToggleRow(
-                                        title = "Stick Haptics",
-                                        description = "Vibration feedback while using the trackpad stick (grab pop + steering ticks).",
-                                        checked = trackpadHaptics,
-                                        onCheckedChange = { trackpadHaptics = it; onToggle("trackpad_haptics_enabled", it) }
-                                    )
-                                }
-                                // Global haptic strength — applies to trackpad ticks and the shake-undo confirm.
-                                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                                    Text(
-                                        text = if (vibStrength == 0) "Vibration Strength: Off"
-                                               else "Vibration Strength: $vibStrength%",
-                                        style = MaterialTheme.typography.bodyLarge
-                                    )
-                                    Text(
-                                        "Intensity of trackpad and shake-undo vibrations. 100% uses the device's tuned feel.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Slider(
-                                        value = vibStrength.toFloat(),
-                                        onValueChange = { vibStrength = it.toInt().coerceIn(0, 100) },
-                                        onValueChangeFinished = { onStringPref("vibration_strength", vibStrength.toString()) },
-                                        valueRange = 0f..100f,
-                                        steps = 19
-                                    )
-                                }
-                                ToggleRow(
-                                    title = stringResource(R.string.btn_shortcut_title),
-                                    description = stringResource(R.string.btn_shortcut_desc),
-                                    checked = btnShortcutEnabled,
-                                    onCheckedChange = { btnShortcutEnabled = it; onToggle("btn_shortcut_enabled", it) }
-                                )
-                                if (btnShortcutEnabled) {
-                                    OutlinedTextField(
-                                        value = shortcut1,
-                                        onValueChange = { shortcut1 = it; onStringPref("shortcut_text_1", it) },
-                                        label = { Text(stringResource(R.string.keyboard_shortcut1_title)) },
-                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                                        singleLine = false,
-                                        maxLines = 3
-                                    )
-                                    OutlinedTextField(
-                                        value = shortcut2,
-                                        onValueChange = { shortcut2 = it; onStringPref("shortcut_text_2", it) },
-                                        label = { Text(stringResource(R.string.keyboard_shortcut2_title)) },
-                                        supportingText = { Text(stringResource(R.string.keyboard_shortcut2_desc)) },
-                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                                        singleLine = false,
-                                        maxLines = 3
-                                    )
-                                }
-                                if (btnClipboardEnabled) {
-                                    OutlinedTextField(
-                                        value = clipboardMaxEntries,
-                                        onValueChange = {
-                                            clipboardMaxEntries = it.filter { c -> c.isDigit() }
-                                            onStringPref("clipboard_max_entries", clipboardMaxEntries)
-                                        },
-                                        label = { Text(stringResource(R.string.keyboard_clipboard_max_title)) },
-                                        supportingText = { Text(stringResource(R.string.keyboard_clipboard_max_desc)) },
-                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).padding(bottom = 8.dp),
-                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                        singleLine = true
-                                    )
-                                }
+                        // ── Master switch ──
+                        SettingsCard {
+                            SectionLabel(
+                                stringResource(R.string.keyboard_enhancer_title),
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            ToggleRow(
+                                title = stringResource(R.string.keyboard_enhancer_enabled_title),
+                                description = stringResource(R.string.keyboard_enhancer_enabled_desc),
+                                checked = kbEnhancerEnabled,
+                                onCheckedChange = { kbEnhancerEnabled = it; onToggle("keyboard_enhancer_enabled", it) }
+                            )
+                        }
 
-                                Text(
-                                    text = "Undo",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                        // ── Toolbar size ──
+                        SettingsCard {
+                            SectionLabel("Toolbar size")
+                            // Height & button-size steppers: scale = 2^(step/10), 0 = default.
+                            StepperRow(
+                                title = stringResource(R.string.keyboard_toolbar_height_title),
+                                description = stringResource(R.string.keyboard_toolbar_height_desc),
+                                multiplier = toolbarMultiplier,
+                                onMultiplierChange = { scale ->
+                                    toolbarMultiplier = scale
+                                    onStringPref("toolbar_height_multiplier", scale.toString())
+                                }
+                            )
+                            StepperRow(
+                                title = "Button size",
+                                description = "Width and emoji size of each toolbar button, independent of height",
+                                multiplier = buttonMultiplier,
+                                onMultiplierChange = { scale ->
+                                    buttonMultiplier = scale
+                                    onStringPref("toolbar_button_multiplier", scale.toString())
+                                }
+                            )
+                        }
+
+                        // ── Toolbar buttons ──
+                        SettingsCard {
+                            SectionLabel(stringResource(R.string.keyboard_buttons_title))
+                            ToggleRow(
+                                title = stringResource(R.string.btn_clipboard_title),
+                                description = stringResource(R.string.btn_clipboard_desc),
+                                checked = btnClipboardEnabled,
+                                onCheckedChange = { btnClipboardEnabled = it; onToggle("btn_clipboard_enabled", it) }
+                            )
+                            ToggleRow(
+                                title = "Show full text",
+                                description = "Clipboard items show their full text. Turn off to show only the first 3 lines.",
+                                checked = clipFullText,
+                                onCheckedChange = { clipFullText = it; onToggle("clip_full_text_enabled", it) }
+                            )
+                            AnimatedVisibility(visible = btnClipboardEnabled) {
+                                OutlinedTextField(
+                                    value = clipboardMaxEntries,
+                                    onValueChange = {
+                                        clipboardMaxEntries = it.filter { c -> c.isDigit() }
+                                        onStringPref("clipboard_max_entries", clipboardMaxEntries)
+                                    },
+                                    label = { Text(stringResource(R.string.keyboard_clipboard_max_title)) },
+                                    supportingText = { Text(stringResource(R.string.keyboard_clipboard_max_desc)) },
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).padding(bottom = 8.dp),
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    singleLine = true
                                 )
+                            }
+                            ToggleRow(
+                                title = "Paste Button",
+                                description = "Show a quick-paste button (📥) that pastes the last clipboard item",
+                                checked = btnPasteEnabled,
+                                onCheckedChange = { btnPasteEnabled = it; onToggle("btn_paste_enabled", it) }
+                            )
+                            ToggleRow(
+                                title = stringResource(R.string.btn_selectall_title),
+                                description = stringResource(R.string.btn_selectall_desc),
+                                checked = btnSelectAllEnabled,
+                                onCheckedChange = { btnSelectAllEnabled = it; onToggle("btn_selectall_enabled", it) }
+                            )
+                            ToggleRow(
+                                title = stringResource(R.string.btn_cursor_title),
+                                description = stringResource(R.string.btn_cursor_desc),
+                                checked = btnCursorEnabled,
+                                onCheckedChange = { btnCursorEnabled = it; onToggle("btn_cursor_enabled", it) }
+                            )
+                            ToggleRow(
+                                title = "Trackpad Stick",
+                                description = "Show the joystick button (🕹️) — press and drag to move the cursor in any direction.",
+                                checked = btnTrackpadEnabled,
+                                onCheckedChange = { btnTrackpadEnabled = it; onToggle("btn_trackpad_enabled", it) }
+                            )
+                            AnimatedVisibility(visible = btnTrackpadEnabled) {
                                 ToggleRow(
-                                    title = "Undo (restore deleted text)",
-                                    description = "Bring back text you deleted — backspace, cut, select-all delete, or text replaced by typing.",
-                                    checked = undoEnabled,
-                                    onCheckedChange = { undoEnabled = it; onToggle("undo_enabled", it) }
+                                    title = "Stick Haptics",
+                                    description = "Vibration feedback while using the trackpad stick (grab pop + steering ticks).",
+                                    checked = trackpadHaptics,
+                                    onCheckedChange = { trackpadHaptics = it; onToggle("trackpad_haptics_enabled", it) }
                                 )
-                                if (undoEnabled) {
+                            }
+                            ToggleRow(
+                                title = stringResource(R.string.btn_shortcut_title),
+                                description = stringResource(R.string.btn_shortcut_desc),
+                                checked = btnShortcutEnabled,
+                                onCheckedChange = { btnShortcutEnabled = it; onToggle("btn_shortcut_enabled", it) }
+                            )
+                            AnimatedVisibility(visible = btnShortcutEnabled) {
+                              Column {
+                                OutlinedTextField(
+                                    value = shortcut1,
+                                    onValueChange = { shortcut1 = it; onStringPref("shortcut_text_1", it) },
+                                    label = { Text(stringResource(R.string.keyboard_shortcut1_title)) },
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                                    singleLine = false,
+                                    maxLines = 3
+                                )
+                                OutlinedTextField(
+                                    value = shortcut2,
+                                    onValueChange = { shortcut2 = it; onStringPref("shortcut_text_2", it) },
+                                    label = { Text(stringResource(R.string.keyboard_shortcut2_title)) },
+                                    supportingText = { Text(stringResource(R.string.keyboard_shortcut2_desc)) },
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                                    singleLine = false,
+                                    maxLines = 3
+                                )
+                              }
+                            }
+                        }
+
+                        // ── Haptics (global: trackpad ticks + shake-undo confirm) ──
+                        SettingsCard {
+                            SectionLabel("Haptics")
+                            LabeledSlider(
+                                label = if (vibStrength == 0) "Vibration Strength: Off"
+                                        else "Vibration Strength: $vibStrength%",
+                                description = "Intensity of trackpad and shake-undo vibrations. 100% uses the device's tuned feel.",
+                                value = vibStrength.toFloat(),
+                                valueRange = 0f..100f,
+                                steps = 19,
+                                onValueChange = { vibStrength = it.toInt().coerceIn(0, 100) },
+                                onValueChangeFinished = { onStringPref("vibration_strength", vibStrength.toString()) }
+                            )
+                        }
+
+                        // ── Undo ──
+                        SettingsCard {
+                            SectionLabel("Undo")
+                            ToggleRow(
+                                title = "Undo (restore deleted text)",
+                                description = "Bring back text you deleted — backspace, cut, select-all delete, or text replaced by typing.",
+                                checked = undoEnabled,
+                                onCheckedChange = { undoEnabled = it; onToggle("undo_enabled", it) }
+                            )
+                            if (undoEnabled) {
+                                ToggleRow(
+                                    title = "Undo Button",
+                                    description = "Show a ↩️ button in the toolbar that restores the last deletion.",
+                                    checked = undoButtonEnabled,
+                                    onCheckedChange = { undoButtonEnabled = it; onToggle("undo_button_enabled", it) }
+                                )
+                                if (hasAccelerometer) {
                                     ToggleRow(
-                                        title = "Undo Button",
-                                        description = "Show a ↩️ button in the toolbar that restores the last deletion.",
-                                        checked = undoButtonEnabled,
-                                        onCheckedChange = { undoButtonEnabled = it; onToggle("undo_button_enabled", it) }
+                                        title = "Shake to Undo",
+                                        description = "Shake the phone to restore deleted text, confirmed with a Cancel/Undo prompt.",
+                                        checked = shakeUndoEnabled,
+                                        onCheckedChange = { shakeUndoEnabled = it; onToggle("shake_undo_enabled", it) }
                                     )
-                                    if (hasAccelerometer) {
-                                        ToggleRow(
-                                            title = "Shake to Undo",
-                                            description = "Shake the phone to restore deleted text, confirmed with a Cancel/Undo prompt.",
-                                            checked = shakeUndoEnabled,
-                                            onCheckedChange = { shakeUndoEnabled = it; onToggle("shake_undo_enabled", it) }
-                                        )
-                                        if (shakeUndoEnabled) {
-                                            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                                                Text(
-                                                    text = "Shake Sensitivity: ${"%.1f".format(shakeSensitivity)}×",
-                                                    style = MaterialTheme.typography.bodyLarge
-                                                )
-                                                Text(
-                                                    "Higher = a lighter shake triggers undo. Lower = needs a firmer shake.",
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                )
-                                                Slider(
-                                                    value = shakeSensitivity,
-                                                    onValueChange = {
-                                                        shakeSensitivity = (Math.round(it * 10f) / 10f).coerceIn(0.1f, 2.0f)
-                                                    },
-                                                    onValueChangeFinished = {
-                                                        onStringPref("shake_sensitivity", shakeSensitivity.toString())
-                                                    },
-                                                    valueRange = 0.1f..2.0f,
-                                                    steps = 18
-                                                )
-                                            }
-                                        }
-                                    } else {
-                                        ToggleRow(
-                                            title = "Shake to Undo",
-                                            description = "Unavailable — this device has no accelerometer. Use the Undo button instead.",
-                                            checked = false,
-                                            onCheckedChange = { }
+                                    if (shakeUndoEnabled) {
+                                        LabeledSlider(
+                                            label = "Shake Sensitivity: ${"%.1f".format(shakeSensitivity)}×",
+                                            description = "Higher = a lighter shake triggers undo. Lower = needs a firmer shake.",
+                                            value = shakeSensitivity,
+                                            valueRange = 0.1f..2.0f,
+                                            steps = 18,
+                                            onValueChange = { shakeSensitivity = (Math.round(it * 10f) / 10f).coerceIn(0.1f, 2.0f) },
+                                            onValueChangeFinished = { onStringPref("shake_sensitivity", shakeSensitivity.toString()) }
                                         )
                                     }
+                                } else {
+                                    ToggleRow(
+                                        title = "Shake to Undo",
+                                        description = "Unavailable — this device has no accelerometer. Use the Undo button instead.",
+                                        checked = false,
+                                        onCheckedChange = { }
+                                    )
                                 }
                             }
                         }
@@ -1054,6 +983,7 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                 Spacer(modifier = Modifier.padding(bottom = 8.dp))
             }
         }
+      }
     }
 }
 
@@ -1457,9 +1387,10 @@ private fun ZonesTab(
     }
 
     // Introduction card ───────────────────────────────────────────────────────
-    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF1C1C1E))) {
+    VaultCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("Status Bar Zones", style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.primary)
             Text(
                 "Trigger actions by tapping the empty space next to your camera cutout. " +
@@ -1477,9 +1408,10 @@ private fun ZonesTab(
         catch (_: Exception) { false }
     }
     val anywhereGreen = Color(0xFF4CAF50)
-    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF0F2318))) {
+    VaultCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Power up with Anywhere", style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
                 color = anywhereGreen)
             Text(
                 "Anywhere is a free, open-source app that lets you create shortcuts for almost any action " +
@@ -1546,14 +1478,9 @@ private fun ZonesTab(
     }
 
     // Master toggle + size adjust card ────────────────────────────────────────
-    Card {
+    VaultCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(vertical = 4.dp)) {
-            Text(
-                text  = "Status Bar Zones",
-                style = MaterialTheme.typography.titleSmall,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                color = MaterialTheme.colorScheme.primary
-            )
+            SectionLabel("Status Bar Zones", accent = true)
             ToggleRow(
                 title = "Enable Status Bar Zones",
                 description = "Tap zones on left and right of the camera cutout",
@@ -1640,7 +1567,7 @@ private fun ZonesTab(
     var hapticEnabled by remember {
         mutableStateOf(prefs.getString("zones_haptic_enabled", "1") == "1")
     }
-    Card {
+    SettingsCard(modifier = Modifier.fillMaxWidth()) {
         ToggleRow(
             title = "Haptic Feedback",
             description = "Vibrate when a zone action fires",
@@ -1669,14 +1596,9 @@ private fun ZoneSideCard(
     onPickApp: (prefKey: String) -> Unit,
     onPickShortcut: (prefKey: String) -> Unit,
 ) {
-    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF1C1C1E))) {
+    VaultCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(vertical = 4.dp)) {
-            Text(
-                text = sideLabel,
-                style = MaterialTheme.typography.titleSmall,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                color = MaterialTheme.colorScheme.primary
-            )
+            SectionLabel(sideLabel, accent = true)
 
             val gestures = listOf(
                 "single_tap_action" to "Single Tap"   to singleAction,
@@ -1936,7 +1858,8 @@ private fun GuideScreen() {
 @Composable
 private fun GuideCard(title: String, sections: List<Pair<String, String>>) {
     var expanded by remember { mutableStateOf(false) }
-    Card(onClick = { expanded = !expanded }) {
+    val chevron by animateFloatAsState(if (expanded) 180f else 0f, tween(220), label = "guide-chevron")
+    VaultCard(onClick = { expanded = !expanded }, modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1944,17 +1867,21 @@ private fun GuideCard(title: String, sections: List<Pair<String, String>>) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(title, style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.primary)
-                Text(if (expanded) "▲" else "▼",
+                Text("▼",
                     style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.graphicsLayer { rotationZ = chevron })
             }
-            if (expanded) {
-                sections.forEach { (heading, body) ->
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(heading, style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(body, style = MaterialTheme.typography.bodyMedium)
+            AnimatedVisibility(visible = expanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    sections.forEach { (heading, body) ->
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(heading, style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(body, style = MaterialTheme.typography.bodyMedium)
+                        }
                     }
                 }
             }
@@ -2051,12 +1978,16 @@ private fun HomeScreen(
     ) {
         if (!rootAvailable) {
             item {
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                VaultCard(
+                    modifier    = Modifier.fillMaxWidth(),
+                    borderColor = AppColors.Warning.copy(alpha = 0.5f)
+                ) {
                     Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
                             "Root access not detected",
                             style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer
+                            fontWeight = FontWeight.SemiBold,
+                            color = AppColors.Warning
                         )
                         Text(
                             "Some features (zone gestures, screenshot, lock screen) require root to work. " +
@@ -2064,17 +1995,17 @@ private fun HomeScreen(
                             "This app is 100% safe — no internet access, no remote servers, no analytics. " +
                             "Everything runs locally on your device.",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
             }
         }
         item {
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = if (isActive) Color(0xFF1A3A2A) else Color(0xFF3A1A1A)
-                )
+            VaultCard(
+                modifier    = Modifier.fillMaxWidth(),
+                borderColor = if (isActive) AppColors.Positive.copy(alpha = 0.5f)
+                              else AppColors.Warning.copy(alpha = 0.5f)
             ) {
                 Text(
                     text = if (isActive)
@@ -2083,7 +2014,8 @@ private fun HomeScreen(
                         "Module Inactive — enable in LSPosed and reboot",
                     modifier = Modifier.fillMaxWidth().padding(16.dp),
                     style = MaterialTheme.typography.bodyLarge,
-                    color = if (isActive) Color(0xFF4CAF50) else Color(0xFFFF5252),
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (isActive) AppColors.Positive else AppColors.Warning,
                     textAlign = TextAlign.Center
                 )
             }
@@ -2214,19 +2146,21 @@ private fun FeatureCard(
     isEnabled: Boolean?,
     onClick: () -> Unit,
 ) {
-    Card(
-        onClick = onClick,
-        colors  = CardDefaults.cardColors(containerColor = Color(0xFF1C1C1E))
+    val active = isEnabled == true
+    VaultCard(
+        onClick     = onClick,
+        modifier    = Modifier.fillMaxWidth(),
+        borderColor = if (active) AppColors.Accent.copy(alpha = 0.55f) else AppColors.Divider
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Box(
                 modifier = Modifier
                     .size(44.dp)
-                    .clip(RoundedCornerShape(12.dp))
+                    .clip(RoundedCornerShape(13.dp))
                     .background(iconColor.copy(alpha = 0.15f)),
                 contentAlignment = Alignment.Center
             ) {
@@ -2238,7 +2172,7 @@ private fun FeatureCard(
                 )
             }
             Column(modifier = Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.bodyLarge)
+                Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
                 Text(
                     subtitle,
                     style = MaterialTheme.typography.bodySmall,
@@ -2246,11 +2180,7 @@ private fun FeatureCard(
                 )
             }
             if (isEnabled != null) {
-                Text(
-                    text  = if (isEnabled) "ON" else "OFF",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (isEnabled) Color(0xFF4CAF50) else Color(0xFF9E9E9E)
-                )
+                StatePill(active)
             } else {
                 Text(
                     "›",
@@ -2262,6 +2192,27 @@ private fun FeatureCard(
     }
 }
 
+/** Animated ON/OFF pill — accent-tinted when active, dim surface when off. */
+@Composable
+private fun StatePill(active: Boolean) {
+    val bg by animateColorAsState(
+        if (active) AppColors.AccentTint else AppColors.Surface, tween(220), label = "pill-bg"
+    )
+    val fg by animateColorAsState(
+        if (active) AppColors.Accent else AppColors.TextDim, tween(220), label = "pill-fg"
+    )
+    Text(
+        text = if (active) "ON" else "OFF",
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.SemiBold,
+        color = fg,
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(bg)
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+    )
+}
+
 @Composable
 private fun SmallActionCard(
     icon: ImageVector,
@@ -2270,13 +2221,9 @@ private fun SmallActionCard(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
-    Card(
-        onClick = onClick,
-        modifier = modifier,
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF1C1C1E))
-    ) {
+    VaultCard(onClick = onClick, modifier = modifier) {
         Column(
-            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp, horizontal = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
@@ -2328,14 +2275,9 @@ private fun SnapperSettingsCard(
         android.net.Uri.parse("package:${context.packageName}")
     ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
 
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+    VaultCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(vertical = 4.dp)) {
-            Text(
-                text     = stringResource(R.string.snapper_section_title),
-                style    = MaterialTheme.typography.titleSmall,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                color    = MaterialTheme.colorScheme.primary
-            )
+            SectionLabel(stringResource(R.string.snapper_section_title), accent = true)
 
             // ── Overlay permission warning ────────────────────────────────────
             if (!hasOverlayPermission) {
@@ -2410,7 +2352,7 @@ private fun SnapperSettingsCard(
                 }
             }
 
-            if (snapperMethod == "edge_button" || snapperMethod == "both") {
+            AnimatedVisibility(visible = snapperMethod == "edge_button" || snapperMethod == "both") {
                 Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
                     Text(text = stringResource(R.string.snapper_button_side_title), style = MaterialTheme.typography.bodyLarge)
                     Spacer(modifier = Modifier.padding(top = 8.dp))

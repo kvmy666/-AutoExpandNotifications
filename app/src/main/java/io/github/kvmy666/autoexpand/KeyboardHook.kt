@@ -41,7 +41,6 @@ import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import java.io.File
 import java.util.concurrent.Executors
-import org.json.JSONObject
 
 class KeyboardHook : IXposedHookLoadPackage {
 
@@ -156,11 +155,7 @@ class KeyboardHook : IXposedHookLoadPackage {
         if (now - lastCacheTime < CACHE_INTERVAL_MS) return
         lastCacheTime = now
         try {
-            val text = File(PREFS_FILE).readText()
-            val json = JSONObject(text)
-            val map = mutableMapOf<String, String>()
-            for (key in json.keys()) map[key] = json.getString(key)
-            filePrefCache = map
+            filePrefCache = PrefsJson.parse(File(PREFS_FILE).readText())
         } catch (_: Throwable) {}
         filePrefCache?.let { cache ->
             // String/float/int prefs: keep cached value if key absent

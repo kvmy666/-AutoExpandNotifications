@@ -14,7 +14,6 @@ import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.XSharedPreferences
 import de.robv.android.xposed.callbacks.XC_LoadPackage
-import org.json.JSONObject
 import java.io.File
 
 class MainHook : IXposedHookLoadPackage {
@@ -161,10 +160,7 @@ class MainHook : IXposedHookLoadPackage {
                     val text = String(
                         android.util.Base64.decode(b64, android.util.Base64.NO_WRAP), Charsets.UTF_8
                     )
-                    val json = JSONObject(text)
-                    val map = mutableMapOf<String, String>()
-                    for (key in json.keys()) map[key] = json.getString(key)
-                    filePrefCache = map
+                    filePrefCache = PrefsJson.parse(text)
                     return
                 }
             }
@@ -173,11 +169,7 @@ class MainHook : IXposedHookLoadPackage {
         }
         // Fallback: legacy /data/local/tmp file.
         try {
-            val text = File(PREFS_FILE).readText()
-            val json = JSONObject(text)
-            val map = mutableMapOf<String, String>()
-            for (key in json.keys()) map[key] = json.getString(key)
-            filePrefCache = map
+            filePrefCache = PrefsJson.parse(File(PREFS_FILE).readText())
         } catch (e: Throwable) {
             Log.d("Snapper", "DIAG: file prefs load failed: $e")
         }
