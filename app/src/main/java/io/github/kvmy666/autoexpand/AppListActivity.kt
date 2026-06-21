@@ -97,7 +97,16 @@ private fun AppListScreen(prefs: SharedPreferences, onBack: () -> Unit) {
             val pm = context.packageManager
             val excluded = excludedApps
             pm.getInstalledApplications(PackageManager.GET_META_DATA)
-                .filter { it.flags and ApplicationInfo.FLAG_SYSTEM == 0 || it.packageName in excluded }
+                .filter {
+                    // Show user-installed apps, updated system apps (e.g. Gmail, Google Photos —
+                    // pre-installed but updated via Play Store), any app with a launcher icon,
+                    // and anything already excluded. Pure hidden system services stay out so the
+                    // list stays usable.
+                    val isUser           = it.flags and ApplicationInfo.FLAG_SYSTEM == 0
+                    val isUpdatedSystem  = it.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP != 0
+                    val hasLauncher      = pm.getLaunchIntentForPackage(it.packageName) != null
+                    isUser || isUpdatedSystem || hasLauncher || it.packageName in excluded
+                }
                 .map { AppInfo(it.loadLabel(pm).toString(), it.packageName, it.loadIcon(pm)) }
                 .sortedWith(
                     compareByDescending<AppInfo> { it.packageName in excluded }

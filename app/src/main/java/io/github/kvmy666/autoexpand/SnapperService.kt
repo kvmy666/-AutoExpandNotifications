@@ -91,8 +91,26 @@ class SnapperService : Service() {
         startSuShell()
     }
 
+    /** Master kill-switch — when OFF, no activation method (Software / Hardware / Both) may run. */
+    private fun isSnapperMasterEnabled(): Boolean =
+        getSharedPreferences("prefs", Context.MODE_PRIVATE).getBoolean("enable_snapper_entirely", true)
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // startForeground is mandatory within 5 s of startForegroundService(), even if we bail.
         startForeground(NOTIFICATION_ID, buildNotification())
+
+        // Master switch gates every activation entry point (QS tile, edge button, chord-driven
+        // capture). HIDE_EDGE_BUTTON is allowed through so toggling the switch OFF can tear down
+        // an already-visible edge button.
+        if (!isSnapperMasterEnabled() &&
+            intent?.action != ACTION_HIDE_EDGE_BUTTON
+        ) {
+            Log.d(TAG, "Snapper master switch OFF — ignoring ${intent?.action}")
+            hideEdgeButton()
+            stopSelfIfIdle()
+            return START_NOT_STICKY
+        }
+
         when (intent?.action) {
             ACTION_CAPTURE           -> startCapture()
             ACTION_SHOW_EDGE_BUTTON  -> showEdgeButton()

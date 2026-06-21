@@ -3,6 +3,9 @@
 /local.properties
 local.properties
 /.idea/
+**/.idea/
+# Local decompiled reference dump (not source)
+/SystemUI_dex/
 /build/
 /app/build/
 /captures/

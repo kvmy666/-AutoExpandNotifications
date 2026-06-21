@@ -21,6 +21,21 @@ class MainHook : IXposedHookLoadPackage {
 
     private var appContext: Context? = null  // captured from SystemUI process
 
+    // Context used to read the Settings.Global IPC channel. SystemUI supplies appContext;
+    // system_server (no appContext) falls back to the reflective system context. Both can
+    // read Settings.Global even when /data/local/tmp is SELinux-blocked.
+    private val ipcContext: Context?
+        get() = appContext ?: systemCtx
+    private val systemCtx: Context? by lazy {
+        try {
+            val atClass = Class.forName("android.app.ActivityThread")
+            val at = XposedHelpers.callStaticMethod(atClass, "currentActivityThread")
+            XposedHelpers.callMethod(at, "getSystemContext") as? Context
+        } catch (t: Throwable) {
+            Log.d("Snapper", "DIAG: systemCtx fetch failed: $t"); null
+        }
+    }
+
     // XSharedPreferences — reads prefs XML directly; survives app-process death (Xiaomi SmartPower)
     private val xprefs = XSharedPreferences("io.github.kvmy666.autoexpand", "prefs")
 
@@ -136,6 +151,27 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     private fun loadFilePrefs() {
+        // Primary: Settings.Global (readable by system_server + SystemUI even when
+        // /data/local/tmp is SELinux-blocked under newer LSPosed/Android).
+        try {
+            val cr = ipcContext?.contentResolver
+            if (cr != null) {
+                val b64 = android.provider.Settings.Global.getString(cr, "ae_prefs_json")
+                if (!b64.isNullOrEmpty()) {
+                    val text = String(
+                        android.util.Base64.decode(b64, android.util.Base64.NO_WRAP), Charsets.UTF_8
+                    )
+                    val json = JSONObject(text)
+                    val map = mutableMapOf<String, String>()
+                    for (key in json.keys()) map[key] = json.getString(key)
+                    filePrefCache = map
+                    return
+                }
+            }
+        } catch (t: Throwable) {
+            Log.d("Snapper", "DIAG: Settings.Global prefs load failed: $t")
+        }
+        // Fallback: legacy /data/local/tmp file.
         try {
             val text = File(PREFS_FILE).readText()
             val json = JSONObject(text)
@@ -415,6 +451,8 @@ class MainHook : IXposedHookLoadPackage {
                 "com.android.systemui" -> try { handleSystemUi(lpparam) } catch (t: Throwable) {
                     Log.e("AutoExpand", "SystemUI hook init failed: $t")
                 }
+                // Gboard + all other apps: the selection action bar is rendered
+                // entirely by KeyboardHook (keyboard-side, no per-app injection needed).
             }
         } catch (t: Throwable) {
             Log.e("AutoExpand", "handleLoadPackage top-level threw: $t")
@@ -750,13 +788,17 @@ class MainHook : IXposedHookLoadPackage {
                             val pkg = getNotificationPackage(row)
                             val featureKey = if (onKG) "expand_lockscreen_enabled" else "expand_shade_enabled"
                             if (shouldSkipNotification(featureKey, pkg)) return
+                            // Re-entry fix: aeAutoExpanded is a per-row one-shot, so a group the
+                            // system re-collapses between shade opens won't re-expand on later opens.
+                            // A fresh open is the first fire after a quiet gap (in-open fires cluster
+                            // <=~205ms; real re-opens are >=~300ms apart), so clear the one-shot then
+                            // to allow exactly one re-apply per open.
+                            val nowTs = android.os.SystemClock.uptimeMillis()
+                            val lastTs = XposedHelpers.getAdditionalInstanceField(row, "aeLastSysExpTs") as? Long ?: 0L
+                            XposedHelpers.setAdditionalInstanceField(row, "aeLastSysExpTs", nowTs)
+                            if (nowTs - lastTs > 300L) XposedHelpers.setAdditionalInstanceField(row, "aeAutoExpanded", false)
                             val already = XposedHelpers.getAdditionalInstanceField(row, "aeAutoExpanded") as? Boolean ?: false
                             if (already) return
-                            val isExpanded = try { XposedHelpers.callMethod(row, "isExpanded") as? Boolean ?: false } catch (_: Throwable) { false }
-                            if (isExpanded) {
-                                XposedHelpers.setAdditionalInstanceField(row, "aeAutoExpanded", true)
-                                return
-                            }
                             XposedHelpers.setAdditionalInstanceField(row, "aeAutoExpanded", true)
                             // Defer to next frame — running synchronously during the layout pass
                             // that just called setSystemExpanded(false) gets undone by that pass.
@@ -768,10 +810,77 @@ class MainHook : IXposedHookLoadPackage {
                                         try { XposedHelpers.callMethod(row, "setUserExpanded", true); true } catch (_: Throwable) { false }
                                     }
                                     if (!ok) findStrictExpandButton(rowView)?.performClick()
-                                    val ne = try { XposedHelpers.callMethod(row, "isExpanded") as? Boolean ?: false } catch (_: Throwable) { false }
-                                    Log.d(HUD_TAG, "[${ts()}] shade/LS post-expand row=${System.identityHashCode(row)} pkg=$pkg onKG=$onKG ok=$ok nowExpanded=$ne")
-                                    // If state still didn't take, clear flag so a subsequent setSystemExpanded fire retries.
-                                    if (!ne) XposedHelpers.setAdditionalInstanceField(row, "aeAutoExpanded", false)
+                                    // Do NOT clear aeAutoExpanded here — re-entry is handled by the
+                                    // quiet-gap reset above. (A previous self-heal keyed off a no-arg
+                                    // isExpanded() that always failed on this build, clearing the
+                                    // one-shot every frame and corrupting groups.)
+                                    Log.d(HUD_TAG, "[${ts()}] shade/LS post-expand row=${System.identityHashCode(row)} pkg=$pkg onKG=$onKG ok=$ok")
+                                } catch (_: Throwable) {}
+                            }
+                        } catch (_: Throwable) {}
+                    }
+                }
+            )
+        } catch (_: Throwable) {}
+
+        // =====================================================
+        // UNIVERSAL EXPAND DRIVER (Issue 1) — single + grouped,
+        // shade + lockscreen, on EVERY open.
+        // LogCat proved (a) setSystemExpanded only fires on
+        // notification post/set-change, NOT on plain re-opens, and
+        // (b) only clicking the real system expand arrow actually
+        // sticks — setUserExpanded returns true but doesn't hold.
+        // onLayout fires on every open, so it is the reliable place
+        // to click the arrow. Per-type collapse signal so an already
+        // open row is never toggled shut: group summary uses
+        // areChildrenExpanded()==false; single uses isShowingExpanded()
+        // ==false (isGroupExpanded() does not exist on this build).
+        // aeAutoExpanded one-shot + 300ms quiet-gap reset = exactly
+        // one click per open and no relayout feedback loop.
+        // =====================================================
+        try {
+            XposedBridge.hookAllMethods(
+                XposedHelpers.findClass(rowClass, lpparam.classLoader),
+                "onLayout",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        try {
+                            val row = param.thisObject
+                            val rowView = row as? View ?: return
+                            // Heads-up has its own dedicated expand path; leave it untouched.
+                            val isHU = try { XposedHelpers.getBooleanField(row, "mIsHeadsUp") } catch (_: Throwable) { false }
+                            if (isHU) return
+                            // Child rows are driven by their parent's expansion — skip.
+                            val isChild = try { XposedHelpers.callMethod(row, "isChildInGroup") as? Boolean ?: false } catch (_: Throwable) { false }
+                            if (isChild) return
+                            if (!rowView.isShown) return      // only when actually visible
+                            val isGroup = isGroupSummaryRow(row)
+                            val onKG = try { XposedHelpers.getBooleanField(row, "mOnKeyguard") } catch (_: Throwable) { false }
+                            val pkg = getNotificationPackage(row)
+                            val featureKey = if (onKG) "expand_lockscreen_enabled" else "expand_shade_enabled"
+                            if (shouldSkipNotification(featureKey, pkg)) return
+                            val nowTs = android.os.SystemClock.uptimeMillis()
+                            val lastTs = XposedHelpers.getAdditionalInstanceField(row, "aeLastLayoutTs") as? Long ?: 0L
+                            XposedHelpers.setAdditionalInstanceField(row, "aeLastLayoutTs", nowTs)
+                            if (nowTs - lastTs > 300L) XposedHelpers.setAdditionalInstanceField(row, "aeAutoExpanded", false)
+                            val already = XposedHelpers.getAdditionalInstanceField(row, "aeAutoExpanded") as? Boolean ?: false
+                            if (already) return
+                            XposedHelpers.setAdditionalInstanceField(row, "aeAutoExpanded", true)
+                            rowView.post {
+                                try {
+                                    fun st(m: String): Any? = try { XposedHelpers.callMethod(row, m) } catch (_: Throwable) { null }
+                                    // Per-type collapse signal — never click an already-open row shut.
+                                    val collapsed = if (isGroup) st("areChildrenExpanded") == false
+                                                    else st("isShowingExpanded") == false
+                                    val btn = findStrictExpandButton(rowView)
+                                    if (collapsed && btn != null) {
+                                        btn.performClick()            // the only reliable, instant expand
+                                    } else if (collapsed) {
+                                        // No arrow found (rare) — fall back to state set.
+                                        try { XposedHelpers.callMethod(row, "setUserExpanded", true, true) }
+                                        catch (_: Throwable) { try { XposedHelpers.callMethod(row, "setUserExpanded", true) } catch (_: Throwable) {} }
+                                    }
+                                    Log.d(HUD_TAG, "[${ts()}] onLayout expand row=${System.identityHashCode(row)} pkg=$pkg group=$isGroup onKG=$onKG collapsed=$collapsed btn=${btn!=null}")
                                 } catch (_: Throwable) {}
                             }
                         } catch (_: Throwable) {}

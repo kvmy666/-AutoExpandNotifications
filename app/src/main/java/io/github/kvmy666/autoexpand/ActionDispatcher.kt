@@ -98,8 +98,11 @@ object ActionDispatcher {
                 return
             }
             val current = nm.currentInterruptionFilter
+            // Use PRIORITY (normal DND) not NONE (total silence). NONE force-blocks
+            // media/alarms and ignores the system "Silence media when DND is on"
+            // toggle; PRIORITY matches the QS tile and honors that user setting.
             val next = if (current == android.app.NotificationManager.INTERRUPTION_FILTER_ALL)
-                android.app.NotificationManager.INTERRUPTION_FILTER_NONE
+                android.app.NotificationManager.INTERRUPTION_FILTER_PRIORITY
             else
                 android.app.NotificationManager.INTERRUPTION_FILTER_ALL
             nm.setInterruptionFilter(next)

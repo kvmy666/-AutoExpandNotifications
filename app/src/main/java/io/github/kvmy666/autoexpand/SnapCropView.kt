@@ -302,7 +302,7 @@ class SnapCropView(context: Context) : View(context) {
         } else {
             hitTest(x, y)
         }
-        // For corner drags: record the OPPOSITE corner as anchor so we get iOS-like flip behaviour
+        // For corner drags: record the OPPOSITE corner as anchor so we get flip behaviour
         when (dragMode) {
             DragMode.CORNER_TL -> { drawOriginX = selRect.right;  drawOriginY = selRect.bottom }
             DragMode.CORNER_TR -> { drawOriginX = selRect.left;   drawOriginY = selRect.bottom }

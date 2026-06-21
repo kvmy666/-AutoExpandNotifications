@@ -79,6 +79,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import kotlin.math.ln
+import kotlin.math.pow
+import kotlin.math.roundToInt
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -151,11 +154,21 @@ class MainActivity : ComponentActivity() {
                 }
                 val tmpFile = File(context.cacheDir, "tweaks_prefs_tmp.json")
                 tmpFile.writeText(json.toString())
-                val cmd = "cp ${tmpFile.absolutePath} /data/local/tmp/tweaks_prefs.json && chmod 644 /data/local/tmp/tweaks_prefs.json"
+                // Primary IPC channel: Settings.Global. The legacy /data/local/tmp file is
+                // unreadable from system_server / SystemUI on newer SELinux policies (EACCES),
+                // so we also publish the whole prefs blob (base64, shell-safe) to a global
+                // setting that those system processes CAN read. The file write is kept as a
+                // fallback for devices/environments where it still works.
+                val b64 = android.util.Base64.encodeToString(
+                    json.toString().toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP
+                )
+                val cmd = "cp ${tmpFile.absolutePath} /data/local/tmp/tweaks_prefs.json; " +
+                          "chmod 644 /data/local/tmp/tweaks_prefs.json; " +
+                          "settings put global ae_prefs_json $b64"
                 val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
                 proc.waitFor()
                 proc.destroy()
-                Log.d("Snapper", "DIAG: prefs file written, keys=${json.length()}")
+                Log.d("Snapper", "DIAG: prefs published (file + Settings.Global), keys=${json.length()}")
             } catch (e: Throwable) {
                 Log.d("Snapper", "DIAG: writePrefsFile failed (no root?): $e")
             }
@@ -219,12 +232,21 @@ class MainActivity : ComponentActivity() {
             prefs.edit()
                 .putBoolean("keyboard_enhancer_enabled", true)
                 .putString("toolbar_height_multiplier", "1.0")
+                .putString("toolbar_button_multiplier", "1.0")
                 .putString("shortcut_text_1", "")
                 .putString("shortcut_text_2", "")
                 .putString("clipboard_max_entries", "500")
                 .putBoolean("btn_clipboard_enabled", true)
                 .putBoolean("btn_selectall_enabled", true)
-                .putBoolean("btn_cursor_enabled", true)
+                .putBoolean("btn_cursor_enabled", false)   // A3: cursor-nav OFF by default
+                .putBoolean("btn_trackpad_enabled", true)  // A4: trackpad stick ON by default
+                .putBoolean("trackpad_haptics_enabled", true) // A2
+                .putString("vibration_strength", "100")       // global haptic strength 0..100
+                .putBoolean("clip_full_text_enabled", true)   // A1
+                .putBoolean("undo_enabled", true)             // B
+                .putBoolean("undo_button_enabled", true)
+                .putBoolean("shake_undo_enabled", true)
+                .putString("shake_sensitivity", "1.0")        // shake-undo trigger strength
                 .putBoolean("btn_shortcut_enabled", true)
                 .apply()
         }
@@ -261,8 +283,10 @@ class MainActivity : ComponentActivity() {
                 .apply()
         }
 
-        // Re-attach edge button if it was active before (e.g. after app restart)
-        if (prefs.getBoolean("snapper_enabled", false) &&
+        // Re-attach edge button if it was active before (e.g. after app restart).
+        // Skipped entirely when the master switch is OFF so nothing reactivates.
+        if (prefs.getBoolean("enable_snapper_entirely", true) &&
+            prefs.getBoolean("snapper_enabled", false) &&
             prefs.getString("snapper_activation_method", "qs_tile") != "qs_tile"
         ) {
             startForegroundService(
@@ -304,7 +328,7 @@ private fun SettingsScreen(prefs: SharedPreferences) {
     var selectedFeature by remember { mutableStateOf<String?>(null) }
 
     // ── What's New dialog ─────────────────────────────────────────────────────
-    var showWhatsNew by remember { mutableStateOf(!prefs.getBoolean("whats_new_seen_3_1_0", false)) }
+    var showWhatsNew by remember { mutableStateOf(!prefs.getBoolean("whats_new_seen_3_2_0", false)) }
     var whatsNewDontShow by remember { mutableStateOf(false) }
 
     // ── Notifications state ───────────────────────────────────────────────────
@@ -355,14 +379,28 @@ private fun SettingsScreen(prefs: SharedPreferences) {
     // ── Keyboard Enhancer state ───────────────────────────────────────────────
     var kbEnhancerEnabled   by remember { mutableStateOf(prefs.getBoolean("keyboard_enhancer_enabled", true)) }
     var toolbarMultiplier   by remember { mutableFloatStateOf(prefs.getString("toolbar_height_multiplier", "1.0")?.toFloatOrNull() ?: 1.0f) }
+    var buttonMultiplier    by remember { mutableFloatStateOf(prefs.getString("toolbar_button_multiplier", "1.0")?.toFloatOrNull() ?: 1.0f) }
     var shortcut1           by remember { mutableStateOf(prefs.getString("shortcut_text_1", "") ?: "") }
     var shortcut2           by remember { mutableStateOf(prefs.getString("shortcut_text_2", "") ?: "") }
     var clipboardMaxEntries by remember { mutableStateOf(prefs.getString("clipboard_max_entries", "500") ?: "500") }
     var btnClipboardEnabled by remember { mutableStateOf(prefs.getBoolean("btn_clipboard_enabled", true)) }
     var btnPasteEnabled     by remember { mutableStateOf(prefs.getBoolean("btn_paste_enabled", true)) }
     var btnSelectAllEnabled by remember { mutableStateOf(prefs.getBoolean("btn_selectall_enabled", true)) }
-    var btnCursorEnabled    by remember { mutableStateOf(prefs.getBoolean("btn_cursor_enabled", true)) }
+    var btnCursorEnabled    by remember { mutableStateOf(prefs.getBoolean("btn_cursor_enabled", false)) }   // A3: OFF by default
+    var btnTrackpadEnabled  by remember { mutableStateOf(prefs.getBoolean("btn_trackpad_enabled", true)) }  // A4: ON by default
+    var trackpadHaptics     by remember { mutableStateOf(prefs.getBoolean("trackpad_haptics_enabled", true)) } // A2
+    var vibStrength         by remember { mutableIntStateOf(prefs.getString("vibration_strength", "100")?.toIntOrNull() ?: 100) }
+    var clipFullText        by remember { mutableStateOf(prefs.getBoolean("clip_full_text_enabled", true)) }    // A1
     var btnShortcutEnabled  by remember { mutableStateOf(prefs.getBoolean("btn_shortcut_enabled", true)) }
+    // ── Undo (B2/B3/B4) ──
+    val hasAccelerometer = remember {
+        (context.getSystemService(Context.SENSOR_SERVICE) as? android.hardware.SensorManager)
+            ?.getDefaultSensor(android.hardware.Sensor.TYPE_ACCELEROMETER) != null
+    }
+    var undoEnabled       by remember { mutableStateOf(prefs.getBoolean("undo_enabled", true)) }
+    var undoButtonEnabled by remember { mutableStateOf(prefs.getBoolean("undo_button_enabled", true)) }
+    var shakeUndoEnabled  by remember { mutableStateOf(prefs.getBoolean("shake_undo_enabled", true) && hasAccelerometer) }
+    var shakeSensitivity  by remember { mutableFloatStateOf(prefs.getString("shake_sensitivity", "1.0")?.toFloatOrNull() ?: 1.0f) }
 
     // ── Root detection ────────────────────────────────────────────────────────
     val rootAvailable by produceState(initialValue = true) {
@@ -409,17 +447,29 @@ private fun SettingsScreen(prefs: SharedPreferences) {
     if (showWhatsNew) {
         AlertDialog(
             onDismissRequest = {
-                if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_1_0", true).apply()
+                if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_2_0", true).apply()
                 showWhatsNew = false
             },
-            title = { Text("What's New in v3.1.0") },
+            title = { Text("What's New in v3.2.0") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("• Status Bar Zones now linked to the app — implement anything from the status bar")
-                    Text("• Fixed heads-up notification blank screen")
-                    Text("• Delete all entries in the Clipboard Vault at once")
-                    Text("• More shortcuts available in the status bar")
-                    Text("• Telegram group — join the community")
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("New features", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                    Text("• Trackpad Stick (🕹️) — press and drag the joystick to move the cursor in any direction")
+                    Text("• Undo — restore deleted text (backspace, cut, select-all). One undo brings back the whole word, plus an ↩️ toolbar button and Shake to Undo")
+                    Text("• Vibration Strength — set the intensity of trackpad and shake-undo haptics")
+                    Text("• Shake Sensitivity — choose how hard a shake triggers undo")
+                    Spacer(Modifier.height(4.dp))
+                    Text("Fixes", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                    Text("• Grouped notifications expand correctly again after the system update")
+                    Text("• Reopening the shade now expands notifications instantly every time")
+                    Text("• Settings now reach the system reliably (new sync method)")
+                    Text("• Screen Snapper can be fully turned on/off with a master switch")
+                    Text("• Turning Snapper off no longer crashes the app")
+                    Text("• You can now exclude system apps (Gmail, etc.) from expansion")
+                    Text("• Clipboard Vault shows all saved entries, not just the first 50")
+                    Text("• Separate controls for toolbar height and button size")
+                    Text("• Improved text selection from the keyboard toolbar")
+                    Text("• Trackpad cursor no longer snaps back during a fast drag")
                     Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = whatsNewDontShow, onCheckedChange = { whatsNewDontShow = it })
@@ -429,7 +479,7 @@ private fun SettingsScreen(prefs: SharedPreferences) {
             },
             confirmButton = {
                 TextButton(onClick = {
-                    if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_1_0", true).apply()
+                    if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_2_0", true).apply()
                     showWhatsNew = false
                 }) { Text("Got it") }
             }
@@ -587,8 +637,16 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                                     onCheckedChange = { kbEnhancerEnabled = it; onToggle("keyboard_enhancer_enabled", it) }
                                 )
                                 Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                                    // Stepper: step -10..+10 (default 0). scale = 2^(step/10), so
+                                    // 0 → 1.0× (auto base), +10 → 2.0×, -10 → 0.5×. The scale float
+                                    // is stored in the existing toolbar_height_multiplier pref; the
+                                    // displayed step is derived back from it.
+                                    val safeMult = if (toolbarMultiplier > 0f && toolbarMultiplier.isFinite()) toolbarMultiplier else 1.0f
+                                    val step = (10.0 * (ln(safeMult.toDouble()) / ln(2.0)))
+                                        .roundToInt().coerceIn(-10, 10)
                                     Text(
-                                        text = stringResource(R.string.keyboard_toolbar_height_title) + ": ${"%.1f".format(toolbarMultiplier)}×",
+                                        text = stringResource(R.string.keyboard_toolbar_height_title) +
+                                            ": ${"%.2f".format(toolbarMultiplier)}×  (step $step)",
                                         style = MaterialTheme.typography.bodyLarge
                                     )
                                     Text(
@@ -596,13 +654,71 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
-                                    Slider(
-                                        value = toolbarMultiplier,
-                                        onValueChange = { toolbarMultiplier = it },
-                                        onValueChangeFinished = { onStringPref("toolbar_height_multiplier", toolbarMultiplier.toString()) },
-                                        valueRange = 0.5f..2.0f,
-                                        steps = 29
+                                    fun applyStep(newStep: Int) {
+                                        val s = newStep.coerceIn(-10, 10)
+                                        val scale = 2.0.pow(s / 10.0).toFloat()
+                                        toolbarMultiplier = scale
+                                        onStringPref("toolbar_height_multiplier", scale.toString())
+                                    }
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                        modifier = Modifier.padding(top = 8.dp)
+                                    ) {
+                                        OutlinedButton(onClick = { applyStep(step - 1) }, enabled = step > -10) {
+                                            Text("−", style = MaterialTheme.typography.titleLarge)
+                                        }
+                                        Text(
+                                            text = if (step > 0) "+$step" else "$step",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            textAlign = TextAlign.Center,
+                                            modifier = Modifier.width(48.dp)
+                                        )
+                                        OutlinedButton(onClick = { applyStep(step + 1) }, enabled = step < 10) {
+                                            Text("+", style = MaterialTheme.typography.titleLarge)
+                                        }
+                                    }
+                                }
+                                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                                    // Independent "Button size" stepper (width + glyph), separate
+                                    // from toolbar height. scale = 2^(step/10), stored in
+                                    // toolbar_button_multiplier. 0 = default, +10 = 2×, -10 = half.
+                                    val safeBtn = if (buttonMultiplier > 0f && buttonMultiplier.isFinite()) buttonMultiplier else 1.0f
+                                    val bStep = (10.0 * (ln(safeBtn.toDouble()) / ln(2.0)))
+                                        .roundToInt().coerceIn(-10, 10)
+                                    Text(
+                                        text = "Button size: ${"%.2f".format(buttonMultiplier)}×  (step $bStep)",
+                                        style = MaterialTheme.typography.bodyLarge
                                     )
+                                    Text(
+                                        text = "Width and emoji size of each toolbar button, independent of height",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    fun applyBtnStep(newStep: Int) {
+                                        val s = newStep.coerceIn(-10, 10)
+                                        val scale = 2.0.pow(s / 10.0).toFloat()
+                                        buttonMultiplier = scale
+                                        onStringPref("toolbar_button_multiplier", scale.toString())
+                                    }
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                        modifier = Modifier.padding(top = 8.dp)
+                                    ) {
+                                        OutlinedButton(onClick = { applyBtnStep(bStep - 1) }, enabled = bStep > -10) {
+                                            Text("−", style = MaterialTheme.typography.titleLarge)
+                                        }
+                                        Text(
+                                            text = if (bStep > 0) "+$bStep" else "$bStep",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            textAlign = TextAlign.Center,
+                                            modifier = Modifier.width(48.dp)
+                                        )
+                                        OutlinedButton(onClick = { applyBtnStep(bStep + 1) }, enabled = bStep < 10) {
+                                            Text("+", style = MaterialTheme.typography.titleLarge)
+                                        }
+                                    }
                                 }
                                 Text(
                                     text = stringResource(R.string.keyboard_buttons_title),
@@ -615,6 +731,12 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                                     description = stringResource(R.string.btn_clipboard_desc),
                                     checked = btnClipboardEnabled,
                                     onCheckedChange = { btnClipboardEnabled = it; onToggle("btn_clipboard_enabled", it) }
+                                )
+                                ToggleRow(
+                                    title = "Show full text",
+                                    description = "Clipboard items show their full text. Turn off to show only the first 3 lines.",
+                                    checked = clipFullText,
+                                    onCheckedChange = { clipFullText = it; onToggle("clip_full_text_enabled", it) }
                                 )
                                 ToggleRow(
                                     title = "Paste Button",
@@ -634,6 +756,40 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                                     checked = btnCursorEnabled,
                                     onCheckedChange = { btnCursorEnabled = it; onToggle("btn_cursor_enabled", it) }
                                 )
+                                ToggleRow(
+                                    title = "Trackpad Stick",
+                                    description = "Show the joystick button (🕹️) — press and drag to move the cursor in any direction.",
+                                    checked = btnTrackpadEnabled,
+                                    onCheckedChange = { btnTrackpadEnabled = it; onToggle("btn_trackpad_enabled", it) }
+                                )
+                                if (btnTrackpadEnabled) {
+                                    ToggleRow(
+                                        title = "Stick Haptics",
+                                        description = "Vibration feedback while using the trackpad stick (grab pop + steering ticks).",
+                                        checked = trackpadHaptics,
+                                        onCheckedChange = { trackpadHaptics = it; onToggle("trackpad_haptics_enabled", it) }
+                                    )
+                                }
+                                // Global haptic strength — applies to trackpad ticks and the shake-undo confirm.
+                                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                                    Text(
+                                        text = if (vibStrength == 0) "Vibration Strength: Off"
+                                               else "Vibration Strength: $vibStrength%",
+                                        style = MaterialTheme.typography.bodyLarge
+                                    )
+                                    Text(
+                                        "Intensity of trackpad and shake-undo vibrations. 100% uses the device's tuned feel.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Slider(
+                                        value = vibStrength.toFloat(),
+                                        onValueChange = { vibStrength = it.toInt().coerceIn(0, 100) },
+                                        onValueChangeFinished = { onStringPref("vibration_strength", vibStrength.toString()) },
+                                        valueRange = 0f..100f,
+                                        steps = 19
+                                    )
+                                }
                                 ToggleRow(
                                     title = stringResource(R.string.btn_shortcut_title),
                                     description = stringResource(R.string.btn_shortcut_desc),
@@ -673,6 +829,66 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                                         singleLine = true
                                     )
                                 }
+
+                                Text(
+                                    text = "Undo",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                ToggleRow(
+                                    title = "Undo (restore deleted text)",
+                                    description = "Bring back text you deleted — backspace, cut, select-all delete, or text replaced by typing.",
+                                    checked = undoEnabled,
+                                    onCheckedChange = { undoEnabled = it; onToggle("undo_enabled", it) }
+                                )
+                                if (undoEnabled) {
+                                    ToggleRow(
+                                        title = "Undo Button",
+                                        description = "Show a ↩️ button in the toolbar that restores the last deletion.",
+                                        checked = undoButtonEnabled,
+                                        onCheckedChange = { undoButtonEnabled = it; onToggle("undo_button_enabled", it) }
+                                    )
+                                    if (hasAccelerometer) {
+                                        ToggleRow(
+                                            title = "Shake to Undo",
+                                            description = "Shake the phone to restore deleted text, confirmed with a Cancel/Undo prompt.",
+                                            checked = shakeUndoEnabled,
+                                            onCheckedChange = { shakeUndoEnabled = it; onToggle("shake_undo_enabled", it) }
+                                        )
+                                        if (shakeUndoEnabled) {
+                                            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                                                Text(
+                                                    text = "Shake Sensitivity: ${"%.1f".format(shakeSensitivity)}×",
+                                                    style = MaterialTheme.typography.bodyLarge
+                                                )
+                                                Text(
+                                                    "Higher = a lighter shake triggers undo. Lower = needs a firmer shake.",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                                Slider(
+                                                    value = shakeSensitivity,
+                                                    onValueChange = {
+                                                        shakeSensitivity = (Math.round(it * 10f) / 10f).coerceIn(0.1f, 2.0f)
+                                                    },
+                                                    onValueChangeFinished = {
+                                                        onStringPref("shake_sensitivity", shakeSensitivity.toString())
+                                                    },
+                                                    valueRange = 0.1f..2.0f,
+                                                    steps = 18
+                                                )
+                                            }
+                                        }
+                                    } else {
+                                        ToggleRow(
+                                            title = "Shake to Undo",
+                                            description = "Unavailable — this device has no accelerometer. Use the Undo button instead.",
+                                            checked = false,
+                                            onCheckedChange = { }
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -691,10 +907,14 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                                 MainActivity.makePrefsWorldReadable(context)
                                 MainActivity.broadcastPref(context, "enable_snapper_entirely", if (v) "1" else "0")
                                 if (!v) {
+                                    // Tell the running service to tear down the edge button. It then
+                                    // stops itself via stopSelfIfIdle(). Do NOT call stopService()
+                                    // right after startForegroundService() — that races the service's
+                                    // own startForeground() call and crashes with
+                                    // ForegroundServiceDidNotStartInTimeException.
                                     val svc = Intent(context, SnapperService::class.java)
                                     svc.action = SnapperService.ACTION_HIDE_EDGE_BUTTON
                                     try { context.startForegroundService(svc) } catch (_: Throwable) {}
-                                    try { context.stopService(Intent(context, SnapperService::class.java)) } catch (_: Throwable) {}
                                 }
                             },
                             onMethodChange    = { method ->
@@ -1927,7 +2147,7 @@ private fun HomeScreen(
                     modifier  = Modifier.weight(1f),
                     onClick   = {
                         context.startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/kvmy666/AutoExpandNotifications"))
+                            Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/kvmy666/-AutoExpandNotifications"))
                                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         )
                     }
