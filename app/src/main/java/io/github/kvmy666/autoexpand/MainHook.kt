@@ -48,6 +48,10 @@ class MainHook : IXposedHookLoadPackage {
     @Volatile private var filePrefCache: Map<String, String>? = null
     @Volatile private var fileObserver: FileObserver? = null
 
+    // Keep-screen-on (System Behavior): a 1x1 invisible overlay window carrying
+    // FLAG_KEEP_SCREEN_ON, hosted in the always-alive SystemUI process.
+    @Volatile private var keepScreenOnView: View? = null
+
     // Zone gesture state — lazy so Handler is created after Looper.prepareMainLooper() runs
     private val zoneHandler by lazy { android.os.Handler(android.os.Looper.getMainLooper()) }
     @Volatile private var activeZoneSide: String? = null
@@ -195,8 +199,19 @@ class MainHook : IXposedHookLoadPackage {
         val t = Thread {
             val file = File(HEARTBEAT_FILE)
             while (true) {
+                // Primary: monotonic heartbeat in Settings.Global. elapsedRealtime is
+                // boot-relative, so the activity-side check is immune to wall-clock/NTP
+                // skew, and Settings.Global is readable/writable even when /data/local/tmp
+                // is SELinux-blocked (EACCES) on newer LSPosed/Android.
+                try {
+                    val cr = ipcContext?.contentResolver
+                    if (cr != null) android.provider.Settings.Global.putString(
+                        cr, "ae_heartbeat", android.os.SystemClock.elapsedRealtime().toString()
+                    )
+                } catch (e: Throwable) { Log.d("Snapper", "DIAG: heartbeat global write failed: $e") }
+                // Fallback: legacy /data/local/tmp file (best effort).
                 try { file.writeText(System.currentTimeMillis().toString()) }
-                catch (e: Throwable) { Log.d("Snapper", "DIAG: heartbeat write failed: $e") }
+                catch (e: Throwable) { Log.d("Snapper", "DIAG: heartbeat file write failed: $e") }
                 Thread.sleep(60_000)
             }
         }
@@ -219,6 +234,51 @@ class MainHook : IXposedHookLoadPackage {
         val fileVal = filePrefCache?.get(key)
         fileVal?.let { return it == "1" }
         return try { xprefs.getBoolean(key, false) } catch (_: Throwable) { false }
+    }
+
+    // Opt-in features (default OFF when the pref hasn't been written yet). Same
+    // default-false semantics as isKillSwitchActive — aliased for readability.
+    private fun isOptInEnabled(key: String): Boolean = isKillSwitchActive(key)
+
+    /**
+     * Add/remove the invisible keep-screen-on overlay in the SystemUI process.
+     * Idempotent: a single 1x1 TYPE_APPLICATION_OVERLAY window with FLAG_KEEP_SCREEN_ON
+     * keeps the display awake for as long as it's attached (works on lockscreen too).
+     * Must run on a Looper thread — posted to the main looper.
+     */
+    private fun applyKeepScreenOn(enabled: Boolean) {
+        val ctx = appContext ?: return
+        zoneHandler.post {
+            try {
+                val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
+                if (enabled) {
+                    if (keepScreenOnView != null) return@post
+                    val v = View(ctx)
+                    val lp = android.view.WindowManager.LayoutParams(
+                        1, 1,
+                        android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                        android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                            android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                            android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                            android.view.WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                        android.graphics.PixelFormat.TRANSLUCENT
+                    )
+                    lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
+                    lp.x = 0; lp.y = 0
+                    wm.addView(v, lp)
+                    keepScreenOnView = v
+                    Log.d("Snapper", "DIAG: keepScreenOn overlay ADDED")
+                } else {
+                    keepScreenOnView?.let {
+                        try { wm.removeView(it) } catch (_: Throwable) {}
+                        keepScreenOnView = null
+                        Log.d("Snapper", "DIAG: keepScreenOn overlay REMOVED")
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.d("Snapper", "DIAG: keepScreenOn apply failed: $t")
+            }
+        }
     }
 
     private fun getExcludedApps(): Set<String> {
@@ -319,6 +379,107 @@ class MainHook : IXposedHookLoadPackage {
             }
         } catch (_: Throwable) {}
         return null
+    }
+
+    // Field name discovered dynamically (cached) to avoid guessing across builds.
+    @Volatile private var expandClickField: java.lang.reflect.Field? = null
+    @Volatile private var expandClickFieldResolved = false
+
+    // Keyguard auto-expand window: while uptimeMillis < this, the onExpandClicked
+    // callback (which transitions to the locked shade → scrim/dim/unlock-prompt) is
+    // blocked at its source. Covers both the synchronous click and any deferred/async
+    // dispatch, and any keyguard expand path — without affecting real user taps.
+    @Volatile private var lsAutoExpandUntil = 0L
+    @Volatile private var onExpandClickedHooked = false
+
+    private fun beginLsAutoExpandWindow() {
+        lsAutoExpandUntil = android.os.SystemClock.uptimeMillis() + 400L
+    }
+
+    /** Lazily hook the row's onExpandClick listener implementation so onExpandClicked
+     *  can be suppressed while a keyguard auto-expand window is active. Installed once,
+     *  from the first listener instance we observe. */
+    private fun ensureOnExpandClickedHook(listener: Any) {
+        if (onExpandClickedHooked) return
+        try {
+            XposedBridge.hookAllMethods(listener.javaClass, "onExpandClicked",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        try {
+                            val blocking = android.os.SystemClock.uptimeMillis() < lsAutoExpandUntil
+                            if (blocking) {
+                                Log.d("TweaksLS", "[${ts()}] onExpandClicked BLOCKED cls=${param.thisObject.javaClass.name}")
+                                param.setResult(null)
+                            }
+                        } catch (_: Throwable) {}
+                    }
+                }
+            )
+            onExpandClickedHooked = true
+            Log.d("TweaksLS", "onExpandClicked hooked on ${listener.javaClass.name}")
+        } catch (t: Throwable) {
+            Log.d("TweaksLS", "onExpandClicked hook failed: $t")
+        }
+    }
+
+    /** ExpandableNotificationRow's onExpandClick listener field. On AOSP this is
+     *  mOnExpandClickListener; the row's expand-button OnClickListener reads it at
+     *  click time and, on KEYGUARD, calls into CentralSurfaces.onExpandClicked which
+     *  transitions to the locked shade (the scrim/dim + unlock-prompt side effect). */
+    private fun getExpandClickListenerField(row: Any): java.lang.reflect.Field? {
+        if (expandClickFieldResolved) return expandClickField
+        expandClickFieldResolved = true
+        try {
+            var c: Class<*>? = row.javaClass
+            while (c != null && c != Any::class.java) {
+                for (f in c.declaredFields) {
+                    val n = f.name.lowercase()
+                    val tn = f.type.simpleName.lowercase()
+                    if (n.contains("expandclick") || tn.contains("onexpandclicklistener")) {
+                        f.isAccessible = true
+                        expandClickField = f
+                        Log.d("TweaksLS", "expandClick listener field = ${c.name}.${f.name} : ${f.type.name}")
+                        return f
+                    }
+                }
+                c = c.superclass
+            }
+            Log.d("TweaksLS", "expandClick listener field NOT FOUND on ${row.javaClass.name}")
+        } catch (t: Throwable) {
+            Log.d("TweaksLS", "expandClick field lookup failed: $t")
+        }
+        return expandClickField
+    }
+
+    /**
+     * Lockscreen-only expand. performClick on the real arrow is the only thing that
+     * reliably sticks (the row's own setUserExpanded runs inside the click handler),
+     * but on keyguard the same click also notifies onExpandClicked → goToLockedShade,
+     * which raises the shade scrim and prompts for unlock.
+     *
+     * Defence in depth: (1) open a short keyguard window during which onExpandClicked is
+     * blocked at its source (covers async/deferred dispatch and any second expand path);
+     * (2) also null the listener field for the synchronous click. Shade/heads-up paths
+     * never call this.
+     */
+    private fun clickExpandSilentlyOnKeyguard(row: Any, btn: View) {
+        beginLsAutoExpandWindow()
+        val f = getExpandClickListenerField(row)
+        if (f == null) { btn.performClick(); return }   // fail open — never regress expansion
+        var saved: Any? = null
+        var nulled = false
+        try {
+            saved = f.get(row)
+            if (saved != null) ensureOnExpandClickedHook(saved)
+            f.set(row, null)
+            nulled = true
+        } catch (_: Throwable) {}
+        try {
+            btn.performClick()
+        } finally {
+            if (nulled) try { f.set(row, saved) } catch (_: Throwable) {}
+        }
+        Log.d("TweaksLS", "[${ts()}] LS silent expand row=${System.identityHashCode(row)} listenerSuppressed=$nulled hadListener=${saved != null}")
     }
 
     private fun getNotificationPackageFromContentView(view: Any): String? {
@@ -443,6 +604,9 @@ class MainHook : IXposedHookLoadPackage {
                 "com.android.systemui" -> try { handleSystemUi(lpparam) } catch (t: Throwable) {
                     Log.e("AutoExpand", "SystemUI hook init failed: $t")
                 }
+                "com.oppo.quicksearchbox" -> try { handleGlobalSearch(lpparam) } catch (t: Throwable) {
+                    Log.e("TweaksLauncher", "Global search hook init failed: $t")
+                }
                 // Gboard + all other apps: the selection action bar is rendered
                 // entirely by KeyboardHook (keyboard-side, no per-app injection needed).
             }
@@ -499,6 +663,273 @@ class MainHook : IXposedHookLoadPackage {
         } catch (t: Throwable) {
             Log.e("Snapper", "handleSystemServer crashed: $t")
         }
+    }
+
+    // =====================================================
+    // Global Search — Enter launches the first result
+    //
+    // Pref `global_search_enter_launch_enabled` (opt-in, default OFF). On the OnePlus
+    // app drawer the search box just launches the OEM global-search app
+    // (com.oppo.quicksearchbox / SearchDrawActivity); pressing Enter there does nothing
+    // by default. When this pref is ON we attach an editor-action listener to the search
+    // input so Enter taps the first result row — which is how that app launches an app
+    // (confirmed: a real touch on the row opens the app even though the row reports
+    // clickable=false, i.e. it's handled by a RecyclerView touch listener).
+    //
+    // IDs/classes verified live on-device (uiautomator) + the app's resources:
+    //   activity  com.oplus.globalsearch.ui.SearchDrawActivity
+    //   input     id/search_bar_search_input  (android.widget.EditText)
+    //   results   id/recycler_view_result     (RecyclerView; rows carry id/text_content)
+    //
+    // SAFETY: gated on the pref + full try/catch; OFF = the search app is untouched.
+    // =====================================================
+    private val LAUNCHER_TAG = "TweaksLauncher"
+    private val GS_KEY = "global_search_enter_launch_enabled"
+    @Volatile private var lastSearchLaunchTs = 0L
+    @Volatile private var gsActivity: android.app.Activity? = null
+    // The live search EditText — captured in onCreateInputConnection so the launch path is
+    // activity-agnostic (the global search has two entry activities: SearchActivity from the
+    // home swipe-down and SearchDrawActivity from the drawer; both reuse the same field id).
+    @Volatile private var searchEditRef: java.lang.ref.WeakReference<android.view.View>? = null
+    private val hookedIcClasses = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    /** Resolve the current search activity from the focused field, falling back to gsActivity. */
+    private fun currentSearchActivity(): android.app.Activity? =
+        (searchEditRef?.get()?.let { activityOf(it) }) ?: gsActivity
+
+    private fun handleGlobalSearch(lpparam: XC_LoadPackage.LoadPackageParam) {
+        val cl = lpparam.classLoader
+        // (1) onResume: supply an appContext from the activity (this third-party process has
+        // none) so the Settings.Global pref channel is readable; track the live activity; and
+        // wire a key-event fallback. The home swipe-down opens SearchActivity while the drawer
+        // uses SearchDrawActivity — hook both so either entry point works.
+        for (clsName in listOf(
+            "com.oplus.globalsearch.ui.SearchActivity",
+            "com.oplus.globalsearch.ui.SearchDrawActivity"
+        )) {
+            try {
+                val act = XposedHelpers.findClass(clsName, cl)
+                XposedBridge.hookAllMethods(act, "onResume", object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        try {
+                            val activity = param.thisObject as android.app.Activity
+                            gsActivity = activity
+                            if (appContext == null) {
+                                appContext = activity.applicationContext
+                                loadFilePrefs()
+                            }
+                            if (!isOptInEnabled(GS_KEY)) return
+                            attachSearchKeyFallback(activity)
+                        } catch (t: Throwable) { Log.d(LAUNCHER_TAG, "onResume hook err: $t") }
+                    }
+                })
+                XposedBridge.hookAllMethods(act, "onPause", object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (gsActivity === param.thisObject) gsActivity = null
+                    }
+                })
+            } catch (t: Throwable) {
+                Log.d(LAUNCHER_TAG, "activity hook install failed ($clsName): $t")
+            }
+        }
+        // (2) View-level onEditorAction (covers any keyboard that routes through it).
+        try {
+            XposedHelpers.findAndHookMethod(
+                android.widget.TextView::class.java, "onEditorAction",
+                Int::class.javaPrimitiveType,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        try {
+                            if (!isOptInEnabled(GS_KEY)) return
+                            val tv = param.thisObject as? android.widget.TextView ?: return
+                            if (resourceEntryAndPkg(tv).first != "search_bar_search_input") return
+                            val q = tv.text?.toString()?.trim().orEmpty()
+                            Log.d(LAUNCHER_TAG, "[${ts()}] onEditorAction id=${param.args.getOrNull(0)} q=\"$q\"")
+                            if (q.isEmpty()) return
+                            val activity = activityOf(tv) ?: return
+                            if (launchFirstDebounced(activity)) param.setResult(null)
+                        } catch (t: Throwable) { Log.d(LAUNCHER_TAG, "onEditorAction hook err: $t") }
+                    }
+                })
+        } catch (t: Throwable) {
+            Log.d(LAUNCHER_TAG, "onEditorAction hook install failed: $t")
+        }
+        // (3) The OEM search field swallows the soft "Go" action inside its custom
+        // InputConnection (it never reaches onEditorAction or a key event). Discover that
+        // IC class at runtime from onCreateInputConnection, then hook its performEditorAction
+        // / sendKeyEvent so the action is intercepted at the true source.
+        try {
+            XposedHelpers.findAndHookMethod(
+                android.widget.TextView::class.java, "onCreateInputConnection",
+                android.view.inputmethod.EditorInfo::class.java,
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        try {
+                            val tv = param.thisObject as? android.widget.TextView ?: return
+                            if (resourceEntryAndPkg(tv).first != "search_bar_search_input") return
+                            // Capture the field + an appContext here so the launch path works
+                            // even before either entry activity's onResume hook runs.
+                            searchEditRef = java.lang.ref.WeakReference(tv)
+                            if (appContext == null) {
+                                appContext = tv.context?.applicationContext
+                                loadFilePrefs()
+                            }
+                            if (!isOptInEnabled(GS_KEY)) return
+                            val ic = param.result ?: return
+                            val info = param.args.getOrNull(0) as? android.view.inputmethod.EditorInfo
+                            Log.d(LAUNCHER_TAG, "search IC=${ic.javaClass.name} imeOptions=${info?.imeOptions}")
+                            hookSearchInputConnection(ic.javaClass)
+                        } catch (t: Throwable) { Log.d(LAUNCHER_TAG, "onCreateIC hook err: $t") }
+                    }
+                })
+            Log.d(LAUNCHER_TAG, "global search hook installed")
+        } catch (t: Throwable) {
+            Log.d(LAUNCHER_TAG, "onCreateIC hook install failed: $t")
+        }
+    }
+
+    /**
+     * Hook performEditorAction/sendKeyEvent on the search field's actual IC class (once).
+     * The OEM uses the standard com.android.internal.inputmethod.EditableInputConnection,
+     * whose performEditorAction/sendKeyEvent are *inherited* from BaseInputConnection — so
+     * hookAllMethods(icClass, ...) would hook nothing. findAndHookMethod walks the superclass
+     * chain to the real declaration, and a hook on the inherited method still fires for calls
+     * made on the subclass instance.
+     */
+    private fun hookSearchInputConnection(icClass: Class<*>) {
+        if (!hookedIcClasses.add(icClass.name)) return
+        try {
+            XposedHelpers.findAndHookMethod(
+                icClass, "performEditorAction", Int::class.javaPrimitiveType,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        try {
+                            if (!isOptInEnabled(GS_KEY)) return
+                            Log.d(LAUNCHER_TAG, "[${ts()}] IC.performEditorAction id=${param.args.getOrNull(0)} cls=${param.thisObject.javaClass.name}")
+                            val activity = currentSearchActivity() ?: return
+                            if (launchFirstDebounced(activity)) param.setResult(true) // consume
+                        } catch (t: Throwable) { Log.d(LAUNCHER_TAG, "IC.performEditorAction err: $t") }
+                    }
+                })
+            Log.d(LAUNCHER_TAG, "hooked IC.performEditorAction via ${icClass.name}")
+        } catch (t: Throwable) {
+            Log.d(LAUNCHER_TAG, "hook performEditorAction err: $t")
+        }
+        try {
+            XposedHelpers.findAndHookMethod(
+                icClass, "sendKeyEvent", KeyEvent::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        try {
+                            if (!isOptInEnabled(GS_KEY)) return
+                            val ev = param.args.getOrNull(0) as? KeyEvent ?: return
+                            if (ev.action != KeyEvent.ACTION_UP) return
+                            if (ev.keyCode != KeyEvent.KEYCODE_ENTER && ev.keyCode != KeyEvent.KEYCODE_NUMPAD_ENTER) return
+                            Log.d(LAUNCHER_TAG, "[${ts()}] IC.sendKeyEvent ENTER")
+                            val activity = currentSearchActivity() ?: return
+                            if (launchFirstDebounced(activity)) param.setResult(true)
+                        } catch (t: Throwable) { Log.d(LAUNCHER_TAG, "IC.sendKeyEvent err: $t") }
+                    }
+                })
+            Log.d(LAUNCHER_TAG, "hooked IC.sendKeyEvent via ${icClass.name}")
+        } catch (t: Throwable) {
+            Log.d(LAUNCHER_TAG, "hook sendKeyEvent err: $t")
+        }
+    }
+
+    /** Fallback: some keyboards send a raw ENTER key rather than an editor action. */
+    private fun attachSearchKeyFallback(activity: android.app.Activity) {
+        try {
+            val editId = activity.resources.getIdentifier("search_bar_search_input", "id", activity.packageName)
+            if (editId == 0) return
+            val edit = activity.findViewById<android.widget.TextView>(editId) ?: return
+            edit.setOnKeyListener(android.view.View.OnKeyListener { v, keyCode, event ->
+                try {
+                    if (!isOptInEnabled(GS_KEY)) return@OnKeyListener false
+                    if (event.action != KeyEvent.ACTION_UP) return@OnKeyListener false
+                    if (keyCode != KeyEvent.KEYCODE_ENTER && keyCode != KeyEvent.KEYCODE_NUMPAD_ENTER)
+                        return@OnKeyListener false
+                    if ((v as? android.widget.TextView)?.text?.toString()?.trim().isNullOrEmpty())
+                        return@OnKeyListener false
+                    Log.d(LAUNCHER_TAG, "[${ts()}] key ENTER fallback")
+                    launchFirstDebounced(activity)
+                } catch (t: Throwable) { Log.d(LAUNCHER_TAG, "key fallback err: $t"); false }
+            })
+        } catch (t: Throwable) { Log.d(LAUNCHER_TAG, "attachSearchKeyFallback err: $t") }
+    }
+
+    /** De-duplicated launch — the editor-action and key paths can both fire for one press. */
+    private fun launchFirstDebounced(activity: android.app.Activity): Boolean {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastSearchLaunchTs < 1000L) return true
+        val ok = launchFirstSearchResult(activity)
+        if (ok) lastSearchLaunchTs = now
+        return ok
+    }
+
+    /** Unwrap a view's context chain to the hosting Activity. */
+    private fun activityOf(v: android.view.View): android.app.Activity? {
+        var c: Context? = v.context
+        while (c is android.content.ContextWrapper) {
+            if (c is android.app.Activity) return c
+            c = c.baseContext
+        }
+        return null
+    }
+
+    /**
+     * Tap the first result row in the global-search results list. The two entry activities use
+     * different list ids (SearchActivity → recycler_view_shelf, SearchDrawActivity →
+     * recycler_view_result), so rather than hard-code a recycler id we walk the whole decor
+     * tree for the first visible "text_content" view — that id marks a real result row (section
+     * headers use text_title), and tapping anywhere on the row launches it.
+     */
+    private fun launchFirstSearchResult(activity: android.app.Activity): Boolean {
+        return try {
+            val textId = activity.resources.getIdentifier("text_content", "id", activity.packageName)
+            if (textId == 0) { Log.d(LAUNCHER_TAG, "no text_content id"); return false }
+            val root = activity.window?.decorView ?: return false
+            val first = findFirstVisibleById(root, textId) ?: run {
+                Log.d(LAUNCHER_TAG, "no result row found"); return false
+            }
+            val label = (first as? android.widget.TextView)?.text
+            Log.d(LAUNCHER_TAG, "first result = \"$label\"")
+            tapViewInWindow(activity, first)
+            true
+        } catch (t: Throwable) {
+            Log.d(LAUNCHER_TAG, "launchFirstSearchResult err: $t"); false
+        }
+    }
+
+    /** Depth-first (visual top-to-bottom) search for the first shown view with the given id. */
+    private fun findFirstVisibleById(v: android.view.View, id: Int): android.view.View? {
+        if (v.visibility != View.VISIBLE) return null
+        if (v.id == id && v.width > 0 && v.height > 0) return v
+        if (v is android.view.ViewGroup) {
+            for (i in 0 until v.childCount) {
+                findFirstVisibleById(v.getChildAt(i) ?: continue, id)?.let { return it }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Replay a real touch on a view by dispatching DOWN+UP at its on-screen centre to the
+     * window's decor view. The result rows launch on a genuine touch (RecyclerView touch
+     * listener) rather than View.performClick(), so a synthetic motion event is required.
+     */
+    private fun tapViewInWindow(activity: android.app.Activity, v: android.view.View) {
+        val loc = IntArray(2); v.getLocationInWindow(loc)
+        val x = loc[0] + v.width / 2f
+        val y = loc[1] + v.height / 2f
+        val decor = activity.window?.decorView ?: v.rootView
+        val now = android.os.SystemClock.uptimeMillis()
+        val down = MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, x, y, 0)
+        val up = MotionEvent.obtain(now, now + 16, MotionEvent.ACTION_UP, x, y, 0)
+        try {
+            decor.dispatchTouchEvent(down)
+            decor.dispatchTouchEvent(up)
+        } finally { down.recycle(); up.recycle() }
     }
 
     private fun installChordHooks(lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -693,6 +1124,9 @@ class MainHook : IXposedHookLoadPackage {
                             startFileObserver()
                             startHeartbeatThread()
                             registerZoneActionReceiver(app)
+                            registerPrefChangedReceiver(app)
+                            // Apply keep-screen-on from the persisted pref (default OFF).
+                            applyKeepScreenOn(isOptInEnabled("keep_screen_on_enabled"))
                             // Legacy: write Settings.Global marker for OnePlus backward compat
                             try {
                                 android.provider.Settings.Global.putString(
@@ -796,6 +1230,9 @@ class MainHook : IXposedHookLoadPackage {
                             // that just called setSystemExpanded(false) gets undone by that pass.
                             rowView.post {
                                 try {
+                                    // Keyguard: block the onExpandClicked → locked-shade side effect
+                                    // for any expand the fallback performClick might trigger.
+                                    if (onKG) beginLsAutoExpandWindow()
                                     val ok = try {
                                         XposedHelpers.callMethod(row, "setUserExpanded", true, true); true
                                     } catch (_: Throwable) {
@@ -866,7 +1303,8 @@ class MainHook : IXposedHookLoadPackage {
                                                     else st("isShowingExpanded") == false
                                     val btn = findStrictExpandButton(rowView)
                                     if (collapsed && btn != null) {
-                                        btn.performClick()            // the only reliable, instant expand
+                                        if (onKG) clickExpandSilentlyOnKeyguard(row, btn)
+                                        else btn.performClick()       // the only reliable, instant expand
                                     } else if (collapsed) {
                                         // No arrow found (rare) — fall back to state set.
                                         try { XposedHelpers.callMethod(row, "setUserExpanded", true, true) }
@@ -1348,6 +1786,35 @@ class MainHook : IXposedHookLoadPackage {
     // =========================================================================
     // Status Bar Zones — privileged action receiver
     // =========================================================================
+
+    /**
+     * Live pref updates from the app (no reboot). The app sends
+     * io.github.kvmy666.autoexpand.PREF_CHANGED (key/value extras) on every toggle.
+     * We refresh the cache and apply behaviors that need an explicit trigger
+     * (currently keep-screen-on, which adds/removes its overlay window here).
+     */
+    private fun registerPrefChangedReceiver(app: android.app.Application) {
+        try {
+            val filter = android.content.IntentFilter("io.github.kvmy666.autoexpand.PREF_CHANGED")
+            app.registerReceiver(object : android.content.BroadcastReceiver() {
+                override fun onReceive(ctx: android.content.Context, intent: android.content.Intent) {
+                    try {
+                        loadFilePrefs()
+                        val key = intent.getStringExtra("key") ?: return
+                        val value = intent.getStringExtra("value")
+                        if (key == "keep_screen_on_enabled") {
+                            applyKeepScreenOn(value == "1")
+                        }
+                    } catch (t: Throwable) {
+                        Log.d("Snapper", "DIAG: PREF_CHANGED receiver failed: $t")
+                    }
+                }
+            }, filter, android.content.Context.RECEIVER_EXPORTED)
+            Log.d("Snapper", "DIAG: PREF_CHANGED receiver registered")
+        } catch (t: Throwable) {
+            Log.d("Snapper", "DIAG: PREF_CHANGED receiver registration failed: $t")
+        }
+    }
 
     private fun registerZoneActionReceiver(app: android.app.Application) {
         try {

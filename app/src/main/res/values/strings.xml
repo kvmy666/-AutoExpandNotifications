@@ -15,6 +15,14 @@
     <string name="expand_lockscreen_desc">Allow expanded notifications on the lock screen</string>
     <string name="disable_back_haptic_title">Disable back gesture haptic</string>
     <string name="disable_back_haptic_desc">Suppress OxygenOS back swipe vibration</string>
+
+    <!-- System Behavior -->
+    <string name="system_behavior_title">System Behavior</string>
+    <string name="keep_screen_on_title">Keep screen always on</string>
+    <string name="keep_screen_on_desc">Prevent the screen from ever turning off while it is on</string>
+    <string name="keep_screen_on_warning">Warning: keeping the screen permanently on may cause permanent pixel burn-in on OLED displays.</string>
+    <string name="global_search_enter_title">Search: Enter launches first result</string>
+    <string name="global_search_enter_desc">In the OnePlus global search, press Enter to open the first matching app</string>
     <string name="disable_headsup_popup_title">Disable heads-up popup</string>
     <string name="disable_headsup_popup_desc">Block mini-window/freeform launch when swiping on heads-up</string>
     <string name="ungroup_notifications_title">Ungroup notifications</string>

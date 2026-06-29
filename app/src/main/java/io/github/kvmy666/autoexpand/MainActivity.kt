@@ -111,6 +111,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -129,7 +130,18 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         fun isModuleActive(context: Context): Boolean {
-            // Primary: heartbeat file written by hook thread (works on Xiaomi HyperOS)
+            // Primary: monotonic heartbeat published to Settings.Global by the hook.
+            // elapsedRealtime is boot-relative, so this is immune to wall-clock/NTP skew
+            // (the cause of false "inactive" reports), and Settings.Global survives the
+            // /data/local/tmp EACCES that breaks the file heartbeat on newer LSPosed.
+            try {
+                val stored = Settings.Global.getString(context.contentResolver, "ae_heartbeat")?.toLongOrNull()
+                if (stored != null) {
+                    val delta = SystemClock.elapsedRealtime() - stored
+                    if (delta in 0..(3 * 60 * 1000L)) return true
+                }
+            } catch (_: Throwable) {}
+            // Fallback: heartbeat file written by hook thread (works on Xiaomi HyperOS)
             try {
                 val file = File("/data/local/tmp/tweaks_heartbeat")
                 if (file.exists()) {
@@ -137,7 +149,7 @@ class MainActivity : ComponentActivity() {
                     if (ts != null && System.currentTimeMillis() - ts < 3 * 60 * 1000L) return true
                 }
             } catch (_: Throwable) {}
-            // Fallback: Settings.Global marker (OnePlus OxygenOS)
+            // Fallback: legacy Settings.Global marker (OnePlus OxygenOS)
             return try {
                 val value = Settings.Global.getString(context.contentResolver, "autoexpand_active")
                 if (value.isNullOrEmpty()) return false
@@ -336,6 +348,10 @@ private fun SettingsScreen(prefs: SharedPreferences) {
     var disableHeadsupHooks by remember { mutableStateOf(prefs.getBoolean("disable_headsup_hooks_enabled", false)) }
     var lockscreenEnabled  by remember { mutableStateOf(prefs.getBoolean("expand_lockscreen_enabled", true)) }
     var backHapticEnabled  by remember { mutableStateOf(prefs.getBoolean("disable_back_haptic_enabled", true)) }
+
+    // ── System Behavior state ─────────────────────────────────────────────────
+    var keepScreenOnEnabled by remember { mutableStateOf(prefs.getBoolean("keep_screen_on_enabled", false)) }
+    var globalSearchEnterEnabled by remember { mutableStateOf(prefs.getBoolean("global_search_enter_launch_enabled", false)) }
     var headsupPopupEnabled by remember { mutableStateOf(prefs.getBoolean("disable_headsup_popup_enabled", true)) }
     var ungroupEnabled     by remember { mutableStateOf(prefs.getBoolean("ungroup_notifications_enabled", true)) }
     var excludedCount      by remember { mutableIntStateOf(prefs.getStringSet("excluded_apps", emptySet())?.size ?: 0) }
@@ -414,11 +430,16 @@ private fun SettingsScreen(prefs: SharedPreferences) {
         }
     }
 
+    // Module-active state — re-checked on resume so a working module that wasn't yet
+    // reporting at first launch (e.g. heartbeat not written yet) self-heals.
+    var isActive by remember { mutableStateOf(MainActivity.isModuleActive(context)) }
+
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 excludedCount = prefs.getStringSet("excluded_apps", emptySet())?.size ?: 0
+                isActive = MainActivity.isModuleActive(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -500,6 +521,7 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                             "snapper"       -> "Screen Snapper"
                             "guide"         -> "Guide"
                             "zones"         -> "Status Bar Zones"
+                            "system"        -> "System Behavior"
                             else            -> stringResource(R.string.app_name)
                         }
                     )
@@ -518,7 +540,6 @@ private fun SettingsScreen(prefs: SharedPreferences) {
     ) { padding ->
       Crossfade(targetState = selectedFeature, animationSpec = tween(260), label = "screen") { feature ->
         if (feature == null) {
-            val isActive = remember { MainActivity.isModuleActive(context) }
             HomeScreen(
                 isActive             = isActive,
                 rootAvailable        = rootAvailable,
@@ -526,6 +547,7 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                 snapperMasterEnabled = snapperMasterEnabled,
                 zonesEnabled         = zonesEnabled,
                 kbEnhancerEnabled    = kbEnhancerEnabled,
+                systemBehaviorEnabled = keepScreenOnEnabled || backHapticEnabled || globalSearchEnterEnabled,
                 modifier             = Modifier.padding(padding),
                 onNavigate           = { selectedFeature = it }
             )
@@ -593,12 +615,6 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                                 checked = ungroupEnabled,
                                 onCheckedChange = { ungroupEnabled = it; onToggle("ungroup_notifications_enabled", it) }
                             )
-                            ToggleRow(
-                                title = stringResource(R.string.disable_back_haptic_title),
-                                description = stringResource(R.string.disable_back_haptic_desc),
-                                checked = backHapticEnabled,
-                                onCheckedChange = { backHapticEnabled = it; onToggle("disable_back_haptic_enabled", it) }
-                            )
                         }
 
                         // ── Advanced (master kill-switch, set apart so it isn't toggled by mistake) ──
@@ -629,6 +645,48 @@ private fun SettingsScreen(prefs: SharedPreferences) {
                             }
                         }
 
+                    }
+
+                    // ── System Behavior ───────────────────────────────────────────
+                    "system" -> {
+                        // ── Gestures ──
+                        SettingsCard {
+                            SectionLabel("Gestures")
+                            ToggleRow(
+                                title = stringResource(R.string.disable_back_haptic_title),
+                                description = stringResource(R.string.disable_back_haptic_desc),
+                                checked = backHapticEnabled,
+                                onCheckedChange = { backHapticEnabled = it; onToggle("disable_back_haptic_enabled", it) }
+                            )
+                        }
+
+                        // ── Display ──
+                        SettingsCard {
+                            SectionLabel("Display")
+                            ToggleRow(
+                                title = stringResource(R.string.keep_screen_on_title),
+                                description = stringResource(R.string.keep_screen_on_desc),
+                                checked = keepScreenOnEnabled,
+                                onCheckedChange = { keepScreenOnEnabled = it; onToggle("keep_screen_on_enabled", it) }
+                            )
+                            Text(
+                                text = stringResource(R.string.keep_screen_on_warning),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = AppColors.Warning,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                            )
+                        }
+
+                        // ── Global Search ──
+                        SettingsCard {
+                            SectionLabel("Global Search")
+                            ToggleRow(
+                                title = stringResource(R.string.global_search_enter_title),
+                                description = stringResource(R.string.global_search_enter_desc),
+                                checked = globalSearchEnterEnabled,
+                                onCheckedChange = { globalSearchEnterEnabled = it; onToggle("global_search_enter_launch_enabled", it) }
+                            )
+                        }
                     }
 
                     // ── Keyboard Enhancer ─────────────────────────────────────────
@@ -1901,6 +1959,7 @@ private fun HomeScreen(
     snapperMasterEnabled: Boolean,
     zonesEnabled: Boolean,
     kbEnhancerEnabled: Boolean,
+    systemBehaviorEnabled: Boolean,
     modifier: Modifier = Modifier,
     onNavigate: (String) -> Unit,
 ) {
@@ -2058,6 +2117,16 @@ private fun HomeScreen(
                 subtitle  = "Tap the status bar to trigger quick actions",
                 isEnabled = zonesEnabled,
                 onClick   = { onNavigate("zones") }
+            )
+        }
+        item {
+            FeatureCard(
+                icon      = Icons.Default.Tune,
+                iconColor = Color(0xFF00BCD4),
+                title     = "System Behavior",
+                subtitle  = "Back gesture haptic, keep screen on",
+                isEnabled = systemBehaviorEnabled,
+                onClick   = { onNavigate("system") }
             )
         }
         item {
