@@ -12,12 +12,16 @@ import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
+import io.github.kvmy666.autoexpand.hook.GlobalSearchHook
 import io.github.kvmy666.autoexpand.hook.PrefsBridge
 
 class MainHook : IXposedHookLoadPackage {
 
     /** Shared prefs/IPC reader; owns the captured app context (see PrefsBridge). */
     private val prefs = PrefsBridge()
+
+    /** Phase D — global-search Enter/Go launches the first result. */
+    private val globalSearch = GlobalSearchHook(prefs)
 
     private val HUD_TAG        = "TweaksHud"
     private fun ts() = System.nanoTime() / 1_000_000L
@@ -463,7 +467,7 @@ class MainHook : IXposedHookLoadPackage {
                 "com.android.systemui" -> try { handleSystemUi(lpparam) } catch (t: Throwable) {
                     Log.e("AutoExpand", "SystemUI hook init failed: $t")
                 }
-                "com.oppo.quicksearchbox" -> try { handleGlobalSearch(lpparam) } catch (t: Throwable) {
+                "com.oppo.quicksearchbox" -> try { globalSearch.install(lpparam) } catch (t: Throwable) {
                     Log.e("TweaksLauncher", "Global search hook init failed: $t")
                 }
                 // Gboard + all other apps: the selection action bar is rendered
@@ -522,273 +526,6 @@ class MainHook : IXposedHookLoadPackage {
         } catch (t: Throwable) {
             Log.e("Snapper", "handleSystemServer crashed: $t")
         }
-    }
-
-    // =====================================================
-    // Global Search — Enter launches the first result
-    //
-    // Pref `global_search_enter_launch_enabled` (opt-in, default OFF). On the OnePlus
-    // app drawer the search box just launches the OEM global-search app
-    // (com.oppo.quicksearchbox / SearchDrawActivity); pressing Enter there does nothing
-    // by default. When this pref is ON we attach an editor-action listener to the search
-    // input so Enter taps the first result row — which is how that app launches an app
-    // (confirmed: a real touch on the row opens the app even though the row reports
-    // clickable=false, i.e. it's handled by a RecyclerView touch listener).
-    //
-    // IDs/classes verified live on-device (uiautomator) + the app's resources:
-    //   activity  com.oplus.globalsearch.ui.SearchDrawActivity
-    //   input     id/search_bar_search_input  (android.widget.EditText)
-    //   results   id/recycler_view_result     (RecyclerView; rows carry id/text_content)
-    //
-    // SAFETY: gated on the pref + full try/catch; OFF = the search app is untouched.
-    // =====================================================
-    private val LAUNCHER_TAG = "TweaksLauncher"
-    private val GS_KEY = "global_search_enter_launch_enabled"
-    @Volatile private var lastSearchLaunchTs = 0L
-    @Volatile private var gsActivity: android.app.Activity? = null
-    // The live search EditText — captured in onCreateInputConnection so the launch path is
-    // activity-agnostic (the global search has two entry activities: SearchActivity from the
-    // home swipe-down and SearchDrawActivity from the drawer; both reuse the same field id).
-    @Volatile private var searchEditRef: java.lang.ref.WeakReference<android.view.View>? = null
-    private val hookedIcClasses = java.util.Collections.synchronizedSet(HashSet<String>())
-
-    /** Resolve the current search activity from the focused field, falling back to gsActivity. */
-    private fun currentSearchActivity(): android.app.Activity? =
-        (searchEditRef?.get()?.let { activityOf(it) }) ?: gsActivity
-
-    private fun handleGlobalSearch(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val cl = lpparam.classLoader
-        // (1) onResume: supply an appContext from the activity (this third-party process has
-        // none) so the Settings.Global pref channel is readable; track the live activity; and
-        // wire a key-event fallback. The home swipe-down opens SearchActivity while the drawer
-        // uses SearchDrawActivity — hook both so either entry point works.
-        for (clsName in listOf(
-            "com.oplus.globalsearch.ui.SearchActivity",
-            "com.oplus.globalsearch.ui.SearchDrawActivity"
-        )) {
-            try {
-                val act = XposedHelpers.findClass(clsName, cl)
-                XposedBridge.hookAllMethods(act, "onResume", object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        try {
-                            val activity = param.thisObject as android.app.Activity
-                            gsActivity = activity
-                            if (prefs.appContext == null) {
-                                prefs.appContext = activity.applicationContext
-                                prefs.loadFilePrefs()
-                            }
-                            if (!prefs.isOptInEnabled(GS_KEY)) return
-                            attachSearchKeyFallback(activity)
-                        } catch (t: Throwable) { Log.d(LAUNCHER_TAG, "onResume hook err: $t") }
-                    }
-                })
-                XposedBridge.hookAllMethods(act, "onPause", object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        if (gsActivity === param.thisObject) gsActivity = null
-                    }
-                })
-            } catch (t: Throwable) {
-                Log.d(LAUNCHER_TAG, "activity hook install failed ($clsName): $t")
-            }
-        }
-        // (2) View-level onEditorAction (covers any keyboard that routes through it).
-        try {
-            XposedHelpers.findAndHookMethod(
-                android.widget.TextView::class.java, "onEditorAction",
-                Int::class.javaPrimitiveType,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        try {
-                            if (!prefs.isOptInEnabled(GS_KEY)) return
-                            val tv = param.thisObject as? android.widget.TextView ?: return
-                            if (resourceEntryAndPkg(tv).first != "search_bar_search_input") return
-                            val q = tv.text?.toString()?.trim().orEmpty()
-                            Log.d(LAUNCHER_TAG, "[${ts()}] onEditorAction id=${param.args.getOrNull(0)} q=\"$q\"")
-                            if (q.isEmpty()) return
-                            val activity = activityOf(tv) ?: return
-                            if (launchFirstDebounced(activity)) param.setResult(null)
-                        } catch (t: Throwable) { Log.d(LAUNCHER_TAG, "onEditorAction hook err: $t") }
-                    }
-                })
-        } catch (t: Throwable) {
-            Log.d(LAUNCHER_TAG, "onEditorAction hook install failed: $t")
-        }
-        // (3) The OEM search field swallows the soft "Go" action inside its custom
-        // InputConnection (it never reaches onEditorAction or a key event). Discover that
-        // IC class at runtime from onCreateInputConnection, then hook its performEditorAction
-        // / sendKeyEvent so the action is intercepted at the true source.
-        try {
-            XposedHelpers.findAndHookMethod(
-                android.widget.TextView::class.java, "onCreateInputConnection",
-                android.view.inputmethod.EditorInfo::class.java,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        try {
-                            val tv = param.thisObject as? android.widget.TextView ?: return
-                            if (resourceEntryAndPkg(tv).first != "search_bar_search_input") return
-                            // Capture the field + an appContext here so the launch path works
-                            // even before either entry activity's onResume hook runs.
-                            searchEditRef = java.lang.ref.WeakReference(tv)
-                            if (prefs.appContext == null) {
-                                prefs.appContext = tv.context?.applicationContext
-                                prefs.loadFilePrefs()
-                            }
-                            if (!prefs.isOptInEnabled(GS_KEY)) return
-                            val ic = param.result ?: return
-                            val info = param.args.getOrNull(0) as? android.view.inputmethod.EditorInfo
-                            Log.d(LAUNCHER_TAG, "search IC=${ic.javaClass.name} imeOptions=${info?.imeOptions}")
-                            hookSearchInputConnection(ic.javaClass)
-                        } catch (t: Throwable) { Log.d(LAUNCHER_TAG, "onCreateIC hook err: $t") }
-                    }
-                })
-            Log.d(LAUNCHER_TAG, "global search hook installed")
-        } catch (t: Throwable) {
-            Log.d(LAUNCHER_TAG, "onCreateIC hook install failed: $t")
-        }
-    }
-
-    /**
-     * Hook performEditorAction/sendKeyEvent on the search field's actual IC class (once).
-     * The OEM uses the standard com.android.internal.inputmethod.EditableInputConnection,
-     * whose performEditorAction/sendKeyEvent are *inherited* from BaseInputConnection — so
-     * hookAllMethods(icClass, ...) would hook nothing. findAndHookMethod walks the superclass
-     * chain to the real declaration, and a hook on the inherited method still fires for calls
-     * made on the subclass instance.
-     */
-    private fun hookSearchInputConnection(icClass: Class<*>) {
-        if (!hookedIcClasses.add(icClass.name)) return
-        try {
-            XposedHelpers.findAndHookMethod(
-                icClass, "performEditorAction", Int::class.javaPrimitiveType,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        try {
-                            if (!prefs.isOptInEnabled(GS_KEY)) return
-                            Log.d(LAUNCHER_TAG, "[${ts()}] IC.performEditorAction id=${param.args.getOrNull(0)} cls=${param.thisObject.javaClass.name}")
-                            val activity = currentSearchActivity() ?: return
-                            if (launchFirstDebounced(activity)) param.setResult(true) // consume
-                        } catch (t: Throwable) { Log.d(LAUNCHER_TAG, "IC.performEditorAction err: $t") }
-                    }
-                })
-            Log.d(LAUNCHER_TAG, "hooked IC.performEditorAction via ${icClass.name}")
-        } catch (t: Throwable) {
-            Log.d(LAUNCHER_TAG, "hook performEditorAction err: $t")
-        }
-        try {
-            XposedHelpers.findAndHookMethod(
-                icClass, "sendKeyEvent", KeyEvent::class.java,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        try {
-                            if (!prefs.isOptInEnabled(GS_KEY)) return
-                            val ev = param.args.getOrNull(0) as? KeyEvent ?: return
-                            if (ev.action != KeyEvent.ACTION_UP) return
-                            if (ev.keyCode != KeyEvent.KEYCODE_ENTER && ev.keyCode != KeyEvent.KEYCODE_NUMPAD_ENTER) return
-                            Log.d(LAUNCHER_TAG, "[${ts()}] IC.sendKeyEvent ENTER")
-                            val activity = currentSearchActivity() ?: return
-                            if (launchFirstDebounced(activity)) param.setResult(true)
-                        } catch (t: Throwable) { Log.d(LAUNCHER_TAG, "IC.sendKeyEvent err: $t") }
-                    }
-                })
-            Log.d(LAUNCHER_TAG, "hooked IC.sendKeyEvent via ${icClass.name}")
-        } catch (t: Throwable) {
-            Log.d(LAUNCHER_TAG, "hook sendKeyEvent err: $t")
-        }
-    }
-
-    /** Fallback: some keyboards send a raw ENTER key rather than an editor action. */
-    private fun attachSearchKeyFallback(activity: android.app.Activity) {
-        try {
-            val editId = activity.resources.getIdentifier("search_bar_search_input", "id", activity.packageName)
-            if (editId == 0) return
-            val edit = activity.findViewById<android.widget.TextView>(editId) ?: return
-            edit.setOnKeyListener(android.view.View.OnKeyListener { v, keyCode, event ->
-                try {
-                    if (!prefs.isOptInEnabled(GS_KEY)) return@OnKeyListener false
-                    if (event.action != KeyEvent.ACTION_UP) return@OnKeyListener false
-                    if (keyCode != KeyEvent.KEYCODE_ENTER && keyCode != KeyEvent.KEYCODE_NUMPAD_ENTER)
-                        return@OnKeyListener false
-                    if ((v as? android.widget.TextView)?.text?.toString()?.trim().isNullOrEmpty())
-                        return@OnKeyListener false
-                    Log.d(LAUNCHER_TAG, "[${ts()}] key ENTER fallback")
-                    launchFirstDebounced(activity)
-                } catch (t: Throwable) { Log.d(LAUNCHER_TAG, "key fallback err: $t"); false }
-            })
-        } catch (t: Throwable) { Log.d(LAUNCHER_TAG, "attachSearchKeyFallback err: $t") }
-    }
-
-    /** De-duplicated launch — the editor-action and key paths can both fire for one press. */
-    private fun launchFirstDebounced(activity: android.app.Activity): Boolean {
-        val now = android.os.SystemClock.uptimeMillis()
-        if (now - lastSearchLaunchTs < 1000L) return true
-        val ok = launchFirstSearchResult(activity)
-        if (ok) lastSearchLaunchTs = now
-        return ok
-    }
-
-    /** Unwrap a view's context chain to the hosting Activity. */
-    private fun activityOf(v: android.view.View): android.app.Activity? {
-        var c: Context? = v.context
-        while (c is android.content.ContextWrapper) {
-            if (c is android.app.Activity) return c
-            c = c.baseContext
-        }
-        return null
-    }
-
-    /**
-     * Tap the first result row in the global-search results list. The two entry activities use
-     * different list ids (SearchActivity → recycler_view_shelf, SearchDrawActivity →
-     * recycler_view_result), so rather than hard-code a recycler id we walk the whole decor
-     * tree for the first visible "text_content" view — that id marks a real result row (section
-     * headers use text_title), and tapping anywhere on the row launches it.
-     */
-    private fun launchFirstSearchResult(activity: android.app.Activity): Boolean {
-        return try {
-            val textId = activity.resources.getIdentifier("text_content", "id", activity.packageName)
-            if (textId == 0) { Log.d(LAUNCHER_TAG, "no text_content id"); return false }
-            val root = activity.window?.decorView ?: return false
-            val first = findFirstVisibleById(root, textId) ?: run {
-                Log.d(LAUNCHER_TAG, "no result row found"); return false
-            }
-            val label = (first as? android.widget.TextView)?.text
-            Log.d(LAUNCHER_TAG, "first result = \"$label\"")
-            tapViewInWindow(activity, first)
-            true
-        } catch (t: Throwable) {
-            Log.d(LAUNCHER_TAG, "launchFirstSearchResult err: $t"); false
-        }
-    }
-
-    /** Depth-first (visual top-to-bottom) search for the first shown view with the given id. */
-    private fun findFirstVisibleById(v: android.view.View, id: Int): android.view.View? {
-        if (v.visibility != View.VISIBLE) return null
-        if (v.id == id && v.width > 0 && v.height > 0) return v
-        if (v is android.view.ViewGroup) {
-            for (i in 0 until v.childCount) {
-                findFirstVisibleById(v.getChildAt(i) ?: continue, id)?.let { return it }
-            }
-        }
-        return null
-    }
-
-    /**
-     * Replay a real touch on a view by dispatching DOWN+UP at its on-screen centre to the
-     * window's decor view. The result rows launch on a genuine touch (RecyclerView touch
-     * listener) rather than View.performClick(), so a synthetic motion event is required.
-     */
-    private fun tapViewInWindow(activity: android.app.Activity, v: android.view.View) {
-        val loc = IntArray(2); v.getLocationInWindow(loc)
-        val x = loc[0] + v.width / 2f
-        val y = loc[1] + v.height / 2f
-        val decor = activity.window?.decorView ?: v.rootView
-        val now = android.os.SystemClock.uptimeMillis()
-        val down = MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, x, y, 0)
-        val up = MotionEvent.obtain(now, now + 16, MotionEvent.ACTION_UP, x, y, 0)
-        try {
-            decor.dispatchTouchEvent(down)
-            decor.dispatchTouchEvent(up)
-        } finally { down.recycle(); up.recycle() }
     }
 
     private fun installChordHooks(lpparam: XC_LoadPackage.LoadPackageParam) {
