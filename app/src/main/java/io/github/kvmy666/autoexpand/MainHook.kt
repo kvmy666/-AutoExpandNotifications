@@ -3,7 +3,6 @@ package io.github.kvmy666.autoexpand
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.os.FileObserver
 import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -12,41 +11,16 @@ import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
-import de.robv.android.xposed.XSharedPreferences
 import de.robv.android.xposed.callbacks.XC_LoadPackage
-import java.io.File
+import io.github.kvmy666.autoexpand.hook.PrefsBridge
 
 class MainHook : IXposedHookLoadPackage {
 
-    private var appContext: Context? = null  // captured from SystemUI process
+    /** Shared prefs/IPC reader; owns the captured app context (see PrefsBridge). */
+    private val prefs = PrefsBridge()
 
-    // Context used to read the Settings.Global IPC channel. SystemUI supplies appContext;
-    // system_server (no appContext) falls back to the reflective system context. Both can
-    // read Settings.Global even when /data/local/tmp is SELinux-blocked.
-    private val ipcContext: Context?
-        get() = appContext ?: systemCtx
-    private val systemCtx: Context? by lazy {
-        try {
-            val atClass = Class.forName("android.app.ActivityThread")
-            val at = XposedHelpers.callStaticMethod(atClass, "currentActivityThread")
-            XposedHelpers.callMethod(at, "getSystemContext") as? Context
-        } catch (t: Throwable) {
-            Log.d("Snapper", "DIAG: systemCtx fetch failed: $t"); null
-        }
-    }
-
-    // XSharedPreferences — reads prefs XML directly; survives app-process death (Xiaomi SmartPower)
-    private val xprefs = XSharedPreferences("io.github.kvmy666.autoexpand", "prefs")
-
-    private var lastCacheTime = 0L
-    private val CACHE_INTERVAL_MS = 2000L
-
-    private val PREFS_FILE     = "/data/local/tmp/tweaks_prefs.json"
-    private val HEARTBEAT_FILE = "/data/local/tmp/tweaks_heartbeat"
     private val HUD_TAG        = "TweaksHud"
     private fun ts() = System.nanoTime() / 1_000_000L
-    @Volatile private var filePrefCache: Map<String, String>? = null
-    @Volatile private var fileObserver: FileObserver? = null
 
     // Keep-screen-on (System Behavior): a 1x1 invisible overlay window carrying
     // FLAG_KEEP_SCREEN_ON, hosted in the always-alive SystemUI process.
@@ -102,17 +76,11 @@ class MainHook : IXposedHookLoadPackage {
         }
     }
 
-    private fun getStringPref(key: String, default: String): String {
-        reloadIfStale()
-        filePrefCache?.get(key)?.let { return it }
-        return try { xprefs.getString(key, default) ?: default } catch (_: Throwable) { default }
-    }
-
     private fun dispatchZoneGesture(side: String, suffix: String, ctx: android.content.Context) {
-        val actionKey    = getStringPref("zones_${side}_${suffix}_action", "no_action")
+        val actionKey    = prefs.getStringPref("zones_${side}_${suffix}_action", "no_action")
         if (actionKey == "no_action") return
-        val pkg          = getStringPref("zones_${side}_open_app_pkg", "")
-        val shortcutData = getStringPref("zones_${side}_${suffix}_shortcut", "")
+        val pkg          = prefs.getStringPref("zones_${side}_open_app_pkg", "")
+        val shortcutData = prefs.getStringPref("zones_${side}_${suffix}_shortcut", "")
         val action       = ZoneAction.fromKey(actionKey, pkg, shortcutData)
         Log.d("Zones", "hook gesture $side/$suffix → $actionKey")
         // Write hook-side diag for non-technical user debugging (read by DebugLogHelper)
@@ -124,7 +92,7 @@ class MainHook : IXposedHookLoadPackage {
                 )
             } catch (_: Throwable) {}
         }
-        if (getStringPref("zones_haptic_enabled", "1") == "1") {
+        if (prefs.getStringPref("zones_haptic_enabled", "1") == "1") {
             try {
                 val vib = ctx.getSystemService(android.content.Context.VIBRATOR_SERVICE)
                         as android.os.Vibrator
@@ -145,101 +113,6 @@ class MainHook : IXposedHookLoadPackage {
     @Volatile private var f1SwipeTime = 0L
     @Volatile private var f1CurrentRow: Any? = null
 
-    private fun reloadIfStale() {
-        val now = System.currentTimeMillis()
-        if (now - lastCacheTime < CACHE_INTERVAL_MS) return
-        lastCacheTime = now
-        try { xprefs.reload() } catch (_: Throwable) {}
-        loadFilePrefs()
-    }
-
-    private fun loadFilePrefs() {
-        // Primary: Settings.Global (readable by system_server + SystemUI even when
-        // /data/local/tmp is SELinux-blocked under newer LSPosed/Android).
-        try {
-            val cr = ipcContext?.contentResolver
-            if (cr != null) {
-                val b64 = android.provider.Settings.Global.getString(cr, "ae_prefs_json")
-                if (!b64.isNullOrEmpty()) {
-                    val text = String(
-                        android.util.Base64.decode(b64, android.util.Base64.NO_WRAP), Charsets.UTF_8
-                    )
-                    filePrefCache = PrefsJson.parse(text)
-                    return
-                }
-            }
-        } catch (t: Throwable) {
-            Log.d("Snapper", "DIAG: Settings.Global prefs load failed: $t")
-        }
-        // Fallback: legacy /data/local/tmp file.
-        try {
-            filePrefCache = PrefsJson.parse(File(PREFS_FILE).readText())
-        } catch (e: Throwable) {
-            Log.d("Snapper", "DIAG: file prefs load failed: $e")
-        }
-    }
-
-    private fun startFileObserver() {
-        try {
-            val fileName = "tweaks_prefs.json"
-            val observer = object : FileObserver(File("/data/local/tmp"), CLOSE_WRITE or MOVED_TO) {
-                override fun onEvent(event: Int, path: String?) {
-                    if (path == fileName) loadFilePrefs()
-                }
-            }
-            observer.startWatching()
-            fileObserver = observer
-            Log.d("Snapper", "DIAG: FileObserver started")
-        } catch (e: Throwable) {
-            Log.d("Snapper", "DIAG: FileObserver start failed: $e")
-        }
-    }
-
-    private fun startHeartbeatThread() {
-        val t = Thread {
-            val file = File(HEARTBEAT_FILE)
-            while (true) {
-                // Primary: monotonic heartbeat in Settings.Global. elapsedRealtime is
-                // boot-relative, so the activity-side check is immune to wall-clock/NTP
-                // skew, and Settings.Global is readable/writable even when /data/local/tmp
-                // is SELinux-blocked (EACCES) on newer LSPosed/Android.
-                try {
-                    val cr = ipcContext?.contentResolver
-                    if (cr != null) android.provider.Settings.Global.putString(
-                        cr, "ae_heartbeat", android.os.SystemClock.elapsedRealtime().toString()
-                    )
-                } catch (e: Throwable) { Log.d("Snapper", "DIAG: heartbeat global write failed: $e") }
-                // Fallback: legacy /data/local/tmp file (best effort).
-                try { file.writeText(System.currentTimeMillis().toString()) }
-                catch (e: Throwable) { Log.d("Snapper", "DIAG: heartbeat file write failed: $e") }
-                Thread.sleep(60_000)
-            }
-        }
-        t.isDaemon = true
-        t.name = "tweaks-heartbeat"
-        t.start()
-    }
-
-    private fun isFeatureEnabled(key: String): Boolean {
-        reloadIfStale()
-        val fileVal = filePrefCache?.get(key)
-        fileVal?.let { return it == "1" }
-        return try { xprefs.getBoolean(key, true) } catch (_: Throwable) { true }
-    }
-
-    // Kill-switches default OFF (opt-in). Using isFeatureEnabled here would default ON,
-    // disabling every HUD hook for any user whose prefs file hasn't been written with the key yet.
-    private fun isKillSwitchActive(key: String): Boolean {
-        reloadIfStale()
-        val fileVal = filePrefCache?.get(key)
-        fileVal?.let { return it == "1" }
-        return try { xprefs.getBoolean(key, false) } catch (_: Throwable) { false }
-    }
-
-    // Opt-in features (default OFF when the pref hasn't been written yet). Same
-    // default-false semantics as isKillSwitchActive — aliased for readability.
-    private fun isOptInEnabled(key: String): Boolean = isKillSwitchActive(key)
-
     /**
      * Add/remove the invisible keep-screen-on overlay in the SystemUI process.
      * Idempotent: a single 1x1 TYPE_APPLICATION_OVERLAY window with FLAG_KEEP_SCREEN_ON
@@ -247,7 +120,7 @@ class MainHook : IXposedHookLoadPackage {
      * Must run on a Looper thread — posted to the main looper.
      */
     private fun applyKeepScreenOn(enabled: Boolean) {
-        val ctx = appContext ?: return
+        val ctx = prefs.appContext ?: return
         zoneHandler.post {
             try {
                 val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
@@ -279,20 +152,6 @@ class MainHook : IXposedHookLoadPackage {
                 Log.d("Snapper", "DIAG: keepScreenOn apply failed: $t")
             }
         }
-    }
-
-    private fun getExcludedApps(): Set<String> {
-        reloadIfStale()
-        filePrefCache?.get("excluded_apps")?.let { v ->
-            return if (v.isEmpty()) emptySet() else v.split("\n").toSet()
-        }
-        return try { xprefs.getStringSet("excluded_apps", emptySet()) ?: emptySet() } catch (_: Throwable) { emptySet() }
-    }
-
-    private fun getIntPref(key: String, default: Int): Int {
-        reloadIfStale()
-        filePrefCache?.get(key)?.toIntOrNull()?.let { return it }
-        return try { xprefs.getString(key, null)?.toIntOrNull() ?: default } catch (_: Throwable) { default }
     }
 
     private fun getNotificationPackage(row: Any): String? {
@@ -499,8 +358,8 @@ class MainHook : IXposedHookLoadPackage {
         // It only gates the grouped-HUD expand path (see expandGroupIfNeeded and the
         // addNotification HU branch). Single notifications still expand normally when
         // the kill-switch is ON — only group parents stay at OEM-default (collapsed).
-        if (!isFeatureEnabled(featureKey)) return true
-        if (pkg != null && pkg in getExcludedApps()) return true
+        if (!prefs.isFeatureEnabled(featureKey)) return true
+        if (pkg != null && pkg in prefs.getExcludedApps()) return true
         return false
     }
 
@@ -512,7 +371,7 @@ class MainHook : IXposedHookLoadPackage {
     private fun expandGroupIfNeeded(rowView: View, rowObj: Any, pkg: String?) {
         // Master kill-switch: when ON, leave grouped HUDs at OEM default (collapsed parent).
         // Singles bypass this function entirely, so their auto-expand path is unaffected.
-        if (isKillSwitchActive("disable_headsup_hooks_enabled")) return
+        if (prefs.isKillSwitchActive("disable_headsup_hooks_enabled")) return
         val rowId = System.identityHashCode(rowObj)
         val count = getRowChildCount(rowObj)
         Log.d(HUD_TAG, "[${ts()}] expandGroupIfNeeded ENTER row=$rowId pkg=$pkg count=$count")
@@ -714,11 +573,11 @@ class MainHook : IXposedHookLoadPackage {
                         try {
                             val activity = param.thisObject as android.app.Activity
                             gsActivity = activity
-                            if (appContext == null) {
-                                appContext = activity.applicationContext
-                                loadFilePrefs()
+                            if (prefs.appContext == null) {
+                                prefs.appContext = activity.applicationContext
+                                prefs.loadFilePrefs()
                             }
-                            if (!isOptInEnabled(GS_KEY)) return
+                            if (!prefs.isOptInEnabled(GS_KEY)) return
                             attachSearchKeyFallback(activity)
                         } catch (t: Throwable) { Log.d(LAUNCHER_TAG, "onResume hook err: $t") }
                     }
@@ -740,7 +599,7 @@ class MainHook : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         try {
-                            if (!isOptInEnabled(GS_KEY)) return
+                            if (!prefs.isOptInEnabled(GS_KEY)) return
                             val tv = param.thisObject as? android.widget.TextView ?: return
                             if (resourceEntryAndPkg(tv).first != "search_bar_search_input") return
                             val q = tv.text?.toString()?.trim().orEmpty()
@@ -770,11 +629,11 @@ class MainHook : IXposedHookLoadPackage {
                             // Capture the field + an appContext here so the launch path works
                             // even before either entry activity's onResume hook runs.
                             searchEditRef = java.lang.ref.WeakReference(tv)
-                            if (appContext == null) {
-                                appContext = tv.context?.applicationContext
-                                loadFilePrefs()
+                            if (prefs.appContext == null) {
+                                prefs.appContext = tv.context?.applicationContext
+                                prefs.loadFilePrefs()
                             }
-                            if (!isOptInEnabled(GS_KEY)) return
+                            if (!prefs.isOptInEnabled(GS_KEY)) return
                             val ic = param.result ?: return
                             val info = param.args.getOrNull(0) as? android.view.inputmethod.EditorInfo
                             Log.d(LAUNCHER_TAG, "search IC=${ic.javaClass.name} imeOptions=${info?.imeOptions}")
@@ -804,7 +663,7 @@ class MainHook : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         try {
-                            if (!isOptInEnabled(GS_KEY)) return
+                            if (!prefs.isOptInEnabled(GS_KEY)) return
                             Log.d(LAUNCHER_TAG, "[${ts()}] IC.performEditorAction id=${param.args.getOrNull(0)} cls=${param.thisObject.javaClass.name}")
                             val activity = currentSearchActivity() ?: return
                             if (launchFirstDebounced(activity)) param.setResult(true) // consume
@@ -821,7 +680,7 @@ class MainHook : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         try {
-                            if (!isOptInEnabled(GS_KEY)) return
+                            if (!prefs.isOptInEnabled(GS_KEY)) return
                             val ev = param.args.getOrNull(0) as? KeyEvent ?: return
                             if (ev.action != KeyEvent.ACTION_UP) return
                             if (ev.keyCode != KeyEvent.KEYCODE_ENTER && ev.keyCode != KeyEvent.KEYCODE_NUMPAD_ENTER) return
@@ -845,7 +704,7 @@ class MainHook : IXposedHookLoadPackage {
             val edit = activity.findViewById<android.widget.TextView>(editId) ?: return
             edit.setOnKeyListener(android.view.View.OnKeyListener { v, keyCode, event ->
                 try {
-                    if (!isOptInEnabled(GS_KEY)) return@OnKeyListener false
+                    if (!prefs.isOptInEnabled(GS_KEY)) return@OnKeyListener false
                     if (event.action != KeyEvent.ACTION_UP) return@OnKeyListener false
                     if (keyCode != KeyEvent.KEYCODE_ENTER && keyCode != KeyEvent.KEYCODE_NUMPAD_ENTER)
                         return@OnKeyListener false
@@ -951,7 +810,7 @@ class MainHook : IXposedHookLoadPackage {
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             try {
-                                if (!isFeatureEnabled("enable_snapper_entirely")) return
+                                if (!prefs.isFeatureEnabled("enable_snapper_entirely")) return
                                 val ev = param.args[0] as? KeyEvent ?: return
                                 when (ev.keyCode) {
                                     KeyEvent.KEYCODE_POWER -> when (ev.action) {
@@ -974,7 +833,7 @@ class MainHook : IXposedHookLoadPackage {
                                     KeyEvent.KEYCODE_VOLUME_DOWN -> when (ev.action) {
                                         KeyEvent.ACTION_DOWN -> {
                                             volumeDownTime = ev.downTime   // always record
-                                            if (!isFeatureEnabled("snapper_hardware_chord_enabled")) return
+                                            if (!prefs.isFeatureEnabled("snapper_hardware_chord_enabled")) return
                                             val gap = ev.downTime - powerDownTime
                                             if (gap > 0L && gap < CHORD_WINDOW_MS) {
                                                 chordTriggered = true
@@ -1032,12 +891,12 @@ class MainHook : IXposedHookLoadPackage {
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             try {
-                                if (!isFeatureEnabled("enable_snapper_entirely")) return
+                                if (!prefs.isFeatureEnabled("enable_snapper_entirely")) return
                                 val gestureEvent = param.args.getOrNull(0) ?: return
                                 // args[0] is KeyGestureEvent — use toString() to identify
                                 // SCREENSHOT_CHORD (confirmed "KEY_GESTURE_TYPE_SCREENSHOT_CHORD")
                                 if (!gestureEvent.toString().contains("SCREENSHOT_CHORD")) return
-                                if (!isFeatureEnabled("snapper_hardware_chord_enabled")) return
+                                if (!prefs.isFeatureEnabled("snapper_hardware_chord_enabled")) return
 
                                 // Block the native screenshot (both action=1 and action=2)
                                 param.setResult(null)
@@ -1118,15 +977,15 @@ class MainHook : IXposedHookLoadPackage {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         try {
                             val app = param.thisObject as android.app.Application
-                            appContext = app
+                            prefs.appContext = app
                             Log.d("Snapper", "DIAG: SystemUI hook init — appContext captured, pkg=${app.packageName}")
-                            loadFilePrefs()
-                            startFileObserver()
-                            startHeartbeatThread()
+                            prefs.loadFilePrefs()
+                            prefs.startFileObserver()
+                            prefs.startHeartbeatThread()
                             registerZoneActionReceiver(app)
                             registerPrefChangedReceiver(app)
                             // Apply keep-screen-on from the persisted pref (default OFF).
-                            applyKeepScreenOn(isOptInEnabled("keep_screen_on_enabled"))
+                            applyKeepScreenOn(prefs.isOptInEnabled("keep_screen_on_enabled"))
                             // Legacy: write Settings.Global marker for OnePlus backward compat
                             try {
                                 android.provider.Settings.Global.putString(
@@ -1137,7 +996,7 @@ class MainHook : IXposedHookLoadPackage {
                         } catch (e: Throwable) {
                             Log.d("Snapper", "DIAG: SystemUI hook init FAILED: $e")
                         }
-                        try { reloadIfStale() } catch (_: Throwable) {}
+                        try { prefs.reloadIfStale() } catch (_: Throwable) {}
                     }
                 }
             )
@@ -1170,7 +1029,7 @@ class MainHook : IXposedHookLoadPackage {
 
                             if (parentHU) {
                                 if (shouldSkipNotification("expand_headsup_enabled", pkg) ||
-                                    isKillSwitchActive("disable_headsup_hooks_enabled")) {
+                                    prefs.isKillSwitchActive("disable_headsup_hooks_enabled")) {
                                     Log.d(HUD_TAG, "[${ts()}] addNotification EXIT parent=$parentId branch=HU skipped"); return
                                 }
                                 XposedHelpers.setAdditionalInstanceField(notifParent, "aeIsGroup", true)
@@ -1496,7 +1355,7 @@ class MainHook : IXposedHookLoadPackage {
                 "onInterceptTouchEvent", MotionEvent::class.java,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        if (!isFeatureEnabled("disable_headsup_popup_enabled")) return
+                        if (!prefs.isFeatureEnabled("disable_headsup_popup_enabled")) return
                         val ev = param.args[0] as MotionEvent
                         when (ev.actionMasked) {
                             MotionEvent.ACTION_DOWN -> {
@@ -1533,7 +1392,7 @@ class MainHook : IXposedHookLoadPackage {
 
             XposedBridge.hookAllMethods(actCls, "onNotificationClicked", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!isFeatureEnabled("disable_headsup_popup_enabled")) return
+                    if (!prefs.isFeatureEnabled("disable_headsup_popup_enabled")) return
                     val isRecent = f1IsDownwardSwipe && (System.currentTimeMillis() - f1SwipeTime < 2000)
                     if (!isRecent) return
                     param.result = null
@@ -1551,7 +1410,7 @@ class MainHook : IXposedHookLoadPackage {
 
             XposedBridge.hookAllMethods(actCls, "startNotificationIntent", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!isFeatureEnabled("disable_headsup_popup_enabled")) return
+                    if (!prefs.isFeatureEnabled("disable_headsup_popup_enabled")) return
                     val isRecent = f1IsDownwardSwipe && (System.currentTimeMillis() - f1SwipeTime < 2000)
                     if (!isRecent) return
                     param.result = null
@@ -1597,9 +1456,9 @@ class MainHook : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         try {
-                            if (!isFeatureEnabled("expand_headsup_enabled")) return
-                            if (isKillSwitchActive("disable_headsup_hooks_enabled")) return
-                            val maxLines = getIntPref("headsup_max_lines", 5)
+                            if (!prefs.isFeatureEnabled("expand_headsup_enabled")) return
+                            if (prefs.isKillSwitchActive("disable_headsup_hooks_enabled")) return
+                            val maxLines = prefs.getIntPref("headsup_max_lines", 5)
                             if (maxLines <= 0) return
                             val requested = param.args[0] as Int
                             if (requested > maxLines) {
@@ -1624,7 +1483,7 @@ class MainHook : IXposedHookLoadPackage {
                 Boolean::class.javaPrimitiveType,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (!isFeatureEnabled("disable_back_haptic_enabled")) return
+                        if (!prefs.isFeatureEnabled("disable_back_haptic_enabled")) return
                         param.result = null
                     }
                 }
@@ -1635,14 +1494,14 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     private fun handleZoneTouch(ev: MotionEvent, view: android.view.View, ctx: android.content.Context) {
-        if (!isFeatureEnabled("zones_enabled")) return
+        if (!prefs.isFeatureEnabled("zones_enabled")) return
         val x = ev.x
         val y = ev.y
         val h = view.height.takeIf { it > 0 } ?: return
 
         val screenW    = view.resources.displayMetrics.widthPixels
-        val leftW      = (screenW * getIntPref("zones_left_width_pct",  25) / 100f).toInt()
-        val rightStart = screenW - (screenW * getIntPref("zones_right_width_pct", 25) / 100f).toInt()
+        val leftW      = (screenW * prefs.getIntPref("zones_left_width_pct",  25) / 100f).toInt()
+        val rightStart = screenW - (screenW * prefs.getIntPref("zones_right_width_pct", 25) / 100f).toInt()
 
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
@@ -1696,7 +1555,7 @@ class MainHook : IXposedHookLoadPackage {
                             if (lp.type != android.view.WindowManager.LayoutParams.TYPE_STATUS_BAR) return
 
                             Log.d("Zones", "STATUS_BAR view attached: ${view.javaClass.name}")
-                            val ctx = view.context ?: appContext ?: return
+                            val ctx = view.context ?: prefs.appContext ?: return
                             view.setOnTouchListener { v, ev ->
                                 try { handleZoneTouch(ev, v, ctx) } catch (t: Throwable) { Log.e("Zones", "touch: $t") }
                                 false // don't consume — status bar swipe still works
@@ -1729,7 +1588,7 @@ class MainHook : IXposedHookLoadPackage {
                             try {
                                 val ev   = param.args[0] as MotionEvent
                                 val view = param.thisObject as android.view.View
-                                val ctx  = view.context ?: appContext ?: return
+                                val ctx  = view.context ?: prefs.appContext ?: return
                                 handleZoneTouch(ev, view, ctx)
                             } catch (t: Throwable) {
                                 Log.e("Zones", "dispatchTouchEvent hook: $t")
@@ -1767,7 +1626,7 @@ class MainHook : IXposedHookLoadPackage {
                                     try {
                                         val ev   = param2.args[0] as MotionEvent
                                         val view2 = param2.thisObject as android.view.View
-                                        val ctx2  = view2.context ?: appContext ?: return
+                                        val ctx2  = view2.context ?: prefs.appContext ?: return
                                         handleZoneTouch(ev, view2, ctx2)
                                     } catch (t: Throwable) { Log.e("Zones", "dynamic hook: $t") }
                                 }
@@ -1799,7 +1658,7 @@ class MainHook : IXposedHookLoadPackage {
             app.registerReceiver(object : android.content.BroadcastReceiver() {
                 override fun onReceive(ctx: android.content.Context, intent: android.content.Intent) {
                     try {
-                        loadFilePrefs()
+                        prefs.loadFilePrefs()
                         val key = intent.getStringExtra("key") ?: return
                         val value = intent.getStringExtra("value")
                         if (key == "keep_screen_on_enabled") {
