@@ -1,10 +1,6 @@
 package io.github.kvmy666.autoexpand
 
-import android.content.ComponentName
-import android.content.Context
-import android.content.Intent
 import android.util.Log
-import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import de.robv.android.xposed.IXposedHookLoadPackage
@@ -13,7 +9,10 @@ import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import io.github.kvmy666.autoexpand.hook.GlobalSearchHook
+import io.github.kvmy666.autoexpand.hook.KeepScreenOnController
 import io.github.kvmy666.autoexpand.hook.PrefsBridge
+import io.github.kvmy666.autoexpand.hook.SnapperChordHook
+import io.github.kvmy666.autoexpand.hook.ZonesHook
 
 class MainHook : IXposedHookLoadPackage {
 
@@ -23,92 +22,17 @@ class MainHook : IXposedHookLoadPackage {
     /** Phase D — global-search Enter/Go launches the first result. */
     private val globalSearch = GlobalSearchHook(prefs)
 
+    /** Snapper hardware chord (Power + Volume-Down), installed in system_server. */
+    private val snapperChord = SnapperChordHook(prefs)
+
+    /** Status-bar zones (taps/long-press) + privileged-action receiver, in SystemUI. */
+    private val zones = ZonesHook(prefs)
+
+    /** Keep-screen-on overlay + its live PREF_CHANGED receiver, in SystemUI. */
+    private val keepScreenOn = KeepScreenOnController(prefs)
+
     private val HUD_TAG        = "TweaksHud"
     private fun ts() = System.nanoTime() / 1_000_000L
-
-    // Keep-screen-on (System Behavior): a 1x1 invisible overlay window carrying
-    // FLAG_KEEP_SCREEN_ON, hosted in the always-alive SystemUI process.
-    @Volatile private var keepScreenOnView: View? = null
-
-    // Zone gesture state — lazy so Handler is created after Looper.prepareMainLooper() runs
-    private val zoneHandler by lazy { android.os.Handler(android.os.Looper.getMainLooper()) }
-    @Volatile private var activeZoneSide: String? = null
-    @Volatile private var zoneDownY = 0f
-    @Volatile private var zoneDownRawY = 0f
-    private val leftZoneTracker  by lazy { ZoneTapTracker("left") }
-    private val rightZoneTracker by lazy { ZoneTapTracker("right") }
-
-    private inner class ZoneTapTracker(private val side: String) {
-        private var tapCount = 0
-        private var longConsumed = false
-        private var lpRunnable: Runnable? = null
-        private var tapRunnable: Runnable? = null
-
-        fun onDown(ctx: android.content.Context) {
-            longConsumed = false
-            tapRunnable?.let { zoneHandler.removeCallbacks(it) }
-            lpRunnable?.let { zoneHandler.removeCallbacks(it) }
-            val lp = Runnable {
-                longConsumed = true
-                tapCount = 0
-                dispatchZoneGesture(side, "long_press", ctx)
-            }
-            lpRunnable = lp
-            zoneHandler.postDelayed(lp, 500L)
-        }
-
-        fun onUp(ctx: android.content.Context) {
-            lpRunnable?.let { zoneHandler.removeCallbacks(it); lpRunnable = null }
-            if (longConsumed) { longConsumed = false; return }
-            tapCount++
-            val count = tapCount
-            tapRunnable?.let { zoneHandler.removeCallbacks(it) }
-            val tr = Runnable {
-                tapCount = 0
-                val suffix = when { count >= 3 -> "triple_tap"; count == 2 -> "double_tap"; else -> "single_tap" }
-                dispatchZoneGesture(side, suffix, ctx)
-            }
-            tapRunnable = tr
-            zoneHandler.postDelayed(tr, 300L)
-        }
-
-        fun cancel() {
-            lpRunnable?.let  { zoneHandler.removeCallbacks(it); lpRunnable  = null }
-            tapRunnable?.let { zoneHandler.removeCallbacks(it); tapRunnable = null }
-            tapCount = 0
-            longConsumed = false
-        }
-    }
-
-    private fun dispatchZoneGesture(side: String, suffix: String, ctx: android.content.Context) {
-        val actionKey    = prefs.getStringPref("zones_${side}_${suffix}_action", "no_action")
-        if (actionKey == "no_action") return
-        val pkg          = prefs.getStringPref("zones_${side}_open_app_pkg", "")
-        val shortcutData = prefs.getStringPref("zones_${side}_${suffix}_shortcut", "")
-        val action       = ZoneAction.fromKey(actionKey, pkg, shortcutData)
-        Log.d("Zones", "hook gesture $side/$suffix → $actionKey")
-        // Write hook-side diag for non-technical user debugging (read by DebugLogHelper)
-        if (actionKey == "launch_shortcut") {
-            try {
-                java.io.File("/data/local/tmp/tweaks_hook_diag.txt").writeText(
-                    "gesture=$side/$suffix\nactionKey=$actionKey\n" +
-                    "shortcutData=$shortcutData\nactionType=${action::class.simpleName}\n"
-                )
-            } catch (_: Throwable) {}
-        }
-        if (prefs.getStringPref("zones_haptic_enabled", "1") == "1") {
-            try {
-                val vib = ctx.getSystemService(android.content.Context.VIBRATOR_SERVICE)
-                        as android.os.Vibrator
-                val effect = if (suffix == "long_press")
-                    android.os.VibrationEffect.createPredefined(android.os.VibrationEffect.EFFECT_HEAVY_CLICK)
-                else
-                    android.os.VibrationEffect.createPredefined(android.os.VibrationEffect.EFFECT_TICK)
-                vib.vibrate(effect)
-            } catch (_: Throwable) {}
-        }
-        ActionDispatcher.dispatch(action, ctx)
-    }
 
     // F1: Swipe-down direction tracking state
     @Volatile private var f1DownStartY = 0f
@@ -116,47 +40,6 @@ class MainHook : IXposedHookLoadPackage {
     @Volatile private var f1HasToggled = false
     @Volatile private var f1SwipeTime = 0L
     @Volatile private var f1CurrentRow: Any? = null
-
-    /**
-     * Add/remove the invisible keep-screen-on overlay in the SystemUI process.
-     * Idempotent: a single 1x1 TYPE_APPLICATION_OVERLAY window with FLAG_KEEP_SCREEN_ON
-     * keeps the display awake for as long as it's attached (works on lockscreen too).
-     * Must run on a Looper thread — posted to the main looper.
-     */
-    private fun applyKeepScreenOn(enabled: Boolean) {
-        val ctx = prefs.appContext ?: return
-        zoneHandler.post {
-            try {
-                val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager
-                if (enabled) {
-                    if (keepScreenOnView != null) return@post
-                    val v = View(ctx)
-                    val lp = android.view.WindowManager.LayoutParams(
-                        1, 1,
-                        android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                        android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                            android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                            android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
-                            android.view.WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                        android.graphics.PixelFormat.TRANSLUCENT
-                    )
-                    lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
-                    lp.x = 0; lp.y = 0
-                    wm.addView(v, lp)
-                    keepScreenOnView = v
-                    Log.d("Snapper", "DIAG: keepScreenOn overlay ADDED")
-                } else {
-                    keepScreenOnView?.let {
-                        try { wm.removeView(it) } catch (_: Throwable) {}
-                        keepScreenOnView = null
-                        Log.d("Snapper", "DIAG: keepScreenOn overlay REMOVED")
-                    }
-                }
-            } catch (t: Throwable) {
-                Log.d("Snapper", "DIAG: keepScreenOn apply failed: $t")
-            }
-        }
-    }
 
     private fun getNotificationPackage(row: Any): String? {
         return try {
@@ -479,216 +362,16 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     // =====================================================
-    // system_server — SAFE interceptKeyBeforeQueueing hook
-    //
-    // Intercepts the Power+VolumeDown chord BEFORE KeyCombinationManager
-    // detects it. Consuming KEYCODE_VOLUME_DOWN while Power is held prevents
-    // the native KeyCombinationManager chord rule from firing at all.
-    //
-    // SAFETY CONTRACT: entire hook body is in try/catch(Throwable).
-    // On ANY exception we log and return — the original method is never
-    // blocked by our code, so system_server cannot deadlock.
+    // system_server — Snapper hardware chord (Power + Volume-Down).
+    // Delegated to SnapperChordHook; see that class for the full
+    // two-hook strategy and safety contract.
     // =====================================================
-
-    // ── Chord state machine ─────────────────────────────────────────────────────
-    //
-    // PHASE 18 LOGCAT EVIDENCE:
-    //   interceptKeyBeforeQueueing fires on tid=168 for POWER key=26 then
-    //   VOLUME_DOWN key=25 (same thread, sequential).
-    //   handleKeyGestureEvent fires on tid=41 AFTER both keys are down. Its
-    //   args[0] is a KeyGestureEvent object (NOT an int) — previous attempts
-    //   that cast args[0] as? Int silently skipped the block entirely.
-    //   Two calls: action=1 (start) then action=2 (complete). Both must be blocked.
-    //   Both hooks confirmed on com.android.server.policy.PhoneWindowManager.
-    //
-    // TWO-HOOK STRATEGY:
-    //   Hook 1 (interceptKeyBeforeQueueing):
-    //     - Power-first press order: VOLUME_DOWN arrives with pwmPowerDown=true →
-    //       consume VOLUME_DOWN (param.result=0) → launch Snapper → chordTriggered=true
-    //     - POWER UP with chordTriggered=true → param.setResult(0) → no screen-off
-    //   Hook 2 (handleKeyGestureEvent):
-    //     - Volume-first press order: gesture fires before interceptKeyBQ catches it
-    //     - Check args[0].toString() for "SCREENSHOT_CHORD" (confirmed string)
-    //     - param.setResult(null) on BOTH action=1 and action=2
-    //     - If !chordTriggered: launch Snapper here instead
-    // ────────────────────────────────────────────────────────────────────────────
-    @Volatile private var chordTriggered  = false
-    @Volatile private var powerDownTime   = 0L
-    @Volatile private var volumeDownTime  = 0L
-    private companion object {
-        const val CHORD_WINDOW_MS = 150L
-        const val GROUP_TAG = "TweaksGroup"
-    }
-
     private fun handleSystemServer(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
-            installChordHooks(lpparam)
+            snapperChord.install(lpparam)
         } catch (t: Throwable) {
             Log.e("Snapper", "handleSystemServer crashed: $t")
         }
-    }
-
-    private fun installChordHooks(lpparam: XC_LoadPackage.LoadPackageParam) {
-        // Phase 18 confirmed both hooks work on PhoneWindowManager.
-        // Try it first; fall back to OplusPhoneWindowManager if not found.
-        val candidates = listOf(
-            "com.android.server.policy.PhoneWindowManager",
-            "com.oplus.server.policy.OplusPhoneWindowManager"
-        )
-
-        // ── Hook 1: interceptKeyBeforeQueueing ─────────────────────────────────
-        // Handles Power-first press order and POWER UP screen-off prevention.
-        for (cls in candidates) {
-            try {
-                XposedHelpers.findAndHookMethod(
-                    cls, lpparam.classLoader,
-                    "interceptKeyBeforeQueueing",
-                    KeyEvent::class.java, Int::class.javaPrimitiveType,
-                    object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: MethodHookParam) {
-                            try {
-                                if (!prefs.isFeatureEnabled("enable_snapper_entirely")) return
-                                val ev = param.args[0] as? KeyEvent ?: return
-                                when (ev.keyCode) {
-                                    KeyEvent.KEYCODE_POWER -> when (ev.action) {
-                                        KeyEvent.ACTION_DOWN -> {
-                                            powerDownTime  = ev.downTime   // uptimeMillis domain
-                                            chordTriggered = false
-                                            // Pass through — do NOT consume
-                                        }
-                                        KeyEvent.ACTION_UP -> {
-                                            if (chordTriggered) {
-                                                chordTriggered = false
-                                                try { XposedHelpers.callMethod(param.thisObject, "cancelPowerKeyLongPress") } catch (_: Throwable) {}
-                                                try { XposedHelpers.setBooleanField(param.thisObject, "mPowerKeyDown", false) } catch (_: Throwable) {}
-                                                param.setResult(0)
-                                                Log.d("Snapper", "POWER_UP consumed — screen stays on")
-                                            }
-                                            // else: pass through — normal screen-off
-                                        }
-                                    }
-                                    KeyEvent.KEYCODE_VOLUME_DOWN -> when (ev.action) {
-                                        KeyEvent.ACTION_DOWN -> {
-                                            volumeDownTime = ev.downTime   // always record
-                                            if (!prefs.isFeatureEnabled("snapper_hardware_chord_enabled")) return
-                                            val gap = ev.downTime - powerDownTime
-                                            if (gap > 0L && gap < CHORD_WINDOW_MS) {
-                                                chordTriggered = true
-                                                // Cancel power long-press NOW — Gemini fires while
-                                                // Power is still held, so POWER_UP is too late.
-                                                try { XposedHelpers.callMethod(param.thisObject, "cancelPowerKeyLongPress") } catch (_: Throwable) {}
-                                                try { XposedHelpers.setBooleanField(param.thisObject, "mPowerKeyHandled", true) } catch (_: Throwable) {}
-                                                param.result = 0
-                                                val ctx = getCtx(param)
-                                                if (ctx != null) {
-                                                    try {
-                                                        launchSnapper(ctx)
-                                                        Log.d("Snapper", "Snapper launched (interceptKeyBQ / Power-first)")
-                                                    } catch (e: Throwable) {
-                                                        Log.e("Snapper", "launch failed: ${e.message}")
-                                                        chordTriggered = false
-                                                        param.result = null
-                                                    }
-                                                } else {
-                                                    Log.e("Snapper", "mContext null (interceptKeyBQ)")
-                                                    chordTriggered = false
-                                                    param.result = null
-                                                }
-                                            }
-                                            // else: gap out of window — pass through normally
-                                        }
-                                        KeyEvent.ACTION_UP -> {
-                                            if (chordTriggered) param.result = 0
-                                            // else: pass through
-                                        }
-                                    }
-                                }
-                            } catch (t: Throwable) {
-                                Log.e("Snapper", "interceptKeyBQ hook threw: $t")
-                                param.result = null
-                            }
-                        }
-                    }
-                )
-                Log.d("Snapper", "Hook1 (interceptKeyBQ) registered on $cls")
-                break
-            } catch (e: Throwable) {
-                Log.e("Snapper", "Hook1 FAILED on $cls: $e")
-            }
-        }
-
-        // ── Hook 2: handleKeyGestureEvent ──────────────────────────────────────
-        // Handles Volume-first press order AND provides a second layer of defense.
-        // args[0] is a KeyGestureEvent object — check toString() for SCREENSHOT_CHORD.
-        // Block BOTH action=1 (start) and action=2 (complete) with setResult(null).
-        for (cls in candidates) {
-            try {
-                val clazz = XposedHelpers.findClass(cls, lpparam.classLoader)
-                val hooks = XposedBridge.hookAllMethods(clazz, "handleKeyGestureEvent",
-                    object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: MethodHookParam) {
-                            try {
-                                if (!prefs.isFeatureEnabled("enable_snapper_entirely")) return
-                                val gestureEvent = param.args.getOrNull(0) ?: return
-                                // args[0] is KeyGestureEvent — use toString() to identify
-                                // SCREENSHOT_CHORD (confirmed "KEY_GESTURE_TYPE_SCREENSHOT_CHORD")
-                                if (!gestureEvent.toString().contains("SCREENSHOT_CHORD")) return
-                                if (!prefs.isFeatureEnabled("snapper_hardware_chord_enabled")) return
-
-                                // Block the native screenshot (both action=1 and action=2)
-                                param.setResult(null)
-                                Log.d("Snapper", "handleKeyGestureEvent SCREENSHOT_CHORD blocked")
-
-                                // Launch Snapper only on simultaneous press (Vol-first path)
-                                // Both keys must have been pressed within CHORD_WINDOW_MS of each other.
-                                // volumeDownTime == 0 means Volume was never pressed → single Power press → skip.
-                                val bothSimultaneous = volumeDownTime > 0L &&
-                                    kotlin.math.abs(powerDownTime - volumeDownTime) < CHORD_WINDOW_MS
-                                if (!chordTriggered && bothSimultaneous) {
-                                    chordTriggered = true
-                                    val ctx = getCtx(param)
-                                    if (ctx != null) {
-                                        try {
-                                            launchSnapper(ctx)
-                                            Log.d("Snapper", "Snapper launched (handleKeyGesture / Vol-first)")
-                                        } catch (e: Throwable) {
-                                            Log.e("Snapper", "launch failed (handleKeyGesture): ${e.message}")
-                                            chordTriggered = false
-                                        }
-                                    } else {
-                                        Log.e("Snapper", "mContext null (handleKeyGesture)")
-                                        chordTriggered = false
-                                    }
-                                }
-                            } catch (t: Throwable) {
-                                Log.e("Snapper", "handleKeyGestureEvent hook threw: $t")
-                            }
-                        }
-                    }
-                )
-                if (hooks.isNotEmpty()) {
-                    Log.d("Snapper", "Hook2 (handleKeyGestureEvent) registered ${hooks.size} methods on $cls")
-                    break
-                }
-            } catch (e: Throwable) {
-                Log.e("Snapper", "Hook2 FAILED on $cls: $e")
-            }
-        }
-    }
-
-    private fun getCtx(param: XC_MethodHook.MethodHookParam): Context? = try {
-        XposedHelpers.getObjectField(param.thisObject, "mContext") as? Context
-    } catch (_: Throwable) { null }
-
-    private fun launchSnapper(ctx: Context) {
-        ctx.startForegroundService(
-            Intent("io.github.kvmy666.autoexpand.ACTION_CAPTURE").apply {
-                component = ComponentName(
-                    "io.github.kvmy666.autoexpand",
-                    "io.github.kvmy666.autoexpand.SnapperService"
-                )
-            }
-        )
     }
 
     // =====================================================
@@ -719,10 +402,10 @@ class MainHook : IXposedHookLoadPackage {
                             prefs.loadFilePrefs()
                             prefs.startFileObserver()
                             prefs.startHeartbeatThread()
-                            registerZoneActionReceiver(app)
-                            registerPrefChangedReceiver(app)
+                            zones.registerReceiver(app)
+                            keepScreenOn.registerPrefReceiver(app)
                             // Apply keep-screen-on from the persisted pref (default OFF).
-                            applyKeepScreenOn(prefs.isOptInEnabled("keep_screen_on_enabled"))
+                            keepScreenOn.apply(prefs.isOptInEnabled("keep_screen_on_enabled"))
                             // Legacy: write Settings.Global marker for OnePlus backward compat
                             try {
                                 android.provider.Settings.Global.putString(
@@ -1227,240 +910,6 @@ class MainHook : IXposedHookLoadPackage {
             )
         } catch (_: Throwable) {}
 
-        hookStatusBarZones(lpparam)
-    }
-
-    private fun handleZoneTouch(ev: MotionEvent, view: android.view.View, ctx: android.content.Context) {
-        if (!prefs.isFeatureEnabled("zones_enabled")) return
-        val x = ev.x
-        val y = ev.y
-        val h = view.height.takeIf { it > 0 } ?: return
-
-        val screenW    = view.resources.displayMetrics.widthPixels
-        val leftW      = (screenW * prefs.getIntPref("zones_left_width_pct",  25) / 100f).toInt()
-        val rightStart = screenW - (screenW * prefs.getIntPref("zones_right_width_pct", 25) / 100f).toInt()
-
-        when (ev.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                if (y > h) return
-                zoneDownY = y
-                zoneDownRawY = ev.rawY
-                activeZoneSide = when {
-                    x < leftW      -> "left"
-                    x > rightStart -> "right"
-                    else           -> null
-                }
-                when (activeZoneSide) {
-                    "left"  -> leftZoneTracker.onDown(ctx)
-                    "right" -> rightZoneTracker.onDown(ctx)
-                }
-            }
-            MotionEvent.ACTION_MOVE -> {
-                if (activeZoneSide != null &&
-                    (y > h || kotlin.math.abs(y - zoneDownY) > 20 || kotlin.math.abs(ev.rawY - zoneDownRawY) > 20)
-                ) {
-                    leftZoneTracker.cancel(); rightZoneTracker.cancel(); activeZoneSide = null
-                }
-            }
-            MotionEvent.ACTION_UP -> {
-                when (activeZoneSide) {
-                    "left"  -> leftZoneTracker.onUp(ctx)
-                    "right" -> rightZoneTracker.onUp(ctx)
-                }
-                activeZoneSide = null
-            }
-            MotionEvent.ACTION_CANCEL -> {
-                leftZoneTracker.cancel(); rightZoneTracker.cancel(); activeZoneSide = null
-            }
-        }
-    }
-
-    private fun hookStatusBarZones(lpparam: XC_LoadPackage.LoadPackageParam) {
-        // Hook WindowManagerImpl.addView to intercept STATUS_BAR window creation —
-        // avoids depending on OEM-specific class names like OplusPhoneStatusBarView.
-        try {
-            XposedHelpers.findAndHookMethod(
-                "android.view.WindowManagerImpl", lpparam.classLoader,
-                "addView",
-                android.view.View::class.java,
-                android.view.ViewGroup.LayoutParams::class.java,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        try {
-                            val view   = param.args[0] as? android.view.View ?: return
-                            val lp     = param.args[1] as? android.view.WindowManager.LayoutParams ?: return
-                            if (lp.type != android.view.WindowManager.LayoutParams.TYPE_STATUS_BAR) return
-
-                            Log.d("Zones", "STATUS_BAR view attached: ${view.javaClass.name}")
-                            val ctx = view.context ?: prefs.appContext ?: return
-                            view.setOnTouchListener { v, ev ->
-                                try { handleZoneTouch(ev, v, ctx) } catch (t: Throwable) { Log.e("Zones", "touch: $t") }
-                                false // don't consume — status bar swipe still works
-                            }
-                            Log.d("Zones", "zone OnTouchListener installed on status bar")
-                        } catch (t: Throwable) {
-                            Log.e("Zones", "addView hook error: $t")
-                        }
-                    }
-                }
-            )
-            Log.d("Zones", "WindowManagerImpl.addView hook installed")
-        } catch (e: Throwable) {
-            Log.e("Zones", "WindowManagerImpl.addView hook failed: $e")
-        }
-
-        // Also try direct class name hook as secondary path
-        val candidates = listOf(
-            "com.android.systemui.statusbar.phone.PhoneStatusBarView",
-            "com.oplus.systemui.statusbar.phone.OplusPhoneStatusBarView",
-            "com.android.systemui.statusbar.phone.StatusBarRootView"
-        )
-        for (cls in candidates) {
-            try {
-                XposedHelpers.findAndHookMethod(
-                    cls, lpparam.classLoader,
-                    "dispatchTouchEvent", MotionEvent::class.java,
-                    object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: MethodHookParam) {
-                            try {
-                                val ev   = param.args[0] as MotionEvent
-                                val view = param.thisObject as android.view.View
-                                val ctx  = view.context ?: prefs.appContext ?: return
-                                handleZoneTouch(ev, view, ctx)
-                            } catch (t: Throwable) {
-                                Log.e("Zones", "dispatchTouchEvent hook: $t")
-                            }
-                        }
-                    }
-                )
-                Log.d("Zones", "zone dispatchTouchEvent hook installed on $cls")
-                break
-            } catch (_: Throwable) {
-                Log.d("Zones", "zone hook skip $cls")
-            }
-        }
-
-        // Fallback: dynamically hook dispatchTouchEvent on the discovered STATUS_BAR view class
-        try {
-            XposedHelpers.findAndHookMethod(
-                "android.view.WindowManagerImpl", lpparam.classLoader,
-                "addView",
-                android.view.View::class.java,
-                android.view.ViewGroup.LayoutParams::class.java,
-                object : XC_MethodHook() {
-                    private var hooked = false
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        if (hooked) return
-                        try {
-                            val view = param.args[0] as? android.view.View ?: return
-                            val lp   = param.args[1] as? android.view.WindowManager.LayoutParams ?: return
-                            if (lp.type != android.view.WindowManager.LayoutParams.TYPE_STATUS_BAR) return
-                            val cls  = view.javaClass
-                            // Hook dispatchTouchEvent on the actual runtime class
-                            val method = cls.getMethod("dispatchTouchEvent", MotionEvent::class.java)
-                            XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                                override fun beforeHookedMethod(param2: MethodHookParam) {
-                                    try {
-                                        val ev   = param2.args[0] as MotionEvent
-                                        val view2 = param2.thisObject as android.view.View
-                                        val ctx2  = view2.context ?: prefs.appContext ?: return
-                                        handleZoneTouch(ev, view2, ctx2)
-                                    } catch (t: Throwable) { Log.e("Zones", "dynamic hook: $t") }
-                                }
-                            })
-                            hooked = true
-                            Log.d("Zones", "dynamic dispatchTouchEvent hook installed on ${cls.name}")
-                        } catch (t: Throwable) {
-                            Log.e("Zones", "dynamic hook setup: $t")
-                        }
-                    }
-                }
-            )
-        } catch (_: Throwable) {}
-    }
-
-    // =========================================================================
-    // Status Bar Zones — privileged action receiver
-    // =========================================================================
-
-    /**
-     * Live pref updates from the app (no reboot). The app sends
-     * io.github.kvmy666.autoexpand.PREF_CHANGED (key/value extras) on every toggle.
-     * We refresh the cache and apply behaviors that need an explicit trigger
-     * (currently keep-screen-on, which adds/removes its overlay window here).
-     */
-    private fun registerPrefChangedReceiver(app: android.app.Application) {
-        try {
-            val filter = android.content.IntentFilter("io.github.kvmy666.autoexpand.PREF_CHANGED")
-            app.registerReceiver(object : android.content.BroadcastReceiver() {
-                override fun onReceive(ctx: android.content.Context, intent: android.content.Intent) {
-                    try {
-                        prefs.loadFilePrefs()
-                        val key = intent.getStringExtra("key") ?: return
-                        val value = intent.getStringExtra("value")
-                        if (key == "keep_screen_on_enabled") {
-                            applyKeepScreenOn(value == "1")
-                        }
-                    } catch (t: Throwable) {
-                        Log.d("Snapper", "DIAG: PREF_CHANGED receiver failed: $t")
-                    }
-                }
-            }, filter, android.content.Context.RECEIVER_EXPORTED)
-            Log.d("Snapper", "DIAG: PREF_CHANGED receiver registered")
-        } catch (t: Throwable) {
-            Log.d("Snapper", "DIAG: PREF_CHANGED receiver registration failed: $t")
-        }
-    }
-
-    private fun registerZoneActionReceiver(app: android.app.Application) {
-        try {
-            val filter = android.content.IntentFilter(ActionDispatcher.ACTION_PRIVILEGED)
-            app.registerReceiver(object : android.content.BroadcastReceiver() {
-                override fun onReceive(ctx: android.content.Context, intent: android.content.Intent) {
-                    try {
-                        val key = intent.getStringExtra(ActionDispatcher.EXTRA_ACTION_KEY) ?: return
-                        handlePrivilegedZoneAction(ctx, key)
-                    } catch (t: Throwable) {
-                        Log.e("Zones", "privileged action failed: $t")
-                    }
-                }
-            }, filter, android.content.Context.RECEIVER_NOT_EXPORTED)
-            Log.d("Zones", "zone privileged action receiver registered")
-        } catch (t: Throwable) {
-            Log.e("Zones", "zone receiver registration failed: $t")
-        }
-    }
-
-    @Suppress("DEPRECATION")
-    private fun handlePrivilegedZoneAction(ctx: android.content.Context, key: String) {
-        when (key) {
-            "toggle_wifi" -> {
-                try {
-                    val wm = ctx.getSystemService(android.content.Context.WIFI_SERVICE)
-                        as android.net.wifi.WifiManager
-                    wm.setWifiEnabled(!wm.isWifiEnabled)
-                } catch (t: Throwable) { Log.e("Zones", "wifi toggle: $t") }
-            }
-            "toggle_bluetooth" -> {
-                try {
-                    val ba = android.bluetooth.BluetoothAdapter.getDefaultAdapter() ?: return
-                    if (ba.isEnabled) ba.disable() else ba.enable()
-                } catch (t: Throwable) { Log.e("Zones", "bt toggle: $t") }
-            }
-            "toggle_mobile_data" -> {
-                try {
-                    val tm = ctx.getSystemService(android.content.Context.TELEPHONY_SERVICE)
-                        as android.telephony.TelephonyManager
-                    XposedHelpers.callMethod(tm, "setDataEnabled", !tm.isDataEnabled)
-                } catch (t: Throwable) { Log.e("Zones", "mobile data toggle: $t") }
-            }
-            "toggle_power_saver" -> {
-                try {
-                    val pm = ctx.getSystemService(android.content.Context.POWER_SERVICE)
-                        as android.os.PowerManager
-                    XposedHelpers.callMethod(pm, "setPowerSaveModeEnabled", !pm.isPowerSaveMode)
-                } catch (t: Throwable) { Log.e("Zones", "power saver toggle: $t") }
-            }
-        }
+        zones.install(lpparam)
     }
 }
