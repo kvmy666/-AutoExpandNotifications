@@ -3,23 +3,13 @@ package io.github.kvmy666.autoexpand
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
-import android.net.Uri
-import android.os.Bundle
-import android.os.SystemClock
 import android.provider.Settings
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.clickable
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -28,24 +18,15 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.BugReport
-import androidx.compose.material.icons.filled.CameraAlt
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.Send
-import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -53,20 +34,13 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
-import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -83,47 +57,18 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.style.TextAlign
-import kotlin.math.ln
-import kotlin.math.pow
-import kotlin.math.roundToInt
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.produceState
 import java.util.concurrent.TimeUnit
-import android.graphics.Canvas
-import android.graphics.Paint
-import android.graphics.PixelFormat
-import android.util.Log
-import android.view.Gravity
-import android.view.View
-import android.view.WindowInsets
-import android.view.WindowManager
-import android.widget.Toast
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.TouchApp
-import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.core.content.FileProvider
-import java.io.File
-import org.json.JSONObject
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -138,7 +83,7 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     var selectedFeature by remember { mutableStateOf<String?>(null) }
 
     // ── What's New dialog ─────────────────────────────────────────────────────
-    var showWhatsNew by remember { mutableStateOf(!prefs.getBoolean("whats_new_seen_3_2_0", false)) }
+    var showWhatsNew by remember { mutableStateOf(!prefs.getBoolean("whats_new_seen_3_2_1", false)) }
     var whatsNewDontShow by remember { mutableStateOf(false) }
 
     // ── Notifications state ───────────────────────────────────────────────────
@@ -266,32 +211,23 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     if (showWhatsNew) {
         AlertDialog(
             onDismissRequest = {
-                if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_2_0", true).apply()
+                if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_2_1", true).apply()
                 showWhatsNew = false
             },
-            title = { Text("What's New in v3.2.0") },
+            title = { Text("What's New in v3.2.1") },
             text = {
                 Column(
                     modifier = Modifier.verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text("New features", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
-                    Text("• Trackpad Stick (🕹️) — press and drag the joystick to move the cursor in any direction")
-                    Text("• Undo — restore deleted text (backspace, cut, select-all). One undo brings back the whole word, plus an ↩️ toolbar button and Shake to Undo")
-                    Text("• Vibration Strength — set the intensity of trackpad and shake-undo haptics")
-                    Text("• Shake Sensitivity — choose how hard a shake triggers undo")
+                    Text("• Clipboard Search (🔍) — tap Search in the Clipboard Vault to instantly find any saved clip. Fast, accent-insensitive, multi-word, with matches highlighted")
+                    Text("• Unlimited clipboard history — saved clips are no longer capped")
+                    Text("• Keep Screen On — new toggle in System Behavior that stops the screen from sleeping while you're using your phone")
                     Spacer(Modifier.height(4.dp))
                     Text("Fixes", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
-                    Text("• Grouped notifications expand correctly again after the system update")
-                    Text("• Reopening the shade now expands notifications instantly every time")
-                    Text("• Settings now reach the system reliably (new sync method)")
-                    Text("• Screen Snapper can be fully turned on/off with a master switch")
-                    Text("• Turning Snapper off no longer crashes the app")
-                    Text("• You can now exclude system apps (Gmail, etc.) from expansion")
-                    Text("• Clipboard Vault shows all saved entries, not just the first 50")
-                    Text("• Separate controls for toolbar height and button size")
-                    Text("• Improved text selection from the keyboard toolbar")
-                    Text("• Trackpad cursor no longer snaps back during a fast drag")
+                    Text("• Global Search: the Go / Enter key now launches the first app in the results")
+                    Text("• Several notification expand fixes for more reliable auto-expand")
                     Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = whatsNewDontShow, onCheckedChange = { whatsNewDontShow = it })
@@ -301,7 +237,7 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
             },
             confirmButton = {
                 TextButton(onClick = {
-                    if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_2_0", true).apply()
+                    if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_2_1", true).apply()
                     showWhatsNew = false
                 }) { Text("Got it") }
             }

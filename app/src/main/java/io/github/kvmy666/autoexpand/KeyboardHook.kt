@@ -19,6 +19,13 @@ import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.text.Editable
+import android.text.InputType
+import android.text.Spannable
+import android.text.SpannableString
+import android.text.TextWatcher
+import android.text.style.ForegroundColorSpan
+import android.text.style.StyleSpan
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
@@ -27,8 +34,15 @@ import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.KeyEvent
 import android.os.SystemClock
+import android.view.inputmethod.CompletionInfo
+import android.view.inputmethod.CorrectionInfo
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.ExtractedText
 import android.view.inputmethod.ExtractedTextRequest
+import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputConnectionWrapper
+import android.view.inputmethod.TextAttribute
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.PopupWindow
@@ -91,6 +105,25 @@ class KeyboardHook : IXposedHookLoadPackage {
     private var clipboardDb: ClipboardDatabase? = null
     private var activeImsRef: InputMethodService? = null
     @Volatile private var clipSortMode = ClipboardDatabase.SortMode.NEWEST
+
+    // ── Clipboard-search input redirection ──
+    // The clipboard popup lives inside Gboard's own process, so when its search
+    // field is open the keyboard still commits text to the HOST app's editor. We
+    // wrap InputMethodService.getCurrentInputConnection() once; the wrapper behaves
+    // exactly like the real connection EXCEPT while [clipSearchActive] is true, when
+    // it routes editing/reading to the search field's own editor ([clipSearchIC]).
+    @Volatile private var clipSearchActive = false
+    // A self-contained editor (its own private Editable) that the keyboard's
+    // keystrokes are redirected into while search is open. BaseInputConnection in
+    // fallback mode needs NO window focus, so the popup stays non-focusable and the
+    // keyboard never hides.
+    @Volatile private var clipSearchIC: android.view.inputmethod.BaseInputConnection? = null
+    // Invoked (on the calling thread) after each redirected edit so the UI can
+    // mirror the search editor's text and re-run the filter.
+    @Volatile private var clipSearchOnEdit: (() -> Unit)? = null
+    // Cache so we hand the same wrapper back for the same underlying connection.
+    @Volatile private var icWrapReal: InputConnection? = null
+    @Volatile private var icWrapWrapper: InputConnection? = null
 
     // Last drag position of the floating selection bar (null = default placement).
     // Persisted across opens so the bar reappears where the user left it.
@@ -206,6 +239,9 @@ class KeyboardHook : IXposedHookLoadPackage {
 
         // ── Undo (B1): track deletions + scope per input session ─
         hookEditTracking(lpparam)
+
+        // ── Clipboard search: wrap the input connection for keystroke redirect ─
+        hookInputConnection(lpparam)
     }
 
     // ─────────────────────────────────────────────────────
@@ -1428,6 +1464,122 @@ class KeyboardHook : IXposedHookLoadPackage {
         }
     }
 
+    // Hook getCurrentInputConnection so the keyboard always talks to OUR wrapper.
+    // Installed once at load; the wrapper is a no-op passthrough unless search is on.
+    private fun hookInputConnection(lpparam: XC_LoadPackage.LoadPackageParam) {
+        val imsClass = "android.inputmethodservice.InputMethodService"
+        try {
+            XposedHelpers.findAndHookMethod(
+                imsClass, lpparam.classLoader, "getCurrentInputConnection",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val real = param.result as? InputConnection ?: return
+                        if (real is SearchRedirectConnection) return
+                        val cached = icWrapWrapper
+                        param.result = if (cached != null && icWrapReal === real) cached
+                        else SearchRedirectConnection(real).also { icWrapReal = real; icWrapWrapper = it }
+                    }
+                }
+            )
+            XposedBridge.log("$TAG [KB] getCurrentInputConnection wrap installed")
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG [KB] getCurrentInputConnection hook failed: ${t.message}")
+        }
+    }
+
+    // Delegates everything to the real connection, EXCEPT while clipSearchActive it
+    // routes edits/reads to the clipboard search field's editor (clipSearchIC). This
+    // is how the keyboard "types into" our search box without the host app seeing it.
+    private inner class SearchRedirectConnection(target: InputConnection) :
+        InputConnectionWrapper(target, true) {
+
+        // Runs the redirect block when search is active and returns its result;
+        // returns null to signal "not redirected — caller should fall through to
+        // super". Only valid for the boolean editing methods.
+        private inline fun edit(block: (InputConnection) -> Boolean): Boolean? {
+            val s = clipSearchIC
+            if (clipSearchActive && s != null) {
+                val r = try { block(s) } catch (_: Throwable) { true }
+                try { clipSearchOnEdit?.invoke() } catch (_: Throwable) {}
+                return r
+            }
+            return null
+        }
+
+        override fun commitText(t: CharSequence?, p: Int): Boolean =
+            edit { it.commitText(t, p) } ?: super.commitText(t, p)
+        override fun commitText(t: CharSequence, p: Int, a: TextAttribute?): Boolean =
+            edit { it.commitText(t, p) } ?: super.commitText(t, p, a)
+        override fun setComposingText(t: CharSequence?, p: Int): Boolean =
+            edit { it.setComposingText(t, p) } ?: super.setComposingText(t, p)
+        override fun setComposingText(t: CharSequence, p: Int, a: TextAttribute?): Boolean =
+            edit { it.setComposingText(t, p) } ?: super.setComposingText(t, p, a)
+        override fun setComposingRegion(s: Int, e: Int): Boolean =
+            edit { it.setComposingRegion(s, e) } ?: super.setComposingRegion(s, e)
+        override fun finishComposingText(): Boolean =
+            edit { it.finishComposingText() } ?: super.finishComposingText()
+        override fun deleteSurroundingText(b: Int, a: Int): Boolean =
+            edit { it.deleteSurroundingText(b, a) } ?: super.deleteSurroundingText(b, a)
+        override fun deleteSurroundingTextInCodePoints(b: Int, a: Int): Boolean =
+            edit { it.deleteSurroundingTextInCodePoints(b, a) } ?: super.deleteSurroundingTextInCodePoints(b, a)
+        // Hardware-style key events. In non-dummy BaseInputConnection, sendKeyEvent
+        // does NOT edit the buffer, so the Backspace key (which Gboard delivers as a
+        // KEYCODE_DEL key event) would do nothing. Handle DEL + printable chars
+        // against the search editor ourselves, and consume everything else so no key
+        // leaks to the host app while searching.
+        override fun sendKeyEvent(event: KeyEvent?): Boolean {
+            val s = clipSearchIC
+            if (clipSearchActive && s != null) {
+                if (event != null && event.action == KeyEvent.ACTION_DOWN) {
+                    when (event.keyCode) {
+                        KeyEvent.KEYCODE_DEL -> { s.deleteSurroundingText(1, 0); clipSearchOnEdit?.invoke() }
+                        KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> { /* ignore */ }
+                        else -> {
+                            val u = event.unicodeChar
+                            if (u != 0) { s.commitText(u.toChar().toString(), 1); clipSearchOnEdit?.invoke() }
+                        }
+                    }
+                }
+                return true
+            }
+            return super.sendKeyEvent(event)
+        }
+        override fun commitCompletion(text: CompletionInfo?): Boolean =
+            edit { it.commitCompletion(text) } ?: super.commitCompletion(text)
+        override fun commitCorrection(info: CorrectionInfo?): Boolean =
+            edit { it.commitCorrection(info) } ?: super.commitCorrection(info)
+        override fun performEditorAction(action: Int): Boolean =
+            edit { it.performEditorAction(action) } ?: super.performEditorAction(action)
+        override fun setSelection(s: Int, e: Int): Boolean =
+            edit { it.setSelection(s, e) } ?: super.setSelection(s, e)
+
+        override fun getTextBeforeCursor(n: Int, flags: Int): CharSequence? {
+            val s = clipSearchIC
+            return if (clipSearchActive && s != null) runCatching { s.getTextBeforeCursor(n, flags) }.getOrNull()
+                   else super.getTextBeforeCursor(n, flags)
+        }
+        override fun getTextAfterCursor(n: Int, flags: Int): CharSequence? {
+            val s = clipSearchIC
+            return if (clipSearchActive && s != null) runCatching { s.getTextAfterCursor(n, flags) }.getOrNull()
+                   else super.getTextAfterCursor(n, flags)
+        }
+        override fun getSelectedText(flags: Int): CharSequence? {
+            val s = clipSearchIC
+            return if (clipSearchActive && s != null) runCatching { s.getSelectedText(flags) }.getOrNull()
+                   else super.getSelectedText(flags)
+        }
+        override fun getCursorCapsMode(reqModes: Int): Int {
+            val s = clipSearchIC
+            return if (clipSearchActive && s != null) runCatching { s.getCursorCapsMode(reqModes) }.getOrDefault(0)
+                   else super.getCursorCapsMode(reqModes)
+        }
+        override fun getExtractedText(request: ExtractedTextRequest?, flags: Int): ExtractedText? {
+            val s = clipSearchIC
+            return if (clipSearchActive && s != null) runCatching { s.getExtractedText(request, flags) }.getOrNull()
+                   else super.getExtractedText(request, flags)
+        }
+    }
+
     private fun showClipboardPopup(ctx: Context, ims: InputMethodService, anchor: View) {
         val db = clipboardDb ?: return
         val dp = ctx.resources.displayMetrics.density
@@ -1442,6 +1594,7 @@ class KeyboardHook : IXposedHookLoadPackage {
 
         // ── Header: title + close ──
         var showFavoritesOnly = false
+        var searchQuery = ""
         // Lazy paging: show 50 first (fast open), tap the footer to load 50 more.
         val pageSize = 50
         var displayLimit = pageSize
@@ -1481,16 +1634,51 @@ class KeyboardHook : IXposedHookLoadPackage {
             gravity = Gravity.CENTER
             setPadding(0, (8f * dp).toInt(), 0, (8f * dp).toInt())
         }
-        val tabAll = tab("All")
-        val tabFav = tab("❤️ Favorites")
+        val tabAll = tab("🐈‍⬛ All")
+        val tabFav = tab("❣️ Favorites")
         tabStrip.addView(tabAll, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         tabStrip.addView(tabFav, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         outerContainer.addView(tabStrip, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { setMargins((14f * dp).toInt(), 0, (14f * dp).toInt(), (8f * dp).toInt()) })
 
+        // ── Collapsible search row (hidden until 🔍 is tapped) ──
+        val searchRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = roundRect(UI.SURFACE, 12f * dp)
+            setPadding((12f * dp).toInt(), 0, (4f * dp).toInt(), 0)
+            visibility = View.GONE
+        }
+        val searchField = EditText(ctx).apply {
+            hint = "Search clipboard…"
+            setHintTextColor(UI.TEXT_DIM)
+            setTextColor(UI.TEXT)
+            textSize = 14f
+            background = null
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            imeOptions = EditorInfo.IME_ACTION_SEARCH
+            setPadding(0, (10f * dp).toInt(), 0, (10f * dp).toInt())
+        }
+        val searchClear = TextView(ctx).apply {
+            text = "✕"
+            textSize = 13f
+            gravity = Gravity.CENTER
+            setTextColor(UI.TEXT_DIM)
+            minWidth = (32f * dp).toInt()
+            minHeight = (32f * dp).toInt()
+            background = ripple(null, 16f * dp)
+            visibility = View.GONE
+        }
+        searchRow.addView(searchField, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        searchRow.addView(searchClear)
+        outerContainer.addView(searchRow, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { setMargins((14f * dp).toInt(), 0, (14f * dp).toInt(), (8f * dp).toInt()) })
+
         // ── Toolbar: sort chip + delete all chip ──
-        val sortLabels = listOf("Newest ↓", "Oldest ↑", "📌 First", "❤️ First")
+        val sortLabels = listOf("Newest ↓", "Oldest ↑", "📌 First", "❣️ First")
         val sortModes = listOf(
             ClipboardDatabase.SortMode.NEWEST,
             ClipboardDatabase.SortMode.OLDEST,
@@ -1510,6 +1698,13 @@ class KeyboardHook : IXposedHookLoadPackage {
             setPadding((12f * dp).toInt(), (7f * dp).toInt(), (12f * dp).toInt(), (7f * dp).toInt())
             background = ripple(UI.SURFACE, chipR)
         }
+        val searchBtn = TextView(ctx).apply {
+            text = "🔍  Search"
+            setTextColor(UI.TEXT)
+            textSize = 11f
+            setPadding((12f * dp).toInt(), (7f * dp).toInt(), (12f * dp).toInt(), (7f * dp).toInt())
+            background = ripple(UI.SURFACE, chipR)
+        }
         val deleteAllBtn = TextView(ctx).apply {
             text = "🗑  Delete all"
             setTextColor(UI.DANGER)
@@ -1519,6 +1714,8 @@ class KeyboardHook : IXposedHookLoadPackage {
         }
         sortRow.addView(sortBtn)
         sortRow.addView(View(ctx), LinearLayout.LayoutParams(0, 1, 1f))
+        sortRow.addView(searchBtn)
+        sortRow.addView(View(ctx), LinearLayout.LayoutParams((8f * dp).toInt(), 1))
         sortRow.addView(deleteAllBtn)
         outerContainer.addView(sortRow)
 
@@ -1534,9 +1731,13 @@ class KeyboardHook : IXposedHookLoadPackage {
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
         ))
 
-        val popup = PopupWindow(outerContainer, popupWidth, (360f * dp).toInt(), true).apply {
+        // Non-focusable: the popup must NOT take IME focus, or the keyboard hides
+        // and there's nothing to type with. Keystrokes are redirected into the
+        // search editor via the InputConnection hook instead.
+        val popup = PopupWindow(outerContainer, popupWidth, (360f * dp).toInt(), false).apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             isOutsideTouchable = true
+            isTouchable = true
             elevation = 16f * dp
         }
 
@@ -1550,27 +1751,37 @@ class KeyboardHook : IXposedHookLoadPackage {
 
         fun reloadList() {
             dbExecutor.submit {
-                val entries = db.getAll(clipSortMode, showFavoritesOnly)
+                val all = db.getAll(clipSortMode, showFavoritesOnly)
+                val query = searchQuery
+                // When searching, rank by relevance (overrides sort mode); otherwise
+                // keep the sort-mode order and render plain (no highlight) rows.
+                val rows: List<Pair<ClipboardDatabase.Entry, List<IntRange>>> =
+                    if (query.isBlank()) all.map { it to emptyList() }
+                    else ClipboardSearch.search(all, query).map { it.entry to it.matchRanges }
                 listContainer.post {
                     listContainer.removeAllViews()
-                    if (entries.isEmpty()) {
+                    if (rows.isEmpty()) {
                         listContainer.addView(TextView(ctx).apply {
-                            text = if (showFavoritesOnly) "No favorites yet — long-press an entry and tap ★" else "No clipboard history yet"
+                            text = when {
+                                query.isNotBlank() -> "No matches for \"$query\""
+                                showFavoritesOnly  -> "No favorites yet — long-press an entry and tap ★"
+                                else               -> "No clipboard history yet"
+                            }
                             setTextColor(UI.TEXT_DIM)
                             textSize = 14f
                             gravity = Gravity.CENTER
                             setPadding((16f * dp).toInt(), (40f * dp).toInt(), (16f * dp).toInt(), (40f * dp).toInt())
                         })
                     } else {
-                        val shown = displayLimit.coerceAtMost(entries.size)
-                        entries.take(shown).forEach { entry ->
-                            buildClipboardRow(ctx, dp, entry, db, ims, popup, listContainer) { reloadList() }
+                        val shown = displayLimit.coerceAtMost(rows.size)
+                        rows.take(shown).forEach { (entry, ranges) ->
+                            buildClipboardRow(ctx, dp, entry, db, ims, popup, listContainer, ranges) { reloadList() }
                         }
-                        val remaining = entries.size - shown
+                        val remaining = rows.size - shown
                         if (remaining > 0) {
                             val more = remaining.coerceAtMost(pageSize)
                             listContainer.addView(TextView(ctx).apply {
-                                text = "▾  Load $more more  ($remaining left)"
+                                text = "♾️  Load $more more  ($remaining left)"
                                 setTextColor(UI.ACCENT)
                                 textSize = 13f
                                 gravity = Gravity.CENTER
@@ -1614,9 +1825,113 @@ class KeyboardHook : IXposedHookLoadPackage {
             }
         }
 
+        // ── Search wiring ──
+        fun styleSearchChip(active: Boolean) {
+            searchBtn.setTextColor(if (active) UI.ACCENT else UI.TEXT)
+            searchBtn.background = ripple(if (active) UI.ACCENT_BG else UI.SURFACE, chipR)
+        }
+        val searchDebounce = Runnable {
+            displayLimit = pageSize
+            reloadList()
+        }
+        searchField.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                searchQuery = s?.toString().orEmpty()
+                searchClear.visibility = if (searchQuery.isEmpty()) View.GONE else View.VISIBLE
+                searchField.removeCallbacks(searchDebounce)
+                searchField.postDelayed(searchDebounce, 120L)
+            }
+        })
+
+        // Mirror the redirected editor's text into the visible field; the field's
+        // TextWatcher then updates the query and re-runs the filter. setText() does
+        // not pass back through the redirect, so there's no recursion.
+        fun syncFromEditor() {
+            val ic = clipSearchIC ?: return
+            val text = ic.getEditable()?.toString() ?: ""
+            searchField.post {
+                if (searchField.text?.toString() == text) return@post
+                searchField.setText(text)
+                searchField.setSelection(text.length)
+            }
+        }
+
+        // Full height covers the keyboard (fine for browsing clips); when search
+        // opens we LIFT the popup above the keyboard so the keys are usable.
+        val fullHeight = (360f * dp).toInt()
+        val searchHeight = (300f * dp).toInt()
+        fun openSearch() {
+            searchRow.visibility = View.VISIBLE
+            styleSearchChip(true)
+            // Self-contained editor that RETAINS text. fullEditor=true disables
+            // BaseInputConnection's "dummy mode" (which would turn commitText into
+            // key events and clear the buffer); we back it with our own persistent
+            // Editable so commit/compose/delete accumulate normally. Needs no focus.
+            clipSearchIC = object : android.view.inputmethod.BaseInputConnection(searchField, true) {
+                private val ed = android.text.Editable.Factory.getInstance().newEditable("")
+                    .apply { android.text.Selection.setSelection(this, 0) }
+                override fun getEditable(): android.text.Editable = ed
+            }
+            clipSearchOnEdit = { syncFromEditor() }
+            clipSearchActive = true
+            searchField.isCursorVisible = true
+            searchField.requestFocus()
+            // CRITICAL: keys live BELOW the lifted panel, i.e. OUTSIDE it. With
+            // outside-touch dismissal on, the first key tap would close the popup and
+            // leak the keystroke to the app. Disable it so the keyboard stays usable
+            // and the redirect stays armed; the ✕ / result tap still close the popup.
+            popup.isOutsideTouchable = false
+            // Lift the panel to sit ON TOP OF the keyboard so the keys show below.
+            val kbH = anchor.rootView?.height?.takeIf { it > 0 } ?: (300f * dp).toInt()
+            try { popup.update(0, kbH, popupWidth, searchHeight) }
+            catch (t: Throwable) { XposedBridge.log("$TAG [KB] search lift failed: ${t.message}") }
+        }
+        fun closeSearch(clearText: Boolean) {
+            clipSearchActive = false
+            clipSearchOnEdit = null
+            clipSearchIC = null
+            popup.isOutsideTouchable = true
+            searchRow.visibility = View.GONE
+            styleSearchChip(false)
+            if (clearText && searchQuery.isNotEmpty()) searchField.setText("")
+            // Drop the panel back over the keyboard.
+            try { popup.update(0, anchor.height, popupWidth, fullHeight) } catch (_: Throwable) {}
+        }
+
+        searchClear.setOnClickListener {
+            clipSearchIC?.getEditable()?.clear()
+            searchField.setText("")
+        }
+        searchBtn.setOnClickListener {
+            if (searchRow.visibility == View.VISIBLE) closeSearch(clearText = true) else openSearch()
+        }
+        // Never leave the IC redirected once the popup is gone.
+        popup.setOnDismissListener {
+            clipSearchActive = false
+            clipSearchOnEdit = null
+            clipSearchIC = null
+        }
+
         updateTabs()
         reloadList()
         anchor.post { popup.showAtLocation(anchor, Gravity.BOTTOM or Gravity.START, 0, anchor.height) }
+    }
+
+    // Bold + accent-tint the matched character ranges. Ranges are clamped to the
+    // text length so they stay valid even if the row is later truncated for display.
+    private fun highlight(text: String, ranges: List<IntRange>): CharSequence {
+        val span = SpannableString(text)
+        val len = text.length
+        for (r in ranges) {
+            val start = r.first.coerceIn(0, len)
+            val end = (r.last + 1).coerceIn(start, len)
+            if (start >= end) continue
+            span.setSpan(StyleSpan(android.graphics.Typeface.BOLD), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            span.setSpan(ForegroundColorSpan(UI.ACCENT), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        return span
     }
 
     private fun buildClipboardRow(
@@ -1626,6 +1941,7 @@ class KeyboardHook : IXposedHookLoadPackage {
         ims: InputMethodService,
         popup: PopupWindow,
         container: LinearLayout,
+        matchRanges: List<IntRange> = emptyList(),
         reload: () -> Unit
     ) {
         val cardR = 14f * dp
@@ -1648,7 +1964,7 @@ class KeyboardHook : IXposedHookLoadPackage {
         }
 
         val textView = TextView(ctx).apply {
-            text = entry.text
+            text = if (matchRanges.isEmpty()) entry.text else highlight(entry.text, matchRanges)
             setTextColor(UI.TEXT)
             textSize = 14f
             // A1: full text by default; with the toggle off, show a 3-line preview.
@@ -1677,6 +1993,8 @@ class KeyboardHook : IXposedHookLoadPackage {
         row.addView(optBtn)
 
         row.setOnClickListener {
+            // Disarm the search redirect first so the clip lands in the HOST app.
+            clipSearchActive = false
             try { ims.currentInputConnection?.commitText(entry.text, 1); popup.dismiss() } catch (_: Throwable) {}
         }
 

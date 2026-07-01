@@ -54,6 +54,7 @@ jobs:
           name: v${{ steps.version.outputs.name }}
           files: AutoExpandNotifications-${{ steps.version.outputs.name }}.apk
           generate_release_notes: true
+          make_latest: true
 
       - name: Publish to Xposed-Modules-Repo
         env:
@@ -71,5 +72,13 @@ jobs:
             gh release create "${TAG}" "$APK_FILE" \
               --repo "$REPO" \
               --title "v${VERSION}" \
+              --latest \
               --notes "Release v${VERSION} - See [changelog](https://github.com/kvmy666/-AutoExpandNotifications/releases/tag/${TAG})"
           fi
+
+          # CRITICAL: force this release to be GitHub's "Latest" on the mirror repo.
+          # modules.lsposed.org (which the in-app LSPosed Repository reads) keys off
+          # the org repo's "latest" pointer. Old 1.2.x releases were once re-created
+          # with a newer timestamp and hijacked "latest", freezing the store at 1.2.1.
+          # Setting --latest explicitly on every publish prevents that regression.
+          gh release edit "${TAG}" --repo "$REPO" --latest --draft=false --prerelease=false

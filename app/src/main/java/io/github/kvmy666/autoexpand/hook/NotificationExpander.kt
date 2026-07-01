@@ -58,12 +58,6 @@ class NotificationExpander(private val prefs: PrefsBridge) {
         isSummary && getRowChildCount(row) > 0
     } catch (_: Throwable) { false }
 
-    /** True when the given row is a child of a heads-up parent. */
-    private fun parentHeadsUp(child: Any): Boolean = try {
-        val parent = XposedHelpers.getObjectField(child, "mNotificationParent") ?: return false
-        XposedHelpers.getBooleanField(parent, "mIsHeadsUp")
-    } catch (_: Throwable) { false }
-
     /** Resource (entry, package) for a view id, or (null, null). */
     private fun resourceEntryAndPkg(view: View): Pair<String?, String?> {
         if (view.id == View.NO_ID) return null to null

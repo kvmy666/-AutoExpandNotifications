@@ -62,24 +62,7 @@ class ClipboardDatabase(
             put(COL_FAV, 0)
         }
         db.insert(TABLE, null, values)
-
-        // Prune oldest non-pinned, non-favorite entries above limit
-        pruneOldEntries(db)
-    }
-
-    private fun pruneOldEntries(db: SQLiteDatabase) {
-        val count = db.rawQuery("SELECT COUNT(*) FROM $TABLE", null).use {
-            if (it.moveToFirst()) it.getLong(0) else 0L
-        }
-        val excess = count - maxEntries
-        if (excess <= 0) return
-        db.execSQL(
-            """DELETE FROM $TABLE WHERE $COL_ID IN (
-                SELECT $COL_ID FROM $TABLE
-                WHERE $COL_PINNED = 0 AND $COL_FAV = 0
-                ORDER BY $COL_TS ASC LIMIT $excess
-            )"""
-        )
+        // Unlimited history — entries are never auto-pruned.
     }
 
     enum class SortMode { NEWEST, OLDEST, PINNED_FIRST, FAVORITES_FIRST }
@@ -136,8 +119,9 @@ class ClipboardDatabase(
         writableDatabase.execSQL("DELETE FROM $TABLE")
     }
 
+    // Retained for caller compatibility. History is now unlimited, so the limit
+    // is recorded but never enforced (no pruning).
     fun updateMaxEntries(max: Int) {
         maxEntries = max
-        pruneOldEntries(writableDatabase)
     }
 }
