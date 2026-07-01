@@ -5,5 +5,6 @@
         <item>com.android.systemui</item>
         <item>com.google.android.inputmethod.latin</item>
         <item>com.oppo.quicksearchbox</item>
+        <item>com.android.launcher</item>
     </string-array>
 </resources>
