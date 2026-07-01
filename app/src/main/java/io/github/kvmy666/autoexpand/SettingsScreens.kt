@@ -96,6 +96,12 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     // ── System Behavior state ─────────────────────────────────────────────────
     var keepScreenOnEnabled by remember { mutableStateOf(prefs.getBoolean("keep_screen_on_enabled", false)) }
     var globalSearchEnterEnabled by remember { mutableStateOf(prefs.getBoolean("global_search_enter_launch_enabled", false)) }
+    var launcherDrawerKeyboardEnabled by remember { mutableStateOf(prefs.getBoolean("launcher_drawer_keyboard_enabled", false)) }
+    var launcherDrawerImeSyncEnabled by remember { mutableStateOf(prefs.getBoolean("launcher_drawer_ime_sync_enabled", false)) }
+    var launcherDrawerEnterEnabled by remember { mutableStateOf(prefs.getBoolean("launcher_drawer_enter_launch_enabled", false)) }
+    var launcherDrawerAutoSingleEnabled by remember { mutableStateOf(prefs.getBoolean("launcher_drawer_auto_launch_single_enabled", false)) }
+    var launcherDrawerKeepLayoutEnabled by remember { mutableStateOf(prefs.getBoolean("launcher_drawer_keep_layout_until_query_enabled", false)) }
+    var launcherDrawerReopenTopEnabled by remember { mutableStateOf(prefs.getBoolean("launcher_drawer_reopen_search_at_top_enabled", false)) }
     var headsupPopupEnabled by remember { mutableStateOf(prefs.getBoolean("disable_headsup_popup_enabled", true)) }
     var ungroupEnabled     by remember { mutableStateOf(prefs.getBoolean("ungroup_notifications_enabled", true)) }
     var excludedCount      by remember { mutableIntStateOf(prefs.getStringSet("excluded_apps", emptySet())?.size ?: 0) }
@@ -282,7 +288,7 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
                 snapperMasterEnabled = snapperMasterEnabled,
                 zonesEnabled         = zonesEnabled,
                 kbEnhancerEnabled    = kbEnhancerEnabled,
-                systemBehaviorEnabled = keepScreenOnEnabled || backHapticEnabled || globalSearchEnterEnabled,
+                systemBehaviorEnabled = keepScreenOnEnabled || backHapticEnabled || globalSearchEnterEnabled || launcherDrawerKeyboardEnabled || launcherDrawerImeSyncEnabled || launcherDrawerEnterEnabled || launcherDrawerAutoSingleEnabled || launcherDrawerKeepLayoutEnabled || launcherDrawerReopenTopEnabled,
                 modifier             = Modifier.padding(padding),
                 onNavigate           = { selectedFeature = it }
             )
@@ -420,6 +426,47 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
                                 description = stringResource(R.string.global_search_enter_desc),
                                 checked = globalSearchEnterEnabled,
                                 onCheckedChange = { globalSearchEnterEnabled = it; onToggle("global_search_enter_launch_enabled", it) }
+                            )
+                        }
+
+                        // ── Launcher Drawer ──
+                        SettingsCard {
+                            SectionLabel("Launcher Drawer")
+                            ToggleRow(
+                                title = stringResource(R.string.launcher_drawer_keyboard_title),
+                                description = stringResource(R.string.launcher_drawer_keyboard_desc),
+                                checked = launcherDrawerKeyboardEnabled,
+                                onCheckedChange = { launcherDrawerKeyboardEnabled = it; onToggle("launcher_drawer_keyboard_enabled", it) }
+                            )
+                            ToggleRow(
+                                title = stringResource(R.string.launcher_drawer_ime_sync_title),
+                                description = stringResource(R.string.launcher_drawer_ime_sync_desc),
+                                checked = launcherDrawerImeSyncEnabled,
+                                onCheckedChange = { launcherDrawerImeSyncEnabled = it; onToggle("launcher_drawer_ime_sync_enabled", it) }
+                            )
+                            ToggleRow(
+                                title = stringResource(R.string.launcher_drawer_enter_title),
+                                description = stringResource(R.string.launcher_drawer_enter_desc),
+                                checked = launcherDrawerEnterEnabled,
+                                onCheckedChange = { launcherDrawerEnterEnabled = it; onToggle("launcher_drawer_enter_launch_enabled", it) }
+                            )
+                            ToggleRow(
+                                title = stringResource(R.string.launcher_drawer_auto_single_title),
+                                description = stringResource(R.string.launcher_drawer_auto_single_desc),
+                                checked = launcherDrawerAutoSingleEnabled,
+                                onCheckedChange = { launcherDrawerAutoSingleEnabled = it; onToggle("launcher_drawer_auto_launch_single_enabled", it) }
+                            )
+                            ToggleRow(
+                                title = stringResource(R.string.launcher_drawer_keep_layout_title),
+                                description = stringResource(R.string.launcher_drawer_keep_layout_desc),
+                                checked = launcherDrawerKeepLayoutEnabled,
+                                onCheckedChange = { launcherDrawerKeepLayoutEnabled = it; onToggle("launcher_drawer_keep_layout_until_query_enabled", it) }
+                            )
+                            ToggleRow(
+                                title = stringResource(R.string.launcher_drawer_reopen_top_title),
+                                description = stringResource(R.string.launcher_drawer_reopen_top_desc),
+                                checked = launcherDrawerReopenTopEnabled,
+                                onCheckedChange = { launcherDrawerReopenTopEnabled = it; onToggle("launcher_drawer_reopen_search_at_top_enabled", it) }
                             )
                         }
                     }

@@ -7,6 +7,7 @@ import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import io.github.kvmy666.autoexpand.hook.GlobalSearchHook
 import io.github.kvmy666.autoexpand.hook.KeepScreenOnController
+import io.github.kvmy666.autoexpand.hook.LauncherDrawerHook
 import io.github.kvmy666.autoexpand.hook.NotificationExpander
 import io.github.kvmy666.autoexpand.hook.PrefsBridge
 import io.github.kvmy666.autoexpand.hook.SnapperChordHook
@@ -19,6 +20,9 @@ class MainHook : IXposedHookLoadPackage {
 
     /** Phase D — global-search Enter/Go launches the first result. */
     private val globalSearch = GlobalSearchHook(prefs)
+
+    /** Launcher drawer auto-open keyboard, IME sync, Enter/Go launches first result, auto-open single result, keep app grid before typing, reopen search at top. */
+    private val launcherDrawer = LauncherDrawerHook(prefs)
 
     /** Snapper hardware chord (Power + Volume-Down), installed in system_server. */
     private val snapperChord = SnapperChordHook(prefs)
@@ -45,6 +49,9 @@ class MainHook : IXposedHookLoadPackage {
                 }
                 "com.oppo.quicksearchbox" -> try { globalSearch.install(lpparam) } catch (t: Throwable) {
                     Log.e("TweaksLauncher", "Global search hook init failed: $t")
+                }
+                "com.android.launcher" -> try { launcherDrawer.install(lpparam) } catch (t: Throwable) {
+                    Log.e("TweaksLauncher", "Launcher drawer hook init failed: $t")
                 }
                 // Gboard + all other apps: the selection action bar is rendered
                 // entirely by KeyboardHook (keyboard-side, no per-app injection needed).
