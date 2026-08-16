@@ -267,9 +267,19 @@ They are independent — children-only means "when *I* open a group, its rows co
     | `NotificationRemoteInputManager.activateRemoteInput` | true | inline reply opened it |
     | `StatusBarRemoteInputCallback$$…Lambda0.run` | true | inline reply, deferred |
 
-    Both non-user collapses originate *inside* the manager, so the presence of a frame from
-    `ExpandableNotificationRow` is what separates a tap from a shade close. That test is used
-    rather than the class names `$1` / `$$ExternalSynthetic…`, which are R8 output.
+    Both non-user collapses originate *inside* the manager, so a manager frame short-circuits
+    the initiator test. The test is otherwise **positive**: the stack must contain a frame that
+    *is* the gesture — `onClick`, `onExpandClicked`, `performExpansion`, `setUserExpanded`. The
+    first two are interface overrides and so survive R8, unlike the classes holding them
+    (`$1`, `$$ExternalSynthetic…`), which are R8 output and change between builds.
+14. **"Any row frame on the stack" is NOT a valid test for "the user did this."** Entering the
+    keyguard calls `ExpandableNotificationRow.setHideSensitive`, which collapses the group and
+    therefore leaves a row frame on the stack. The loose test marked every bundle as
+    user-collapsed the first time the screen locked, and it then stayed shut for good
+    (`skip=UserCollapsed`) — the exact failure the collapse memory exists to prevent. Symptom:
+    notifications arrive expanded on the lock screen, but after one lock/unlock cycle come back
+    as a collapsed bundle and never reopen. Rejected collapses now log their frame
+    (`v2 group system collapse ignored`), so a new ROM path is one log line away.
 11. **SystemUI keeps no record that a group collapse was deliberate** — the group branch of
     `setUserExpanded` returns before writing `mHasUserChangedExpansion`. Hence
     `RowStateStore.groupCollapsedByUser`. Without it the parent toggle reopens every group the user
@@ -287,9 +297,21 @@ previews, action buttons) with no forced sizing; a manual collapse survives shad
 (`group user expanded=true`); three shade cycles produce one `EXPAND_GROUP` per group with no
 back-off and no oscillation.
 
-**Not covered by the automated pass:** a genuine keyguard screenshot. The device auto-unlocks via
-the paired OnePlus Watch as a trusted device, so `input keyevent 224` lands on the home screen.
-The keyguard *decisions* are in the log (`kg=true`); only the pixels need a human.
+**Lock screen is covered too.** `input keyevent 224` (WAKEUP) auto-dismisses — the paired OnePlus
+Watch is a trusted device — but **`input keyevent 26` twice** (off, then on) lands on the real lock
+screen with the unlocked padlock, which is the state that matters. Confirmed there: two lock/unlock
+cycles leave the `g:Aggregate_AlertingSection` bundle open with all three rows expanded.
+
+**Aggregate bundles interact with the parent toggle.** Three notifications from one app get
+auto-grouped into `g:Aggregate_AlertingSection` with an `AUTOGROUP_SUMMARY` row. Before the bundle
+forms they are separate rows and expand as singles; once it forms, the *summary* is what has to be
+opened, and its children then expand as singles anyway (`isSystemAggregateChild` bypasses the
+children toggle by design, §7). So the end state matches either way — which is why a bundle that
+fails to open looks like "they collapsed themselves after a while".
+
+Tapping the arrow on a **collapsed** group on the lock screen opens the locked shade — that is
+SystemUI's own handler (`goToLockedShade`), not us, and §7 keeps it that way. With the parent
+toggle working there is nothing to tap.
 
 Note the engine never force-collapses anything, so turning a toggle **off** does not un-expand rows
 that are already expanded — it stops new writes. Restart SystemUI for a clean read.
