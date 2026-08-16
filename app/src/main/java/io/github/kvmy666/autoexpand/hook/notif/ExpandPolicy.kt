@@ -37,6 +37,8 @@ data class RowFacts(
     val groupExpanded: Boolean = false,
     /** The user collapsed this group with the arrow; tracked by us because SystemUI does not. */
     val groupUserCollapsed: Boolean = false,
+    /** We have already collapsed this row once as a group child — see [Decision.Collapse]. */
+    val childCollapseDone: Boolean = false,
 ) {
     /**
      * Whether the notification belongs to *any* group.
@@ -50,19 +52,26 @@ data class RowFacts(
         get() = groupKey?.contains(GROUP_MARKER) == true
 
     /**
-     * Android 16 bundles notifications into system sections (`g:Aggregate_AlertingSection`,
-     * `g:Aggregate_SilentSection`). Those children look grouped but render standalone and have
-     * no parent that will ever expand them — so they must be treated as singles.
+     * A child of *any* group — app-declared or one of Android 16's system bundles
+     * (`g:Aggregate_AlertingSection`, `g:Aggregate_SilentSection`). Either way a summary row
+     * drives it, so it answers to the children toggle rather than the single-row rules.
      *
-     * An app-declared group child is different: its summary row genuinely drives it, and
-     * expanding children individually there is what breaks the grouped look.
+     * System bundles used to be excluded here and expanded as singles, on the reasoning that
+     * they "have no parent that will ever expand them". That was true only while nothing opened
+     * summaries. The group-parent toggle opens them now, so the premise is gone — and keeping
+     * the exception made the children toggle look broken: an app whose notifications the system
+     * had bundled expanded them regardless of the setting, while an app that declares its own
+     * groups obeyed it.
+     *
+     * A notification the system has *not* bundled has no group key marker at all and is still a
+     * single, which is why one that arrives on its own expands as before.
      */
-    val isSystemAggregateChild: Boolean
-        get() = !isGroupSummary && (groupKey?.contains(SYSTEM_AGGREGATE_MARKER) == true)
+    val isGroupChild: Boolean
+        get() = !isGroupSummary && belongsToGroup
 
-    /** A child of a real, app-declared group — the parent drives it, so leave it alone. */
-    val isAppGroupChild: Boolean
-        get() = !isGroupSummary && belongsToGroup && !isSystemAggregateChild
+    /** Diagnostic only — which flavour of group this is, for the log line. */
+    val isSystemAggregate: Boolean
+        get() = groupKey?.contains(SYSTEM_AGGREGATE_MARKER) == true
 
     /** The user deliberately collapsed this row; SystemUI records it for us. */
     val userCollapsed: Boolean
@@ -95,13 +104,21 @@ sealed interface Decision {
      * which routes to `GroupExpansionManager` instead of touching this row's content height.
      */
     data object ExpandGroup : Decision
+    /**
+     * Undo an expansion this row should not have. Only ever used for a group child while the
+     * children toggle is off: the heads-up path expands a banner with `setUserExpanded(true,
+     * true)` and that expansion survives into the shade, so "don't expand" is not enough to make
+     * the toggle mean what it says. Applied once per notification, so a deliberate re-expand by
+     * the user afterwards stands.
+     */
+    data object Collapse : Decision
     /** Eligible, but already in the desired state — do nothing. */
     data object AlreadyExpanded : Decision
     /** Not our business. [why] is logged so a wrong skip is diagnosable. */
     data class Skip(val why: Reason) : Decision
 
     enum class Reason {
-        FeatureOff, PkgExcluded, HeadsUp, Pinned, AppGroupChild,
+        FeatureOff, PkgExcluded, HeadsUp, Pinned, GroupChild,
         UserCollapsed, GroupSummary, BackedOff,
         /** Group parents left alone because the toggle is off. */
         GroupParentsOff,
@@ -143,6 +160,13 @@ object ExpandPolicy {
         // GroupExpansionManager, and the summary's own content height is untouched. So it gets
         // its own decision and its own collapse memory — SystemUI never sets
         // mHasUserChangedExpansion on this path, so `userCollapsed` cannot see an arrow tap here.
+        // NB: [backedOff] is deliberately not consulted below this point for a summary. It counts
+        // `resetUserExpansion()` wipes, which is the right protection for a single row — that
+        // call really does erase `mUserExpanded` underneath us. A group's expansion does not
+        // live there at all; it lives in GroupExpansionManager, and SystemUI clears it on every
+        // shade close by design. Treating that as SystemUI "fighting us" made two shade cycles
+        // inside the 1.5 s window trip the back-off, and the parent then refused to open for the
+        // 5 s cooldown — reported as "open and close twice quickly and it stops working".
         if (facts.isGroupSummary) {
             // The group primitive only works once the row has adopted its children: until then
             // `setUserExpanded(true, true)` misses its group branch and falls through to the
@@ -152,15 +176,20 @@ object ExpandPolicy {
             if (!facts.isSummaryWithChildren) return Decision.Skip(Decision.Reason.GroupNotReady)
             if (!prefs.groupParentsEnabled)  return Decision.Skip(Decision.Reason.GroupParentsOff)
             if (facts.groupUserCollapsed)    return Decision.Skip(Decision.Reason.UserCollapsed)
-            if (backedOff)                   return Decision.Skip(Decision.Reason.BackedOff)
             return if (facts.groupExpanded) Decision.AlreadyExpanded else Decision.ExpandGroup
         }
 
         // ── Group child ──────────────────────────────────────────────────────────────────
-        // A child of a real app group is driven by its summary. A child of a *system* bundle
-        // is not — it is standalone in everything but name, so it falls through and expands.
-        if (facts.isAppGroupChild) {
-            if (!prefs.groupChildrenEnabled) return Decision.Skip(Decision.Reason.AppGroupChild)
+        // Driven by its summary, whether that summary was posted by the app or synthesised by
+        // Android 16's bundling. Both are groups on screen, so both answer to the same toggle.
+        if (facts.isGroupChild) {
+            if (!prefs.groupChildrenEnabled) {
+                // "Children stay collapsed" has to survive the row having been a heads-up
+                // banner, which the (frozen) heads-up path expands and never undoes. Skipping
+                // alone leaves the newest notification in every bundle sitting expanded.
+                return if (facts.expandedUngated && !facts.childCollapseDone) Decision.Collapse
+                       else Decision.Skip(Decision.Reason.GroupChild)
+            }
             // While the group is closed the container sizes itself from each child's intrinsic
             // height, so expanding children here would inflate the collapsed preview.
             if (!facts.groupExpanded)        return Decision.Skip(Decision.Reason.GroupCollapsed)

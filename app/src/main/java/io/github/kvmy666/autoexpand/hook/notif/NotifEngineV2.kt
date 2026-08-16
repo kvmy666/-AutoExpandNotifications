@@ -106,6 +106,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                 userExpanded = RowApi.bool(RowApi.fUserExpanded, row),
                 groupExpanded = RowApi.callBool(RowApi.isGroupExpanded, row),
                 groupUserCollapsed = RowStateStore.isGroupCollapsedByUser(key),
+                childCollapseDone = RowStateStore.wasChildCollapsed(key),
             )
         } catch (_: Throwable) { null }
     }
@@ -130,11 +131,16 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
             is Decision.Expand -> {
                 setToken(row, true)
                 applyExpanded(row, facts)
-                NotifLog.d { "v2 $trigger EXPAND key=${facts.key} kg=${facts.onKeyguard} aggChild=${facts.isSystemAggregateChild}" }
+                NotifLog.d { "v2 $trigger EXPAND key=${facts.key} kg=${facts.onKeyguard} grouped=${facts.isGroupChild} bundle=${facts.isSystemAggregate}" }
             }
             is Decision.ExpandGroup -> {
                 applyGroupExpanded(row, facts)
                 NotifLog.d { "v2 $trigger EXPAND_GROUP key=${facts.key}" }
+            }
+            is Decision.Collapse -> {
+                setToken(row, false)
+                applyCollapsed(row, facts)
+                NotifLog.d { "v2 $trigger COLLAPSE_CHILD key=${facts.key}" }
             }
             is Decision.AlreadyExpanded -> {
                 // Still needs the token: on keyguard the row only *stays* expanded while the
@@ -170,6 +176,33 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
     }
 
     /**
+     * Returns a group child to collapsed.
+     *
+     * `setUserExpanded(false, allowChildExpansion = false)` is the mirror of what expanded it:
+     * the heads-up path uses `setUserExpanded(true, true)`, so clearing `mIsSystemExpanded` alone
+     * would not collapse anything — `isExpanded()` reads `mUserExpanded` at its tail. Passing
+     * false for the second argument keeps the call away from the group branch, so this touches
+     * the child only. It is the same primitive the heads-up code already uses to collapse
+     * children, so no new mechanism is introduced.
+     *
+     * This deliberately leaves `mHasUserChangedExpansion` set, which means the row now behaves
+     * exactly as if the user had collapsed it — including expiring when SystemUI resets the row
+     * on the next repost. That is the lifetime we want.
+     */
+    private fun applyCollapsed(row: Any, facts: RowFacts) {
+        Attribution.ours {
+            try {
+                RowApi.setSystemExpanded?.invoke(row, false)
+                RowApi.setUserExpanded2?.invoke(row, false, false)
+                    ?: RowApi.setUserExpanded1?.invoke(row, false)
+            } catch (t: Throwable) {
+                NotifLog.d { "v2 collapse failed key=${facts.key}: $t" }
+            }
+        }
+        RowStateStore.onChildCollapsed(facts.key)
+    }
+
+    /**
      * Opens a group summary.
      *
      * `setUserExpanded(true, allowChildExpansion = true)` is the *only* primitive used here.
@@ -199,7 +232,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
      *
      * Children are not reachable from the engine's own triggers once the group opens — nothing
      * re-fires on them — so the summary drives them. With the children toggle off every one of
-     * these ends in `skip=AppGroupChild` and nothing is written.
+     * these ends in `skip=GroupChild` and nothing is written.
      */
     private fun reconcileChildren(summary: Any, trigger: String) {
         if (!prefsFacts.groupChildrenEnabled) return
@@ -258,12 +291,13 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                                 facts, prefsFacts, RowStateStore.isBackedOff(facts.key)
                             )
                             when (decision) {
-                                // A summary is handled after the call instead: opening a group is
-                                // a different primitive, and rewriting this argument would set
-                                // mIsSystemExpanded on the summary — expanding its own content
-                                // rather than the group, which is exactly the size-forcing that
-                                // breaks the grouped look.
-                                is Decision.ExpandGroup -> Unit
+                                // Both are left to the cold triggers. Opening a group needs a
+                                // different primitive, and rewriting this argument on a summary
+                                // would set mIsSystemExpanded on it — expanding its own content
+                                // rather than the group, which is what tears the grouped look
+                                // apart. A collapse has nothing to rewrite: the argument is
+                                // already false.
+                                is Decision.ExpandGroup, is Decision.Collapse -> Unit
                                 is Decision.Expand, is Decision.AlreadyExpanded -> {
                                     // The SBN flag, not the view's: a summary whose children have
                                     // not attached yet still must not have its own content
@@ -338,7 +372,14 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                         val row = param.thisObject
                         val key = (RowApi.sbnOf(row)?.let { XposedHelpers.callMethod(it, "getKey") } as? String)
                             ?: return
-                        RowStateStore.onExpansionWiped(key)
+                        // Summaries are exempt from the wipe accounting. `resetUserExpansion`
+                        // clears `mUserExpanded`, which is where a *single* row's expansion
+                        // lives; a group's lives in GroupExpansionManager and is untouched here.
+                        // Counting these as SystemUI fighting us made two quick shade cycles trip
+                        // the back-off and stop the parent opening for the whole cooldown.
+                        if (!RowApi.callBool(RowApi.isSummaryWithChildren, row)) {
+                            RowStateStore.onExpansionWiped(key)
+                        }
                         if (RowStateStore.isBackedOff(key)) {
                             // Stop writing, but deliberately leave the token alone: dropping it
                             // would make the keyguard gate collapse a row that is already open.

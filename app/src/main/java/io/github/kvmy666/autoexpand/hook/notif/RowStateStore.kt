@@ -25,6 +25,12 @@ object RowStateStore {
      * back-off immediately, which is exactly what it must not do.
      */
     private const val WIPE_DEBOUNCE_MS = 250L
+    /**
+     * How soon after our own write a wipe has to land to count as SystemUI contesting it. The
+     * measured lock-screen oscillation came back within milliseconds; a shade close is orders of
+     * magnitude further away, which is what separates a fight from housekeeping.
+     */
+    private const val CONTESTED_MS = 300L
     /** How long a backed-off key stays backed off before we allow one more try. */
     private const val COOLDOWN_MS = 5_000L
     private const val MAX_KEYS = 256
@@ -42,6 +48,8 @@ object RowStateStore {
          * every group the user just closed.
          */
         var groupCollapsedByUser = false
+        /** We have collapsed this row once as a group child; we do not do it twice. */
+        var childCollapsed = false
     }
 
     private val states = object : LinkedHashMap<String, KeyState>(64, 0.75f, true) {
@@ -60,6 +68,13 @@ object RowStateStore {
     /**
      * Records that SystemUI wiped our expansion. Consecutive wipes inside [WIPE_WINDOW_MS]
      * accumulate; an isolated one resets the count, so a normal content update still re-expands.
+     *
+     * Only a wipe that lands right after *our own* write counts. `resetUserExpansion()` also runs
+     * as routine housekeeping — every shade close calls it — and counting those made ordinary
+     * interaction look like a fight: opening and closing the shade twice within [WIPE_WINDOW_MS]
+     * tripped the back-off, and nothing expanded again until the cooldown elapsed. The oscillation
+     * this guard exists for is nothing like that; there the wipe follows the write within
+     * milliseconds, which is what [CONTESTED_MS] tests for.
      */
     @Synchronized
     fun onExpansionWiped(key: String) {
@@ -67,8 +82,10 @@ object RowStateStore {
         val now = SystemClock.uptimeMillis()
         // Same logical reset arriving twice — not a second fight.
         if (now - s.lastWipeTs < WIPE_DEBOUNCE_MS) return
-        s.wipes = if (now - s.lastWipeTs < WIPE_WINDOW_MS) s.wipes + 1 else 1
+        val sinceLastWipe = now - s.lastWipeTs
         s.lastWipeTs = now
+        if (now - s.lastApplyTs > CONTESTED_MS) { s.wipes = 0; return }   // routine, not a fight
+        s.wipes = if (sinceLastWipe < WIPE_WINDOW_MS) s.wipes + 1 else 1
     }
 
     /**
@@ -112,8 +129,18 @@ object RowStateStore {
      */
     @Synchronized
     fun onNotificationUpdated(key: String) {
-        states[key]?.groupCollapsedByUser = false
+        states[key]?.let { it.groupCollapsedByUser = false; it.childCollapsed = false }
     }
+
+    /**
+     * One collapse per notification. After that the row is left alone, so a user who expands a
+     * child by hand keeps it expanded rather than watching it snap shut again.
+     */
+    @Synchronized
+    fun onChildCollapsed(key: String) { state(key).childCollapsed = true }
+
+    @Synchronized
+    fun wasChildCollapsed(key: String): Boolean = states[key]?.childCollapsed == true
 
     /** Called when a notification is genuinely reposted — a clean slate. */
     @Synchronized
