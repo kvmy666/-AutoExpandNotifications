@@ -1,0 +1,449 @@
+<mxfile host="65bd71144e">
+    <diagram id="page1" name="1 - تدفق الإعدادات (App to Hook)">
+        <mxGraphModel dx="1348" dy="760" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="900" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="lane1" value="APP PROCESS&#xa;io.github.kvmy666.autoexpand" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;fillColor=none;strokeColor=#666666;verticalAlign=top;fontSize=13;fontStyle=1;spacingTop=6;" parent="1" vertex="1">
+                    <mxGeometry x="20" y="20" width="330" height="690" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane2" value="IPC CHANNELS&#xa;(cross-process)" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;fillColor=none;strokeColor=#666666;verticalAlign=top;fontSize=13;fontStyle=1;spacingTop=6;" parent="1" vertex="1">
+                    <mxGeometry x="390" y="20" width="300" height="690" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane3" value="SYSTEMUI PROCESS&#xa;com.android.systemui" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;fillColor=none;strokeColor=#666666;verticalAlign=top;fontSize=13;fontStyle=1;spacingTop=6;" parent="1" vertex="1">
+                    <mxGeometry x="730" y="20" width="380" height="690" as="geometry"/>
+                </mxCell>
+                <mxCell id="A1" value="MainActivity.onCreate()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="80" width="270" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="A2" value="first-run defaults&lt;br&gt;expand_shade_enabled = true&lt;br&gt;expand_headsup_enabled = true&lt;br&gt;expand_lockscreen_enabled = true&lt;br&gt;disable_headsup_popup_enabled = true&lt;br&gt;ungroup_notifications_enabled = true (DEAD)&lt;br&gt;excluded_apps = { }" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=left;spacingLeft=8;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="140" width="270" height="90" as="geometry"/>
+                </mxCell>
+                <mxCell id="A3" value="SettingsScreen(prefs)&lt;br&gt;selectedFeature = &quot;notifications&quot;&lt;br&gt;3 cards: Auto-expand / Behavior / Advanced" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="250" width="270" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="A4" value="onToggle(key, Boolean)&lt;br&gt;onStringPref(key, String)&lt;br&gt;→ prefs.edit()...apply()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="330" width="270" height="55" as="geometry"/>
+                </mxCell>
+                <mxCell id="A5" value="AppListActivity&lt;br&gt;excluded_apps (StringSet)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="405" width="270" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="A6" value="MainActivity.broadcastPref(ctx, key, value)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="470" width="270" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="A7" value="MainActivity.writePrefsFile(ctx)&lt;br&gt;SharedPreferences → flat JSON (String→String)&lt;br&gt;su -c &quot;cp … ; chmod 644 ; settings put global ae_prefs_json &lt;b64&gt;&quot;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="530" width="270" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="A8" value="makePrefsWorldReadable()&lt;br&gt;chmod o+r on shared_prefs/prefs.xml" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="620" width="270" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="A9" value="isModuleActive(ctx)&lt;br&gt;3-min heartbeat window" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="670" width="270" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="B1" value="Settings.Global&lt;br&gt;&lt;b&gt;ae_prefs_json&lt;/b&gt; (base64 JSON)&lt;br&gt;★ PRIMARY — survives SELinux EACCES" style="shape=cylinder3;boundedLbl=1;backgroundOutline=1;size=10;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="410" y="110" width="260" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="B2" value="/data/local/tmp/tweaks_prefs.json&lt;br&gt;FALLBACK (+ FileObserver CLOSE_WRITE)" style="shape=cylinder3;boundedLbl=1;backgroundOutline=1;size=10;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="410" y="215" width="260" height="75" as="geometry"/>
+                </mxCell>
+                <mxCell id="B3" value="XSharedPreferences&lt;br&gt;io.github.kvmy666.autoexpand/prefs.xml&lt;br&gt;FALLBACK (survives app-process death)" style="shape=cylinder3;boundedLbl=1;backgroundOutline=1;size=10;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="410" y="315" width="260" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="B4" value="Broadcast&lt;br&gt;io.github.kvmy666.autoexpand.PREF_CHANGED&lt;br&gt;(zones / keep-screen-on only — NOT notifications)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;dashed=1;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="410" y="415" width="260" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="B5" value="Settings.Global &lt;b&gt;ae_heartbeat&lt;/b&gt; (elapsedRealtime)&lt;br&gt;+ /data/local/tmp/tweaks_heartbeat" style="shape=cylinder3;boundedLbl=1;backgroundOutline=1;size=10;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="410" y="500" width="260" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="B6" value="Settings.Global autoexpand_active&lt;br&gt;(legacy OnePlus marker)" style="shape=cylinder3;boundedLbl=1;backgroundOutline=1;size=10;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="410" y="595" width="260" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="B7" value="PrefsProvider (ContentProvider)&lt;br&gt;legacy / unused by notification hooks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;dashed=1;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="410" y="670" width="260" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="C1" value="MainHook.handleLoadPackage(lpparam)&lt;br&gt;switch on lpparam.packageName" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="750" y="80" width="340" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="C2" value="handleSystemUi(lpparam)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="750" y="145" width="340" height="35" as="geometry"/>
+                </mxCell>
+                <mxCell id="C3" value="hook android.app.Application.onCreate (after)&lt;br&gt;• prefs.appContext = app&lt;br&gt;• prefs.loadFilePrefs()&lt;br&gt;• prefs.startFileObserver()&lt;br&gt;• prefs.startHeartbeatThread()  (60 s daemon)&lt;br&gt;• legacy autoexpand_active marker" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;spacingLeft=8;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="750" y="200" width="340" height="95" as="geometry"/>
+                </mxCell>
+                <mxCell id="C4" value="&lt;b&gt;PrefsBridge&lt;/b&gt;  (hook/PrefsBridge.kt)&lt;br&gt;isFeatureEnabled(key)     default TRUE&lt;br&gt;isKillSwitchActive(key)   default FALSE&lt;br&gt;isOptInEnabled(key)       alias of above&lt;br&gt;getExcludedApps() : Set&amp;lt;String&amp;gt;&lt;br&gt;getIntPref(key, def)&lt;br&gt;reloadIfStale() — 2000 ms cache" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="750" y="315" width="340" height="110" as="geometry"/>
+                </mxCell>
+                <mxCell id="C5" value="&lt;b&gt;NotificationExpander(prefs).install(lpparam)&lt;/b&gt;&lt;br&gt;MainHook.kt:116" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=1" parent="1" vertex="1">
+                    <mxGeometry x="750" y="450" width="340" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="C6" value="11 static hook sites + 1 dynamic&lt;br&gt;(see page 2 — خريطة الخطافات)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="750" y="525" width="340" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="C7" value="out of scope here:&lt;br&gt;ZonesHook • KeepScreenOnController • back-gesture haptic" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;dashed=1;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="750" y="595" width="340" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="N1" value="system_server (&quot;android&quot;) also loads MainHook,&#xa;but only for SnapperChordHook. It reads prefs via&#xa;PrefsBridge.systemCtx = ActivityThread.getSystemContext().&#xa;No notification hook runs there." style="shape=note;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;size=14;fontSize=10;align=left;spacingLeft=6;" parent="1" vertex="1">
+                    <mxGeometry x="1140" y="200" width="270" height="90" as="geometry"/>
+                </mxCell>
+                <mxCell id="N2" value="Every notification pref change needs a SystemUI restart&#xa;ONLY for newly-added hook code. Values themselves are&#xa;picked up live within ≤2 s (reloadIfStale) — but the UI&#xa;still shows the &quot;reboot required&quot; snackbar for every toggle." style="shape=note;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;size=14;fontSize=10;align=left;spacingLeft=6;" parent="1" vertex="1">
+                    <mxGeometry x="1140" y="315" width="270" height="110" as="geometry"/>
+                </mxCell>
+                <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="A1" target="A2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="A2" target="A3" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="A3" target="A4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="A4" target="A6" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="A5" target="A6" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="A6" target="A7" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e7" value="settings put global" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#d79b00;fontSize=9;" parent="1" source="A7" target="B1" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e8" value="cp + chmod 644" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#d79b00;fontSize=9;" parent="1" source="A7" target="B2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e9" value="apply() + chmod o+r" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#d79b00;fontSize=9;" parent="1" source="A8" target="B3" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;dashed=1;strokeColor=#999999;" parent="1" source="A6" target="B4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e11" value="read (3-min window)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;fontSize=9;" parent="1" source="B5" target="A9" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="C1" target="C2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e13" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="C2" target="C3" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e14" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="C3" target="C4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e15" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="C2" target="C5" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e16" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="C5" target="C6" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e17" value="1. Settings.Global" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#d79b00;fontSize=9;" parent="1" source="B1" target="C4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e18" value="2. file" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#d79b00;fontSize=9;" parent="1" source="B2" target="C4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e19" value="3. XSharedPrefs" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#d79b00;fontSize=9;" parent="1" source="B3" target="C4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e20" value="write every 60 s" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;fontSize=9;" parent="1" source="C3" target="B5" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e21" value="read prefs" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;dashed=1;fontSize=9;" parent="1" source="C6" target="C4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+    <diagram id="page2" name="2 - خريطة خطافات الإشعارات">
+        <mxGraphModel dx="2292" dy="1292" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1800" pageHeight="1200" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="title" value="NotificationExpander.install(lpparam) — 11 static hook sites + 1 installed lazily at runtime" style="text;html=1;fontSize=16;fontStyle=1;align=center;" parent="1" vertex="1">
+                    <mxGeometry x="40" y="20" width="1000" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="secA" value="A — SHADE / LOCK SCREEN  (توسيع تلقائي)" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;fillColor=none;strokeColor=#6c8ebf;verticalAlign=top;fontSize=13;fontStyle=1;spacingTop=6;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="70" width="1180" height="330" as="geometry"/>
+                </mxCell>
+                <mxCell id="H1" value="&lt;b&gt;[1] ExpandableNotificationRow.setSystemExpanded(boolean)&lt;/b&gt;&lt;br&gt;findAndHookMethod → afterHookedMethod&lt;br&gt;&lt;i&gt;fast first-open path — fires only on post / set-change&lt;/i&gt;&lt;br&gt;guards: !mIsHeadsUp, !isChildInGroup&lt;br&gt;one-shot aeAutoExpanded + 300 ms gap via aeLastSysExpTs&lt;br&gt;action: rowView.post { setUserExpanded(true,true) ?: performClick }" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;spacingLeft=8;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="55" y="110" width="360" height="110" as="geometry"/>
+                </mxCell>
+                <mxCell id="H2" value="&lt;b&gt;[2] ExpandableNotificationRow.onLayout(...)&lt;/b&gt;   ★ UNIVERSAL DRIVER&lt;br&gt;XposedBridge.hookAllMethods → afterHookedMethod&lt;br&gt;&lt;i&gt;the only trigger that fires on EVERY shade / LS open&lt;/i&gt;&lt;br&gt;guards: !mIsHeadsUp, !isChildInGroup, rowView.isShown&lt;br&gt;one-shot aeAutoExpanded + 300 ms gap via aeLastLayoutTs&lt;br&gt;collapse signal: group → areChildrenExpanded()==false&lt;br&gt;                       single → isShowingExpanded()==false&lt;br&gt;action: performClick on the REAL system arrow" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;spacingLeft=8;fontSize=10;strokeWidth=3;" parent="1" vertex="1">
+                    <mxGeometry x="55" y="240" width="360" height="140" as="geometry"/>
+                </mxCell>
+                <mxCell id="HA1" value="shouldSkipNotification(featureKey, pkg)&lt;br&gt;→ prefs.isFeatureEnabled(key) &amp;&amp; pkg ∉ excluded_apps" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="470" y="110" width="290" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="HA2" value="isGroupSummaryRow(row)&lt;br&gt;FLAG_GROUP_SUMMARY &amp;&amp; getRowChildCount &gt; 0" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="470" y="165" width="290" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="HA3" value="findStrictExpandButton(view) → findExpandButtonImpl(strict=true)&lt;br&gt;pkg==&quot;android&quot; &amp;&amp; id==expand_button&lt;br&gt;&amp;&amp; class == com.android.internal.widget.NotificationExpandButton&lt;br&gt;DFS, skips nested ExpandableNotificationRow" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="470" y="220" width="290" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="HA4" value="clickExpandSilentlyOnKeyguard(row, btn)&lt;br&gt;1) beginLsAutoExpandWindow() — 400 ms&lt;br&gt;2) null the mOnExpandClickListener field&lt;br&gt;3) btn.performClick()&lt;br&gt;4) restore listener in finally" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="470" y="300" width="290" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="H12" value="&lt;b&gt;[12] &amp;lt;listener&amp;gt;.onExpandClicked(...)&lt;/b&gt;  — DYNAMIC&lt;br&gt;hookAllMethods, installed lazily by ensureOnExpandClickedHook()&lt;br&gt;from the first listener instance observed&lt;br&gt;beforeHook: if uptimeMillis &amp;lt; lsAutoExpandUntil → setResult(null)&lt;br&gt;&lt;i&gt;kills the keyguard → locked-shade scrim / unlock prompt&lt;/i&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;align=left;spacingLeft=8;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="810" y="290" width="380" height="90" as="geometry"/>
+                </mxCell>
+                <mxCell id="HA5" value="getExpandClickListenerField(row)&lt;br&gt;walks the class hierarchy for a field whose name contains&lt;br&gt;&quot;expandclick&quot; or type contains &quot;onexpandclicklistener&quot;&lt;br&gt;cached in expandClickField / expandClickFieldResolved" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="810" y="180" width="380" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="secB" value="B — HEADS-UP (HUD)  (توسيع + ضبط الأبعاد)" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;fillColor=none;strokeColor=#b85450;verticalAlign=top;fontSize=13;fontStyle=1;spacingTop=6;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="420" width="1180" height="490" as="geometry"/>
+                </mxCell>
+                <mxCell id="H3" value="&lt;b&gt;[3] NotificationChildrenContainer.addNotification(row, int)&lt;/b&gt;&lt;br&gt;afterHook — fires when a child attaches to a group&lt;br&gt;branch: only when parent mIsHeadsUp == true&lt;br&gt;→ aeIsGroup = true&lt;br&gt;→ parent setUserExpanded(true, true)&lt;br&gt;→ collapseChildNoAnim(child)  (kills expanded-frame flicker)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;spacingLeft=8;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="55" y="460" width="360" height="105" as="geometry"/>
+                </mxCell>
+                <mxCell id="H4" value="&lt;b&gt;[4] ExpandableNotificationRow.setHeadsUp(boolean)&lt;/b&gt;&lt;br&gt;beforeHook(true)  → aeIsGroup=false (if unset), aeCollapsed=false&lt;br&gt;beforeHook(false) → reset aeIsGroup, aeAutoExpanded&lt;br&gt;afterHook(true)   → expandGroupIfNeeded(rowView, row, pkg)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;spacingLeft=8;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="55" y="585" width="360" height="85" as="geometry"/>
+                </mxCell>
+                <mxCell id="H5" value="&lt;b&gt;[5] NotificationContentView.calculateVisibleType()&lt;/b&gt;&lt;br&gt;afterHook — if mIsHeadsUp &amp;&amp; result==2 (contracted)&lt;br&gt;skip when isGroup or aeCollapsed&lt;br&gt;else result = 1 (expanded child)&lt;br&gt;&lt;i&gt;+ recovery: OEMs whose addNotification we can&#39;t hook&lt;/i&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;spacingLeft=8;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="55" y="690" width="360" height="90" as="geometry"/>
+                </mxCell>
+                <mxCell id="H6" value="&lt;b&gt;[6] ExpandableNotificationRow.getIntrinsicHeight()&lt;/b&gt;&lt;br&gt;afterHook — HU + non-group + !aeCollapsed only&lt;br&gt;result = mPrivateLayout.mExpandedChild.measuredHeight" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;spacingLeft=8;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="470" y="460" width="360" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="H7" value="&lt;b&gt;[7] ExpandableNotificationRow.getPinnedHeadsUpHeight(boolean)&lt;/b&gt;&lt;br&gt;afterHook — HU + non-group + !aeCollapsed only&lt;br&gt;result = max(result, getMaxExpandHeight())" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;spacingLeft=8;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="470" y="545" width="360" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="H8" value="&lt;b&gt;[8] ExpandableNotificationRow.setExpandedWhenPinned(...)&lt;/b&gt;&lt;br&gt;hookAllMethods beforeHook&lt;br&gt;non-group only: aeCollapsed = !args[0]" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;spacingLeft=8;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="470" y="630" width="360" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="HB1" value="expandGroupIfNeeded(rowView, rowObj, pkg)&lt;br&gt;• return if kill-switch disable_headsup_hooks_enabled&lt;br&gt;• return if getRowChildCount()==0 (defer to addNotification)&lt;br&gt;• aeIsGroup = true&lt;br&gt;• parent not expanded → setUserExpanded(true,true), fallback click&lt;br&gt;• every child → collapseChildNoAnim, fallback strict arrow click&lt;br&gt;idempotent: safe to re-enter from setHeadsUp re-fires" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="470" y="715" width="360" height="115" as="geometry"/>
+                </mxCell>
+                <mxCell id="HB2" value="collapseChildNoAnim(child)&lt;br&gt;setUserExpanded(false, false) → fallback setUserExpanded(false)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="880" y="460" width="310" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="HB3" value="getRowChildCount(row)&lt;br&gt;mChildrenContainer.getNotificationChildCount()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="880" y="525" width="310" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="HB4" value="getNotificationChildren(row)&lt;br&gt;getAttachedChildren() ?: getNotificationChildren()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="880" y="585" width="310" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="HB5" value="getNotificationPackage(row)&lt;br&gt;row.getEntry().getSbn().getPackageName()&lt;br&gt;&lt;br&gt;getNotificationPackageFromContentView(view)&lt;br&gt;view.mContainingNotification → getNotificationPackage" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="880" y="645" width="310" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="HB6" value="resourceEntryAndPkg(view)&lt;br&gt;getResourceEntryName / getResourcePackageName" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="880" y="740" width="310" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="secC" value="C — INTERACTION &amp; LIMITS  (سلوك اللمس وحدود النص)" style="rounded=1;whiteSpace=wrap;html=1;dashed=1;fillColor=none;strokeColor=#d79b00;verticalAlign=top;fontSize=13;fontStyle=1;spacingTop=6;" parent="1" vertex="1">
+                    <mxGeometry x="1240" y="70" width="480" height="620" as="geometry"/>
+                </mxCell>
+                <mxCell id="H9" value="&lt;b&gt;[9] OplusHeadsUpTouchHelper.onInterceptTouchEvent(MotionEvent)&lt;/b&gt;&lt;br&gt;com.oplus.systemui.notification.headsup.windowframe.*&lt;br&gt;afterHook — passive swipe-direction tracking&lt;br&gt;ACTION_DOWN → f1DownStartY, reset flags&lt;br&gt;ACTION_MOVE (result==true) &amp;&amp; dy &amp;gt; 10 →&lt;br&gt;   f1IsDownwardSwipe = true, f1SwipeTime = now,&lt;br&gt;   f1CurrentRow = getMTouchingHeadsUpView()&lt;br&gt;gate: disable_headsup_popup_enabled" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=left;spacingLeft=8;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1265" y="110" width="430" height="130" as="geometry"/>
+                </mxCell>
+                <mxCell id="H10" value="&lt;b&gt;[10] StatusBarNotificationActivityStarter&lt;/b&gt;&lt;br&gt;hookAllMethods beforeHook on&lt;br&gt;  • onNotificationClicked(...)&lt;br&gt;  • startNotificationIntent(...)&lt;br&gt;if f1IsDownwardSwipe &amp;&amp; age &amp;lt; 2000 ms:&lt;br&gt;  param.result = null   ← blocks app / mini-window launch&lt;br&gt;  toggleHeadsUpExpandState(row)   (once, f1HasToggled)&lt;br&gt;row resolution: args[1] → arg by class name → f1CurrentRow" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=left;spacingLeft=8;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1265" y="260" width="430" height="130" as="geometry"/>
+                </mxCell>
+                <mxCell id="HC1" value="toggleHeadsUpExpandState(row)&lt;br&gt;group (aeIsGroup) → findExpandButton().performClick()&lt;br&gt;single → flip aeCollapsed, set mExpandedWhenPinned,&lt;br&gt;         setActualHeight(getIntrinsicHeight()), requestLayout" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;spacingLeft=8;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1265" y="410" width="430" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="H11" value="&lt;b&gt;[11] com.android.internal.widget.MessagingTextMessage&lt;/b&gt;&lt;br&gt;.setMaxDisplayedLines(int) — beforeHook&lt;br&gt;called by MessagingLinearLayout.onMeasure with Integer.MAX_VALUE&lt;br&gt;gates: expand_headsup_enabled ON + kill-switch OFF&lt;br&gt;maxLines = getIntPref(&quot;headsup_max_lines&quot;, 5); 0 = unlimited&lt;br&gt;if args[0] &amp;gt; maxLines → args[0] = maxLines" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;align=left;spacingLeft=8;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1265" y="510" width="430" height="110" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend" value="&lt;b&gt;PER-ROW STATE (XposedHelpers.setAdditionalInstanceField)&lt;/b&gt;&lt;br&gt;&lt;br&gt;aeAutoExpanded : Boolean — one-shot &quot;already expanded this open&quot;&lt;br&gt;aeLastSysExpTs : Long — last setSystemExpanded timestamp (quiet-gap reset)&lt;br&gt;aeLastLayoutTs : Long — last onLayout timestamp (quiet-gap reset)&lt;br&gt;aeIsGroup      : Boolean — row is a HUD group parent&lt;br&gt;aeCollapsed    : Boolean — our own HUD expand state (independent of mExpandedWhenPinned timing)&lt;br&gt;&lt;br&gt;&lt;b&gt;CLASS-LEVEL STATE (@Volatile)&lt;/b&gt;&lt;br&gt;f1DownStartY / f1IsDownwardSwipe / f1HasToggled / f1SwipeTime / f1CurrentRow — swipe tracking&lt;br&gt;lsAutoExpandUntil — keyguard suppression window end (uptimeMillis + 400)&lt;br&gt;onExpandClickedHooked — dynamic hook installed flag&lt;br&gt;expandClickField / expandClickFieldResolved — reflection cache" style="shape=note;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;size=18;align=left;spacingLeft=8;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1240" y="710" width="480" height="200" as="geometry"/>
+                </mxCell>
+                <mxCell id="f1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=open;dashed=1;strokeColor=#9673a6;" parent="1" source="H2" target="HA3" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=open;dashed=1;strokeColor=#9673a6;" parent="1" source="H2" target="HA4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=open;dashed=1;strokeColor=#9673a6;" parent="1" source="H1" target="HA1" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=open;dashed=1;strokeColor=#9673a6;" parent="1" source="H2" target="HA2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f5" value="installs" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#82b366;fontSize=9;" parent="1" source="HA4" target="H12" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=open;dashed=1;strokeColor=#9673a6;" parent="1" source="HA4" target="HA5" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=open;dashed=1;strokeColor=#9673a6;" parent="1" source="H4" target="HB1" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f8" value="recovery re-entry" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#b85450;fontSize=9;dashed=1;" parent="1" source="H5" target="HB1" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f9" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=open;dashed=1;strokeColor=#9673a6;" parent="1" source="H3" target="HB2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f10" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=open;dashed=1;strokeColor=#9673a6;" parent="1" source="HB1" target="HB4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f11" value="sets f1* state" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;strokeColor=#d79b00;fontSize=9;" parent="1" source="H9" target="H10" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="f12" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=open;dashed=1;strokeColor=#9673a6;" parent="1" source="H10" target="HC1" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="v0vt7ctFxEAo644I_4kR-1" style="edgeStyle=none;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.859;entryY=0.756;entryDx=0;entryDy=0;entryPerimeter=0;" edge="1" parent="1" source="HA1" target="HA1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+    <diagram id="page3" name="3 - محرك onLayout + دورة حياة HUD">
+        <mxGraphModel dx="1348" dy="760" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1200" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="t1" value="A — Universal expand driver:  ExpandableNotificationRow.onLayout (afterHook)" style="text;html=1;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="40" y="20" width="620" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="s1" value="onLayout() returns" style="ellipse;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" parent="1" vertex="1">
+                    <mxGeometry x="120" y="60" width="200" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="s2" value="mIsHeadsUp ?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="130" y="130" width="180" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="s3" value="isChildInGroup() ?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="130" y="215" width="180" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="s4" value="rowView.isShown ?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="130" y="300" width="180" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="s5" value="shouldSkipNotification(&#xa;onKG ? expand_lockscreen_enabled&#xa;     : expand_shade_enabled, pkg) ?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="100" y="385" width="240" height="90" as="geometry"/>
+                </mxCell>
+                <mxCell id="s6" value="now − aeLastLayoutTs &amp;gt; 300 ms ?&lt;br&gt;→ aeAutoExpanded = false&lt;br&gt;(quiet-gap reset = new open)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="100" y="500" width="240" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="s7" value="aeAutoExpanded == true ?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="120" y="585" width="200" height="65" as="geometry"/>
+                </mxCell>
+                <mxCell id="s8" value="aeAutoExpanded = true&lt;br&gt;rowView.post { … }  ← next frame" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="100" y="675" width="240" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="s9" value="collapsed = isGroupSummaryRow(row)&#xa;  ? areChildrenExpanded() == false&#xa;  : isShowingExpanded()  == false" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="100" y="750" width="240" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="s10" value="collapsed &amp;&amp; btn != null ?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="120" y="835" width="200" height="65" as="geometry"/>
+                </mxCell>
+                <mxCell id="s11" value="onKG ?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="140" y="925" width="160" height="55" as="geometry"/>
+                </mxCell>
+                <mxCell id="s12" value="clickExpandSilentlyOnKeyguard(row, btn)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="380" y="930" width="240" height="45" as="geometry"/>
+                </mxCell>
+                <mxCell id="s13" value="btn.performClick()&lt;br&gt;&lt;i&gt;the only instant + reliable expand&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="100" y="1010" width="240" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="s14" value="fallback: setUserExpanded(true,true)&lt;br&gt;(no arrow found — rare)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="380" y="1005" width="240" height="55" as="geometry"/>
+                </mxCell>
+                <mxCell id="sX" value="RETURN (no-op)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="420" y="215" width="160" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="g1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="s1" target="s2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="g2" value="no" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;fontSize=10;" parent="1" source="s2" target="s3" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="g3" value="no" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;fontSize=10;" parent="1" source="s3" target="s4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="g4" value="yes" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;fontSize=10;" parent="1" source="s4" target="s5" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="g5" value="no (allowed)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;fontSize=10;" parent="1" source="s5" target="s6" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="g6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="s6" target="s7" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="g7" value="no" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;fontSize=10;" parent="1" source="s7" target="s8" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="g8" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="s8" target="s9" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="g9" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="s9" target="s10" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="g10" value="yes" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;fontSize=10;" parent="1" source="s10" target="s11" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="g11" value="yes" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;fontSize=10;" parent="1" source="s11" target="s12" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="g12" value="no" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;fontSize=10;" parent="1" source="s11" target="s13" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="g13" value="collapsed but no arrow" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;fontSize=10;" parent="1" source="s10" target="s14" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="g14" value="yes / yes / no / yes / yes" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;fontSize=10;strokeColor=#999999;dashed=1;" parent="1" source="s2" target="sX" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="t2" value="B — Heads-up (HUD) lifecycle" style="text;html=1;fontSize=15;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="720" y="20" width="400" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="k1" value="setHeadsUp(true)  — before&lt;br&gt;aeCollapsed = false&lt;br&gt;aeIsGroup   = false (if unset)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="720" y="70" width="300" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="k2" value="setHeadsUp(true) — after&lt;br&gt;expandGroupIfNeeded()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="720" y="155" width="300" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="k3" value="childCount == 0 ?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="760" y="230" width="220" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="k4" value="SINGLE path&lt;br&gt;calculateVisibleType → 1 (expanded)&lt;br&gt;getIntrinsicHeight → expandedChild.measuredHeight&lt;br&gt;getPinnedHeadsUpHeight → getMaxExpandHeight()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1080" y="230" width="330" height="75" as="geometry"/>
+                </mxCell>
+                <mxCell id="k5" value="GROUP path&lt;br&gt;aeIsGroup = true&lt;br&gt;parent setUserExpanded(true,true)&lt;br&gt;every child collapseChildNoAnim()&lt;br&gt;&lt;b&gt;size hooks all bail out&lt;/b&gt; (system sizes the group)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="720" y="330" width="300" height="90" as="geometry"/>
+                </mxCell>
+                <mxCell id="k6" value="late child attach&lt;br&gt;NotificationChildrenContainer.addNotification&lt;br&gt;(parent HU branch)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1080" y="330" width="330" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="k7" value="OEM without that container class&lt;br&gt;→ recovery inside calculateVisibleType&lt;br&gt;(!aeIsGroup &amp;&amp; isGroupSummaryRow) → expandGroupIfNeeded" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1080" y="410" width="330" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="k8" value="user swipes DOWN on the HUD&lt;br&gt;[9] tracks direction → [10] blocks launch&lt;br&gt;→ toggleHeadsUpExpandState(row)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="720" y="450" width="300" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="k9" value="setHeadsUp(false) — before&lt;br&gt;aeIsGroup = false&lt;br&gt;aeAutoExpanded = false&lt;br&gt;&lt;i&gt;row returns to the shade pool&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="720" y="550" width="300" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="h1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="k1" target="k2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="h2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="k2" target="k3" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="h3" value="yes → single" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;fontSize=10;" parent="1" source="k3" target="k4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="h4" value="no → group" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;fontSize=10;" parent="1" source="k3" target="k5" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="h5" value="child arrives later" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;fontSize=10;dashed=1;" parent="1" source="k4" target="k6" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="h6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;dashed=1;" parent="1" source="k6" target="k5" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="h7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;dashed=1;strokeColor=#d79b00;" parent="1" source="k7" target="k5" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="h8" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="k5" target="k8" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="h9" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;" parent="1" source="k8" target="k9" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="mx" value="&lt;b&gt;PREFERENCE / GATE MATRIX&lt;/b&gt;&lt;br&gt;&lt;br&gt;expand_shade_enabled        (default ON)  → hooks [1] [2] when !onKeyguard&lt;br&gt;expand_lockscreen_enabled   (default ON)  → hooks [1] [2] when onKeyguard&lt;br&gt;expand_headsup_enabled      (default ON)  → hooks [3] [4] [5] [6] [7] [11]&lt;br&gt;disable_headsup_popup_enabled (default ON) → hooks [9] [10]&lt;br&gt;headsup_max_lines           (default &quot;5&quot;, 0 = unlimited) → hook [11]&lt;br&gt;excluded_apps               (per-package skip, all guarded hooks)&lt;br&gt;disable_headsup_hooks_enabled (KILL-SWITCH, default OFF)&lt;br&gt;     → blocks expandGroupIfNeeded, the addNotification HU branch and [11]&lt;br&gt;     → does NOT block single-HUD expansion (by design)&lt;br&gt;ungroup_notifications_enabled (default ON) → &lt;b&gt;NO HOOK READS IT — dead pref&lt;/b&gt;" style="shape=note;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;size=18;align=left;spacingLeft=8;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="720" y="660" width="690" height="200" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>
