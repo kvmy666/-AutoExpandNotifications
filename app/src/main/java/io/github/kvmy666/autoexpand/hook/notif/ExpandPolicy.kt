@@ -18,6 +18,15 @@ data class RowFacts(
     val isPinned: Boolean,
     val isChildInGroup: Boolean,
     val isSummaryWithChildren: Boolean,
+    /**
+     * `FLAG_GROUP_SUMMARY`, read off the posted notification.
+     *
+     * The view-level [isSummaryWithChildren] and [isChildInGroup] only become true once the row
+     * has been attached under its summary, and rows are reconciled before that — so they are
+     * both false on the pass that matters. This flag and [groupKey] come from the notification
+     * itself and are correct from the first frame.
+     */
+    val isGroupSummary: Boolean = false,
     val expandedUngated: Boolean,        // isExpanded(true) — the honest read
     val hasUserChangedExpansion: Boolean,
     val userExpanded: Boolean,
@@ -30,6 +39,17 @@ data class RowFacts(
     val groupUserCollapsed: Boolean = false,
 ) {
     /**
+     * Whether the notification belongs to *any* group.
+     *
+     * Measured on OxygenOS 16: a standalone notification's group key is simply its own key
+     * (`0|pkg|2000|null|10441`), while anything grouped carries a `|g:` marker
+     * (`0|pkg|g:…TEST_GROUP`, `0|pkg|g:Aggregate_AlertingSection`). A ROM that does neither
+     * falls back to "standalone", which is the safe answer — it is what singles already do.
+     */
+    val belongsToGroup: Boolean
+        get() = groupKey?.contains(GROUP_MARKER) == true
+
+    /**
      * Android 16 bundles notifications into system sections (`g:Aggregate_AlertingSection`,
      * `g:Aggregate_SilentSection`). Those children look grouped but render standalone and have
      * no parent that will ever expand them — so they must be treated as singles.
@@ -38,11 +58,11 @@ data class RowFacts(
      * expanding children individually there is what breaks the grouped look.
      */
     val isSystemAggregateChild: Boolean
-        get() = isChildInGroup && (groupKey?.contains(SYSTEM_AGGREGATE_MARKER) == true)
+        get() = !isGroupSummary && (groupKey?.contains(SYSTEM_AGGREGATE_MARKER) == true)
 
     /** A child of a real, app-declared group — the parent drives it, so leave it alone. */
     val isAppGroupChild: Boolean
-        get() = isChildInGroup && !isSystemAggregateChild
+        get() = !isGroupSummary && belongsToGroup && !isSystemAggregateChild
 
     /** The user deliberately collapsed this row; SystemUI records it for us. */
     val userCollapsed: Boolean
@@ -51,6 +71,8 @@ data class RowFacts(
     companion object {
         /** Matches `…|g:Aggregate_AlertingSection`, `…|g:Aggregate_SilentSection`, etc. */
         const val SYSTEM_AGGREGATE_MARKER = "g:Aggregate_"
+        /** Present in the group key of every grouped notification, absent for singles. */
+        const val GROUP_MARKER = "|g:"
     }
 }
 
@@ -83,6 +105,8 @@ sealed interface Decision {
         UserCollapsed, GroupSummary, BackedOff,
         /** Group parents left alone because the toggle is off. */
         GroupParentsOff,
+        /** A summary whose children have not attached yet — writing anything now breaks it. */
+        GroupNotReady,
         /** A child whose group is still closed — expanding it would inflate the collapsed preview. */
         GroupCollapsed;
 
@@ -119,7 +143,13 @@ object ExpandPolicy {
         // GroupExpansionManager, and the summary's own content height is untouched. So it gets
         // its own decision and its own collapse memory — SystemUI never sets
         // mHasUserChangedExpansion on this path, so `userCollapsed` cannot see an arrow tap here.
-        if (facts.isSummaryWithChildren) {
+        if (facts.isGroupSummary) {
+            // The group primitive only works once the row has adopted its children: until then
+            // `setUserExpanded(true, true)` misses its group branch and falls through to the
+            // single path, which expands the summary's *own* content and tears the group apart
+            // in the shade. A later trigger catches it — summaries are reconciled on every
+            // render, so there is nothing to schedule.
+            if (!facts.isSummaryWithChildren) return Decision.Skip(Decision.Reason.GroupNotReady)
             if (!prefs.groupParentsEnabled)  return Decision.Skip(Decision.Reason.GroupParentsOff)
             if (facts.groupUserCollapsed)    return Decision.Skip(Decision.Reason.UserCollapsed)
             if (backedOff)                   return Decision.Skip(Decision.Reason.BackedOff)

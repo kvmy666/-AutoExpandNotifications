@@ -31,6 +31,9 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
     private companion object {
         /** Per-row token telling the hot `isExpanded` gate that this row may ignore the keyguard. */
         const val TOKEN = "aeV2LsAllow"
+        /** `Notification.FLAG_GROUP_SUMMARY` — read off the posted notification, so race-free. */
+        const val FLAG_GROUP_SUMMARY = 0x00000200
+
         const val GROUP_MANAGER_CLASS =
             "com.android.systemui.statusbar.notification.collection.render.GroupExpansionManagerImpl"
 
@@ -84,6 +87,10 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
             val key = (sbn?.let { XposedHelpers.callMethod(it, "getKey") } as? String) ?: return null
             val pkg = sbn.let { XposedHelpers.callMethod(it, "getPackageName") } as? String
             val groupKey = try { XposedHelpers.callMethod(sbn, "getGroupKey") as? String } catch (_: Throwable) { null }
+            val isGroupSummary = try {
+                val notif = XposedHelpers.callMethod(sbn, "getNotification")
+                (XposedHelpers.getIntField(notif, "flags") and FLAG_GROUP_SUMMARY) != 0
+            } catch (_: Throwable) { false }
             RowFacts(
                 key = key,
                 pkg = pkg,
@@ -93,6 +100,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                 isPinned = RowApi.callBool(RowApi.isPinned, row),
                 isChildInGroup = RowApi.callBool(RowApi.isChildInGroup, row),
                 isSummaryWithChildren = RowApi.callBool(RowApi.isSummaryWithChildren, row),
+                isGroupSummary = isGroupSummary,
                 expandedUngated = RowApi.isExpandedUngated(row),
                 hasUserChangedExpansion = RowApi.bool(RowApi.fHasUserChangedExpansion, row),
                 userExpanded = RowApi.bool(RowApi.fUserExpanded, row),
@@ -257,7 +265,10 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                                 // breaks the grouped look.
                                 is Decision.ExpandGroup -> Unit
                                 is Decision.Expand, is Decision.AlreadyExpanded -> {
-                                    if (facts.isSummaryWithChildren) return
+                                    // The SBN flag, not the view's: a summary whose children have
+                                    // not attached yet still must not have its own content
+                                    // expanded, and the view flag is false on exactly that pass.
+                                    if (facts.isGroupSummary) return
                                     setToken(row, true)
                                     param.args[0] = true
                                     RowStateStore.onApplied(facts.key)
