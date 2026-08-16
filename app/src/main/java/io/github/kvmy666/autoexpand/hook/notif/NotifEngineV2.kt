@@ -33,6 +33,18 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
         const val TOKEN = "aeV2LsAllow"
         const val GROUP_MANAGER_CLASS =
             "com.android.systemui.statusbar.notification.collection.render.GroupExpansionManagerImpl"
+
+        /**
+         * Row frames that mean *the user asked for this*. Everything else the row calls — most
+         * importantly `setHideSensitive` on every keyguard transition — is bookkeeping.
+         *
+         * `onClick` (OnClickListener) and `onExpandClicked` (OnExpandClickListener) are interface
+         * overrides and so survive R8 untouched; `performExpansion` / `setUserExpanded` are the
+         * AOSP names for the same gesture on ROMs that route it through the row.
+         */
+        val USER_INTENT_FRAMES = setOf(
+            "onClick", "onExpandClicked", "performExpansion", "setUserExpanded",
+        )
     }
 
     @Volatile private var prefsFacts = PrefsFacts(true, true, emptySet())
@@ -366,10 +378,13 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                         val expanded = param.args.getOrNull(1) == true
                         // A bulk collapse is SystemUI tidying up, not a decision — ignore it,
                         // or the toggle would switch itself off the first time the shade closes.
-                        if (!expanded && !calledFromRow()) return
+                        val via = if (expanded) "expand" else initiator() ?: run {
+                            NotifLog.d { "v2 group system collapse ignored" }
+                            return
+                        }
                         val key = XposedHelpers.callMethod(entry, "getKey") as? String ?: return
                         RowStateStore.onGroupUserExpansion(key, expanded)
-                        NotifLog.d { "v2 group user expanded=$expanded key=$key" }
+                        NotifLog.d { "v2 group user expanded=$expanded via=$via key=$key" }
                     } catch (_: Throwable) {}
                 }
             })
@@ -377,7 +392,38 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
         } catch (t: Throwable) { NotifLog.e("v2 group collapse memory failed: $t") }
     }
 
-    /** Only walked on a group collapse — rare enough that the stack capture costs nothing. */
-    private fun calledFromRow(): Boolean =
-        Throwable().stackTrace.any { it.className.startsWith(RowApi.ROW_CLASS) }
+    /**
+     * Names the click-path frame that asked for this collapse, or null when it was SystemUI's own
+     * bookkeeping.
+     *
+     * Deliberately **not** "is there a row frame anywhere in the stack" — that reads as a
+     * reasonable proxy for "the user" and is wrong in the direction that silently breaks the
+     * feature. Measured on device: entering the keyguard calls
+     * `ExpandableNotificationRow.setHideSensitive`, which collapses the group. That leaves a row
+     * frame on the stack, so the loose test marked every bundle as user-collapsed the first time
+     * the screen locked, and the group then stayed shut for good — which is exactly the bug this
+     * whole mechanism exists to prevent.
+     *
+     * So the test is positive rather than negative: the stack must contain a frame that *is* the
+     * expand gesture. Those names are stable in a way the surrounding classes are not — `onClick`
+     * and `onExpandClicked` are interface overrides, which R8 cannot rename, whereas the classes
+     * that hold them (`ExpandableNotificationRow$1`, `…$$ExternalSyntheticLambda0`) are R8 output
+     * and change between builds. A frame inside the manager short-circuits first, since
+     * `collapseGroups` / `onBeforeRenderList` are bulk resets by definition.
+     *
+     * Only walked on a collapse, so the stack capture costs nothing. Rejections are logged with
+     * their frame, so a ROM that routes the arrow somewhere new is one log line away.
+     */
+    private fun initiator(): String? {
+        for (f in Throwable().stackTrace) {
+            val c = f.className
+            if (c.startsWith(GROUP_MANAGER_CLASS)) {
+                if (f.methodName == "setGroupExpanded") continue   // the hooked frame itself
+                return null                                        // SystemUI's own bulk reset
+            }
+            if (c.startsWith(RowApi.ROW_CLASS) && f.methodName in USER_INTENT_FRAMES)
+                return f.methodName
+        }
+        return null
+    }
 }
