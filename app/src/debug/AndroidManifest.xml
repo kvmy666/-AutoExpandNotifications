@@ -11,6 +11,8 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="io.github.kvmy666.autoexpand.SET_PREF" />
+                <action android:name="io.github.kvmy666.autoexpand.POST_TEST" />
+                <action android:name="io.github.kvmy666.autoexpand.CANCEL_TEST" />
             </intent-filter>
         </receiver>
     </application>

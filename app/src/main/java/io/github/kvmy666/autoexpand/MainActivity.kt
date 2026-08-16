@@ -138,6 +138,12 @@ class MainActivity : ComponentActivity() {
         if (!prefs.contains("ungroup_notifications_enabled")) {
             prefs.edit().putBoolean("ungroup_notifications_enabled", true).apply()
         }
+        if (!prefs.contains("expand_group_parents_enabled")) {
+            prefs.edit()
+                .putBoolean("expand_group_parents_enabled", true)   // open bundles by default
+                .putBoolean("expand_group_children_enabled", false) // one-line children is stock
+                .apply()
+        }
         if (!prefs.contains("keyboard_enhancer_enabled")) {
             prefs.edit()
                 .putBoolean("keyboard_enhancer_enabled", true)

@@ -31,6 +31,8 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
     private companion object {
         /** Per-row token telling the hot `isExpanded` gate that this row may ignore the keyguard. */
         const val TOKEN = "aeV2LsAllow"
+        const val GROUP_MANAGER_CLASS =
+            "com.android.systemui.statusbar.notification.collection.render.GroupExpansionManagerImpl"
     }
 
     @Volatile private var prefsFacts = PrefsFacts(true, true, emptySet())
@@ -45,6 +47,13 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                 shadeEnabled      = prefs.isFeatureEnabled("expand_shade_enabled"),
                 lockscreenEnabled = prefs.isFeatureEnabled("expand_lockscreen_enabled"),
                 excludedApps      = prefs.getExcludedApps(),
+                // Parents default ON: a closed bundle is the thing the module exists to open.
+                // Children default OFF: one-line children are the stock grouped look, and
+                // expanding them is a taste call, not a fix.
+                groupParentsEnabled  = prefs.isFeatureEnabled("expand_group_parents_enabled") &&
+                                       RowApi.groupCapable,
+                groupChildrenEnabled = prefs.isOptInEnabled("expand_group_children_enabled") &&
+                                       RowApi.groupCapable,
             )
             lsGateEnabled = prefsFacts.lockscreenEnabled && RowApi.lockscreenCapable
             NotifLog.enabled = prefs.isOptInEnabled("notif_debug_logging")
@@ -52,6 +61,10 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
     }
 
     // ── facts capture ────────────────────────────────────────────────────────
+
+    private fun keyOf(row: Any): String? = try {
+        RowApi.sbnOf(row)?.let { XposedHelpers.callMethod(it, "getKey") } as? String
+    } catch (_: Throwable) { null }
 
     private fun capture(row: Any): RowFacts? {
         return try {
@@ -71,6 +84,8 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                 expandedUngated = RowApi.isExpandedUngated(row),
                 hasUserChangedExpansion = RowApi.bool(RowApi.fHasUserChangedExpansion, row),
                 userExpanded = RowApi.bool(RowApi.fUserExpanded, row),
+                groupExpanded = RowApi.callBool(RowApi.isGroupExpanded, row),
+                groupUserCollapsed = RowStateStore.isGroupCollapsedByUser(key),
             )
         } catch (_: Throwable) { null }
     }
@@ -97,14 +112,25 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                 applyExpanded(row, facts)
                 NotifLog.d { "v2 $trigger EXPAND key=${facts.key} kg=${facts.onKeyguard} aggChild=${facts.isSystemAggregateChild}" }
             }
+            is Decision.ExpandGroup -> {
+                applyGroupExpanded(row, facts)
+                NotifLog.d { "v2 $trigger EXPAND_GROUP key=${facts.key}" }
+            }
             is Decision.AlreadyExpanded -> {
                 // Still needs the token: on keyguard the row only *stays* expanded while the
                 // gate keeps rewriting the argument.
                 setToken(row, true)
+                // An already-open group still has to have its children reconciled: the group
+                // may have been opened by the user, or on a later pass than the one that
+                // opened it, and the children carry their own expansion state.
+                if (facts.isSummaryWithChildren) reconcileChildren(row, trigger)
                 NotifLog.d { "v2 $trigger already key=${facts.key} kg=${facts.onKeyguard}" }
             }
             is Decision.Skip -> {
                 if (decision.why.clearsLockscreenToken) setToken(row, false)
+                // The two group toggles are independent: with parents off but children on, a
+                // group the *user* opens still gets its rows expanded.
+                if (facts.isSummaryWithChildren && facts.groupExpanded) reconcileChildren(row, trigger)
                 NotifLog.d { "v2 $trigger skip=${decision.why} key=${facts.key}" }
             }
         }
@@ -123,6 +149,45 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
         RowStateStore.onApplied(facts.key)
     }
 
+    /**
+     * Opens a group summary.
+     *
+     * `setUserExpanded(true, allowChildExpansion = true)` is the *only* primitive used here.
+     * Verified in this ROM's bytecode: for a summary it hands off to
+     * `GroupExpansionManager.setGroupExpanded(entry, true)` and returns before touching
+     * `mUserExpanded`, `mHasUserChangedExpansion` or any height — the same call the expand arrow
+     * makes. `setChildrenExpanded` is deliberately not used: it drives the container directly and
+     * visibly breaks the grouped layout.
+     *
+     * SystemUI's own `shouldShowPublic()` guard sits in front of that branch, so a redacted group
+     * on the lock screen never opens.
+     */
+    private fun applyGroupExpanded(row: Any, facts: RowFacts) {
+        Attribution.ours {
+            try {
+                RowApi.setUserExpanded2?.invoke(row, true, true)
+            } catch (t: Throwable) {
+                NotifLog.d { "v2 group apply failed key=${facts.key}: $t" }
+            }
+        }
+        RowStateStore.onApplied(facts.key)
+        reconcileChildren(row, "group")
+    }
+
+    /**
+     * Runs the policy over the rows inside an open group.
+     *
+     * Children are not reachable from the engine's own triggers once the group opens — nothing
+     * re-fires on them — so the summary drives them. With the children toggle off every one of
+     * these ends in `skip=AppGroupChild` and nothing is written.
+     */
+    private fun reconcileChildren(summary: Any, trigger: String) {
+        if (!prefsFacts.groupChildrenEnabled) return
+        for (child in RowApi.attachedChildrenOf(summary)) {
+            try { reconcile(child, "$trigger/child") } catch (_: Throwable) {}
+        }
+    }
+
     // ── install ──────────────────────────────────────────────────────────────
 
     fun install(lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -134,7 +199,8 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
         }
         refreshPrefs()
         val cls = RowApi.rowClass ?: return
-        NotifLog.i("v2 engine installing (lsGate=$lsGateEnabled)")
+        NotifLog.i("v2 engine installing (lsGate=$lsGateEnabled groupCapable=${RowApi.groupCapable} " +
+                   "parents=${prefsFacts.groupParentsEnabled} children=${prefsFacts.groupChildrenEnabled})")
 
         // ── the lock-screen gate ────────────────────────────────────────────
         // Hottest hook in the engine: `isExpanded` runs from measure and from the stack
@@ -171,19 +237,46 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                             val decision = ExpandPolicy.decide(
                                 facts, prefsFacts, RowStateStore.isBackedOff(facts.key)
                             )
-                            if (decision is Decision.Expand || decision is Decision.AlreadyExpanded) {
-                                setToken(row, true)
-                                param.args[0] = true
-                                RowStateStore.onApplied(facts.key)
-                                NotifLog.d { "v2 setSystemExpanded rewritten key=${facts.key} kg=${facts.onKeyguard}" }
-                            } else {
-                                setToken(row, false)
+                            when (decision) {
+                                // A summary is handled after the call instead: opening a group is
+                                // a different primitive, and rewriting this argument would set
+                                // mIsSystemExpanded on the summary — expanding its own content
+                                // rather than the group, which is exactly the size-forcing that
+                                // breaks the grouped look.
+                                is Decision.ExpandGroup -> Unit
+                                is Decision.Expand, is Decision.AlreadyExpanded -> {
+                                    if (facts.isSummaryWithChildren) return
+                                    setToken(row, true)
+                                    param.args[0] = true
+                                    RowStateStore.onApplied(facts.key)
+                                    NotifLog.d { "v2 setSystemExpanded rewritten key=${facts.key} kg=${facts.onKeyguard}" }
+                                }
+                                is Decision.Skip -> setToken(row, false)
                             }
+                        } catch (_: Throwable) {}
+                    }
+
+                    /**
+                     * The group-parent trigger. Measured on the legacy engine and unchanged here:
+                     * `setSystemExpanded(false)` fires on the group parent every time the shade or
+                     * lock screen renders it, which makes it the one reliable per-open hook for
+                     * summaries. Running in `after` keeps the group write clear of SystemUI's own
+                     * in-flight expansion bookkeeping.
+                     */
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        try {
+                            if (Attribution.isOurs()) return
+                            if (!prefsFacts.groupParentsEnabled && !prefsFacts.groupChildrenEnabled) return
+                            val row = param.thisObject
+                            if (!RowApi.callBool(RowApi.isSummaryWithChildren, row)) return
+                            reconcile(row, "setSystemExpanded")
                         } catch (_: Throwable) {}
                     }
                 })
             } catch (t: Throwable) { NotifLog.e("v2 setSystemExpanded hook failed: $t") }
         }
+
+        installGroupCollapseMemory(lpparam)
 
         // ── cold triggers ───────────────────────────────────────────────────
         // Deliberately no per-frame driver. These are the points where the row's situation
@@ -230,4 +323,61 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
 
         NotifLog.i("v2 engine installed")
     }
+
+    /**
+     * Remembers that the user closed a group, so the parent toggle stops reopening it.
+     *
+     * `GroupExpansionManagerImpl.setGroupExpanded` is the single chokepoint for group state —
+     * every path in this build funnels through it. Its full caller census, read out of the
+     * device's own dex:
+     *
+     * | caller | expanded | meaning |
+     * |---|---|---|
+     * | `ExpandableNotificationRow$1.onClick` | toggled | **the expand arrow — the user** |
+     * | `GroupExpansionManagerImpl.collapseGroups` | false | bulk reset when the shade closes |
+     * | `GroupExpansionManagerImpl$$…Lambda0.onBeforeRenderList` | false | summary left the list |
+     * | `NotificationRemoteInputManager.activateRemoteInput` | true | inline reply opened it |
+     * | `StatusBarRemoteInputCallback$$…Lambda0.run` | true | inline reply, deferred |
+     *
+     * Note what is *not* in that list: `ExpandableNotificationRow.setUserExpanded`. On stock
+     * AOSP the arrow reaches the group through it, but this ROM's listener calls the manager
+     * directly — so hooking the row's setter observes nothing, and this is the only place the
+     * distinction can be made.
+     *
+     * The two collapse paths that are *not* the user are bulk resets originating inside the
+     * manager, so a frame from the row class is what separates a tap from a shade close. That
+     * test is used rather than the anonymous class name because `$1` and `$$ExternalSynthetic…`
+     * are R8 output and change between builds, while the row's own class name is stable — it is
+     * already the module's one hard dependency.
+     */
+    private fun installGroupCollapseMemory(lpparam: XC_LoadPackage.LoadPackageParam) {
+        val cls = try {
+            lpparam.classLoader.loadClass(GROUP_MANAGER_CLASS)
+        } catch (t: Throwable) {
+            NotifLog.e("v2 group collapse memory: $GROUP_MANAGER_CLASS not found ($t)")
+            return
+        }
+        try {
+            val hooks = XposedBridge.hookAllMethods(cls, "setGroupExpanded", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    try {
+                        if (Attribution.isOurs()) return
+                        val entry = param.args.getOrNull(0) ?: return
+                        val expanded = param.args.getOrNull(1) == true
+                        // A bulk collapse is SystemUI tidying up, not a decision — ignore it,
+                        // or the toggle would switch itself off the first time the shade closes.
+                        if (!expanded && !calledFromRow()) return
+                        val key = XposedHelpers.callMethod(entry, "getKey") as? String ?: return
+                        RowStateStore.onGroupUserExpansion(key, expanded)
+                        NotifLog.d { "v2 group user expanded=$expanded key=$key" }
+                    } catch (_: Throwable) {}
+                }
+            })
+            if (hooks.isEmpty()) NotifLog.e("v2 setGroupExpanded bound 0 methods")
+        } catch (t: Throwable) { NotifLog.e("v2 group collapse memory failed: $t") }
+    }
+
+    /** Only walked on a group collapse — rare enough that the stack capture costs nothing. */
+    private fun calledFromRow(): Boolean =
+        Throwable().stackTrace.any { it.className.startsWith(RowApi.ROW_CLASS) }
 }

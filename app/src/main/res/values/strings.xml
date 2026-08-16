@@ -13,6 +13,10 @@
     <string name="expand_headsup_desc">Show expanded layout in heads-up banners</string>
     <string name="expand_lockscreen_title">Expand on lock screen</string>
     <string name="expand_lockscreen_desc">Allow expanded notifications on the lock screen</string>
+    <string name="expand_group_parents_title">Open grouped notifications</string>
+    <string name="expand_group_parents_desc">Open every group automatically in the shade and on the lock screen, so its notifications are visible without tapping the arrow. Closing a group by hand keeps it closed.</string>
+    <string name="expand_group_children_title">Expand notifications inside a group</string>
+    <string name="expand_group_children_desc">Once a group is open, expand each notification inside it too. Off keeps them as single lines — the stock grouped look.</string>
     <string name="disable_back_haptic_title">Disable back gesture haptic</string>
     <string name="disable_back_haptic_desc">Suppress OxygenOS back swipe vibration</string>
 

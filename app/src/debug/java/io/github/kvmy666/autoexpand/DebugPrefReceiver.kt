@@ -27,7 +27,12 @@ import android.util.Log
 class DebugPrefReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != ACTION) return
+        when (intent.action) {
+            ACTION_POST_TEST   -> return postTest(context, intent)
+            ACTION_CANCEL_TEST -> return cancelTest(context)
+            ACTION -> Unit
+            else -> return
+        }
         val key = intent.getStringExtra("key") ?: return
         val value = intent.getStringExtra("value") ?: return
         val type = intent.getStringExtra("type") ?: "bool"
@@ -48,7 +53,34 @@ class DebugPrefReceiver : BroadcastReceiver() {
         }
     }
 
+    /**
+     * Fires a [TestNotifier] shape from the host, so grouped/lock-screen cases can be exercised
+     * without physically touching the phone — the lock-screen ones are impossible otherwise,
+     * since posting them requires the app to be backgrounded behind the keyguard.
+     *
+     *   adb shell am broadcast -a io.github.kvmy666.autoexpand.POST_TEST \
+     *       -n io.github.kvmy666.autoexpand/.DebugPrefReceiver --es kind Group --es delay 0
+     */
+    private fun postTest(context: Context, intent: Intent) {
+        val name = intent.getStringExtra("kind") ?: "Group"
+        val delay = intent.getStringExtra("delay")?.toLongOrNull() ?: 0L
+        val kind = TestNotifier.Kind.entries.firstOrNull { it.name.equals(name, true) }
+        if (kind == null) {
+            Log.e("AutoExpand", "POST_TEST: unknown kind '$name' — have ${TestNotifier.Kind.entries.map { it.name }}")
+            return
+        }
+        TestNotifier.post(context, kind, delay)
+        Log.d("AutoExpand", "POST_TEST: ${kind.name} in ${delay}ms")
+    }
+
+    private fun cancelTest(context: Context) {
+        TestNotifier.cancelAll(context)
+        Log.d("AutoExpand", "CANCEL_TEST: cleared")
+    }
+
     private companion object {
         const val ACTION = "io.github.kvmy666.autoexpand.SET_PREF"
+        const val ACTION_POST_TEST = "io.github.kvmy666.autoexpand.POST_TEST"
+        const val ACTION_CANCEL_TEST = "io.github.kvmy666.autoexpand.CANCEL_TEST"
     }
 }

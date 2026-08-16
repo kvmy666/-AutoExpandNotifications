@@ -32,6 +32,8 @@ object RowApi {
     var isChildInGroup: Method? = null; private set
     var isPinned: Method? = null; private set
     var isSummaryWithChildren: Method? = null; private set
+    var isGroupExpanded: Method? = null; private set   // may be `isGroupExpanded$1` after R8
+    var shouldShowPublic: Method? = null; private set
     private var getEntry: Method? = null
     private var getEntryLegacy: Method? = null
 
@@ -42,6 +44,8 @@ object RowApi {
     var fHasUserChangedExpansion: Field? = null; private set
     var fIsSystemExpanded: Field? = null; private set
     var fChildrenExpanded: Field? = null; private set
+    private var fChildrenContainer: Field? = null
+    private var fAttachedChildren: Field? = null
 
     @Volatile private var bound = false
 
@@ -68,6 +72,10 @@ object RowApi {
         isChildInGroup       = method(cls, "isChildInGroup")
         isPinned             = method(cls, "isPinned")
         isSummaryWithChildren = method(cls, "isSummaryWithChildren")
+        // R8 renames the group-expansion read on some builds — measured as `isGroupExpanded$1`
+        // on OxygenOS 16 because a synthetic accessor already owns the plain name.
+        isGroupExpanded      = method(cls, "isGroupExpanded") ?: method(cls, "isGroupExpanded\$1")
+        shouldShowPublic     = method(cls, "shouldShowPublic")
         getEntry             = method(cls, "getEntry")
         getEntryLegacy       = method(cls, "getEntryLegacy")
 
@@ -77,6 +85,8 @@ object RowApi {
         fHasUserChangedExpansion = field(cls, "mHasUserChangedExpansion")
         fIsSystemExpanded        = field(cls, "mIsSystemExpanded")
         fChildrenExpanded        = field(cls, "mChildrenExpanded")
+        fChildrenContainer       = field(cls, "mChildrenContainer")
+        fAttachedChildren        = fChildrenContainer?.type?.let { field(it, "mAttachedChildren") }
 
         Log.d(TAG, "RowApi caps: $caps")
         if (!usable) Log.e(TAG, "RowApi: insufficient capabilities — v2 engine will stay off")
@@ -90,7 +100,12 @@ object RowApi {
                 "summaryKids=${b(isSummaryWithChildren)} entry=${b(getEntry)}/${b(getEntryLegacy)} " +
                 "fHU=${b(fIsHeadsUp)} fKG=${b(fOnKeyguard)} fUserExp=${b(fUserExpanded)} " +
                 "fUserChanged=${b(fHasUserChangedExpansion)} fSysExp=${b(fIsSystemExpanded)} " +
-                "fKidsExp=${b(fChildrenExpanded)}"
+                "fKidsExp=${b(fChildrenExpanded)} groupExp=${b(isGroupExpanded)} " +
+                "showPublic=${b(shouldShowPublic)} kids=${b(fChildrenContainer)}/${b(fAttachedChildren)}"
+
+    /** True when the group parent/children toggles have everything they need on this ROM. */
+    val groupCapable: Boolean
+        get() = isSummaryWithChildren != null && isGroupExpanded != null && setUserExpanded2 != null
 
     private fun b(o: Any?) = if (o != null) 1 else 0
 
@@ -132,6 +147,19 @@ object RowApi {
 
     /** `isExpanded(allowOnKeyguard = true)` — the honest read; the no-arg form does not exist. */
     fun isExpandedUngated(row: Any): Boolean = callBool(isExpandedArg, row, true)
+
+    /**
+     * The rows currently attached under a group summary, or empty when this is not a summary.
+     *
+     * Read straight off `mChildrenContainer.mAttachedChildren` rather than through
+     * `getAttachedChildren()`, which several OEM builds do not declare. A defensive copy is
+     * returned so the caller can expand rows without iterating SystemUI's live list.
+     */
+    @Suppress("UNCHECKED_CAST")
+    fun attachedChildrenOf(row: Any): List<Any> = try {
+        val container = fChildrenContainer?.get(row) ?: return emptyList()
+        (fAttachedChildren?.get(container) as? List<Any>)?.toList() ?: emptyList()
+    } catch (_: Throwable) { emptyList() }
 
     fun entryOf(row: Any): Any? =
         try { getEntry?.invoke(row) } catch (_: Throwable) { null }

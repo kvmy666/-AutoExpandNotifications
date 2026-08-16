@@ -33,6 +33,15 @@ object RowStateStore {
         var wipes = 0
         var lastWipeTs = 0L
         var lastApplyTs = 0L
+        /**
+         * The user closed this group with the arrow.
+         *
+         * Needed because the group path inside `setUserExpanded` returns before it writes
+         * `mHasUserChangedExpansion`, so — unlike a single row — SystemUI keeps no record that
+         * the collapse was deliberate. Without this the parent toggle would immediately reopen
+         * every group the user just closed.
+         */
+        var groupCollapsedByUser = false
     }
 
     private val states = object : LinkedHashMap<String, KeyState>(64, 0.75f, true) {
@@ -77,6 +86,19 @@ object RowStateStore {
         }
         return true
     }
+
+    /**
+     * Records an arrow tap on a group summary. [expanded] false means the user closed it and we
+     * must stop reopening it; true is the user reopening it themselves, which clears the memory.
+     */
+    @Synchronized
+    fun onGroupUserExpansion(key: String, expanded: Boolean) {
+        state(key).groupCollapsedByUser = !expanded
+    }
+
+    @Synchronized
+    fun isGroupCollapsedByUser(key: String): Boolean =
+        states[key]?.groupCollapsedByUser == true
 
     /** Called when a notification is genuinely reposted — a clean slate. */
     @Synchronized

@@ -91,6 +91,8 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     var headsUpEnabled     by remember { mutableStateOf(prefs.getBoolean("expand_headsup_enabled", true)) }
     var disableHeadsupHooks by remember { mutableStateOf(prefs.getBoolean("disable_headsup_hooks_enabled", false)) }
     var lockscreenEnabled  by remember { mutableStateOf(prefs.getBoolean("expand_lockscreen_enabled", true)) }
+    var groupParentsEnabled  by remember { mutableStateOf(prefs.getBoolean("expand_group_parents_enabled", true)) }
+    var groupChildrenEnabled by remember { mutableStateOf(prefs.getBoolean("expand_group_children_enabled", false)) }
     var backHapticEnabled  by remember { mutableStateOf(prefs.getBoolean("disable_back_haptic_enabled", true)) }
 
     // ── System Behavior state ─────────────────────────────────────────────────
@@ -333,6 +335,23 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
                                 description = stringResource(R.string.expand_lockscreen_desc),
                                 checked = lockscreenEnabled,
                                 onCheckedChange = { lockscreenEnabled = it; onToggle("expand_lockscreen_enabled", it) }
+                            )
+                        }
+
+                        // ── Grouped notifications ──
+                        SettingsCard {
+                            SectionLabel("Grouped notifications")
+                            ToggleRow(
+                                title = stringResource(R.string.expand_group_parents_title),
+                                description = stringResource(R.string.expand_group_parents_desc),
+                                checked = groupParentsEnabled,
+                                onCheckedChange = { groupParentsEnabled = it; onToggle("expand_group_parents_enabled", it) }
+                            )
+                            ToggleRow(
+                                title = stringResource(R.string.expand_group_children_title),
+                                description = stringResource(R.string.expand_group_children_desc),
+                                checked = groupChildrenEnabled,
+                                onCheckedChange = { groupChildrenEnabled = it; onToggle("expand_group_children_enabled", it) }
                             )
                         }
 

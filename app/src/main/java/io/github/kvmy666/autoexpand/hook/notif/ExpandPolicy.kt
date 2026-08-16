@@ -21,6 +21,13 @@ data class RowFacts(
     val expandedUngated: Boolean,        // isExpanded(true) — the honest read
     val hasUserChangedExpansion: Boolean,
     val userExpanded: Boolean,
+    /**
+     * `isGroupExpanded()` — whether this row's group is open. Meaningful on the summary *and* on
+     * a child (it resolves through the summary), which is what lets a child ask "am I visible?".
+     */
+    val groupExpanded: Boolean = false,
+    /** The user collapsed this group with the arrow; tracked by us because SystemUI does not. */
+    val groupUserCollapsed: Boolean = false,
 ) {
     /**
      * Android 16 bundles notifications into system sections (`g:Aggregate_AlertingSection`,
@@ -52,11 +59,20 @@ data class PrefsFacts(
     val shadeEnabled: Boolean,
     val lockscreenEnabled: Boolean,
     val excludedApps: Set<String>,
+    /** Open every group summary, so a bundled app's rows are visible without a tap. */
+    val groupParentsEnabled: Boolean = false,
+    /** Inside an open group, expand each child too instead of leaving them one-line. */
+    val groupChildrenEnabled: Boolean = false,
 )
 
 sealed interface Decision {
-    /** Drive this row to expanded. */
+    /** Drive this row to expanded — the row's own content, via `setSystemExpanded`. */
     data object Expand : Decision
+    /**
+     * Open this group summary — a different primitive entirely: `setUserExpanded(true, true)`,
+     * which routes to `GroupExpansionManager` instead of touching this row's content height.
+     */
+    data object ExpandGroup : Decision
     /** Eligible, but already in the desired state — do nothing. */
     data object AlreadyExpanded : Decision
     /** Not our business. [why] is logged so a wrong skip is diagnosable. */
@@ -64,7 +80,11 @@ sealed interface Decision {
 
     enum class Reason {
         FeatureOff, PkgExcluded, HeadsUp, Pinned, AppGroupChild,
-        UserCollapsed, GroupSummary, BackedOff;
+        UserCollapsed, GroupSummary, BackedOff,
+        /** Group parents left alone because the toggle is off. */
+        GroupParentsOff,
+        /** A child whose group is still closed — expanding it would inflate the collapsed preview. */
+        GroupCollapsed;
 
         /**
          * Whether the lock-screen token should be dropped for this skip.
@@ -94,12 +114,28 @@ object ExpandPolicy {
         if (facts.pkg != null && facts.pkg in prefs.excludedApps)
             return Decision.Skip(Decision.Reason.PkgExcluded)
 
+        // ── Group summary ────────────────────────────────────────────────────────────────
+        // Opening a group is not the same operation as expanding a row: it moves a flag in
+        // GroupExpansionManager, and the summary's own content height is untouched. So it gets
+        // its own decision and its own collapse memory — SystemUI never sets
+        // mHasUserChangedExpansion on this path, so `userCollapsed` cannot see an arrow tap here.
+        if (facts.isSummaryWithChildren) {
+            if (!prefs.groupParentsEnabled)  return Decision.Skip(Decision.Reason.GroupParentsOff)
+            if (facts.groupUserCollapsed)    return Decision.Skip(Decision.Reason.UserCollapsed)
+            if (backedOff)                   return Decision.Skip(Decision.Reason.BackedOff)
+            return if (facts.groupExpanded) Decision.AlreadyExpanded else Decision.ExpandGroup
+        }
+
+        // ── Group child ──────────────────────────────────────────────────────────────────
         // A child of a real app group is driven by its summary. A child of a *system* bundle
         // is not — it is standalone in everything but name, so it falls through and expands.
-        if (facts.isAppGroupChild) return Decision.Skip(Decision.Reason.AppGroupChild)
-
-        // Group summaries keep the legacy path; this driver only handles singles.
-        if (facts.isSummaryWithChildren) return Decision.Skip(Decision.Reason.GroupSummary)
+        if (facts.isAppGroupChild) {
+            if (!prefs.groupChildrenEnabled) return Decision.Skip(Decision.Reason.AppGroupChild)
+            // While the group is closed the container sizes itself from each child's intrinsic
+            // height, so expanding children here would inflate the collapsed preview.
+            if (!facts.groupExpanded)        return Decision.Skip(Decision.Reason.GroupCollapsed)
+            // else: fall through and expand like any other row.
+        }
 
         // The user's own collapse always wins, and SystemUI maintains the flag for us.
         if (facts.userCollapsed) return Decision.Skip(Decision.Reason.UserCollapsed)
