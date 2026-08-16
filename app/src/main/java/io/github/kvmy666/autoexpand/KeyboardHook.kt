@@ -41,6 +41,7 @@ import android.view.inputmethod.ExtractedText
 import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputConnectionWrapper
+import android.view.inputmethod.InputContentInfo
 import android.view.inputmethod.TextAttribute
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -124,6 +125,32 @@ class KeyboardHook : IXposedHookLoadPackage {
     // Cache so we hand the same wrapper back for the same underlying connection.
     @Volatile private var icWrapReal: InputConnection? = null
     @Volatile private var icWrapWrapper: InputConnection? = null
+
+    // ── Rich content (GIF / sticker) pass-through ──
+    // While this is set (per-thread), getCurrentInputConnection() hands back the REAL
+    // connection instead of our wrapper.
+    //
+    // WHY: inserting a GIF or sticker goes through InputConnection.commitContent().
+    // The receiving app is handed a content:// URI it can only open if the framework
+    // grants it read permission, and the code that creates that grant identifies the
+    // caller by REFERENCE — it proceeds only when the connection commitContent was
+    // invoked on is the very same object getCurrentInputConnection() returns.
+    // (Historically that check lived in InputMethodService.exposeContent(); no method
+    // by that name exists on Android 16, but the behaviour is unchanged.)
+    //
+    // Our wrapper is a different object, so the check fails and the grant is silently
+    // skipped. commitContent still reports success to Gboard, so the keyboard thinks
+    // it worked, but the app can't read the file and nothing is sent. The giveaway in
+    // logcat is these two lines in the same millisecond:
+    //
+    //   CommitContentHelper: Committed image with mime-type=[image/gif] ... success=true
+    //   ContentProviderHelper: Permission Denial: opening provider ...fileprovider
+    //                          from ProcessRecord{...target app}
+    //
+    // Unwrapping for the duration of the call makes the check pass. Set from BOTH
+    // ends so it holds no matter which connection object Gboard committed through:
+    // our wrapper's commitContent override, and the grant method itself.
+    private val icUnwrap = ThreadLocal.withInitial { false }
 
     // Last drag position of the floating selection bar (null = default placement).
     // Persisted across opens so the bar reappears where the user left it.
@@ -1473,6 +1500,9 @@ class KeyboardHook : IXposedHookLoadPackage {
                 imsClass, lpparam.classLoader, "getCurrentInputConnection",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
+                        // A GIF/sticker commit is in flight — leave the REAL connection
+                        // in place so the URI grant's identity check passes (see icUnwrap).
+                        if (icUnwrap.get() == true) return
                         val real = param.result as? InputConnection ?: return
                         if (real is SearchRedirectConnection) return
                         val cached = icWrapWrapper
@@ -1484,6 +1514,42 @@ class KeyboardHook : IXposedHookLoadPackage {
             XposedBridge.log("$TAG [KB] getCurrentInputConnection wrap installed")
         } catch (t: Throwable) {
             XposedBridge.log("$TAG [KB] getCurrentInputConnection hook failed: ${t.message}")
+        }
+
+        // Unwrap around the grant method too. Covers the case where Gboard commits
+        // through a connection reference it cached itself rather than through our
+        // wrapper — then our commitContent override never runs, but this still lets the
+        // grant through. Inert on Android 16 (no such method); the override carries it.
+        try {
+            val hook = object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) { icUnwrap.set(true) }
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    icUnwrap.set(false)
+                    XposedBridge.log("$TAG [KB] rich-content grant passed through")
+                }
+            }
+            // Matched by SIGNATURE, not by name: the grant hook has historically been
+            // called exposeContent() but is absent under that name on Android 16, so
+            // look for whatever method takes (InputContentInfo, InputConnection) —
+            // that pair is unambiguous — anywhere up the service's class hierarchy.
+            var cls: Class<*>? = XposedHelpers.findClass(imsClass, lpparam.classLoader)
+            var hooked = 0
+            while (cls != null && hooked == 0) {
+                for (m in cls.declaredMethods) {
+                    val p = m.parameterTypes
+                    if (p.size == 2 &&
+                        InputContentInfo::class.java.isAssignableFrom(p[0]) &&
+                        InputConnection::class.java.isAssignableFrom(p[1])) {
+                        XposedBridge.hookMethod(m, hook)
+                        hooked++
+                        XposedBridge.log("$TAG [KB] rich-content grant hook on ${cls!!.name}.${m.name}")
+                    }
+                }
+                cls = cls.superclass
+            }
+            if (hooked == 0) XposedBridge.log("$TAG [KB] no grant method found — relying on commitContent unwrap")
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG [KB] rich-content grant hook failed: ${t.message}")
         }
     }
 
@@ -1543,6 +1609,22 @@ class KeyboardHook : IXposedHookLoadPackage {
                 return true
             }
             return super.sendKeyEvent(event)
+        }
+        // GIF / sticker insertion. Never redirected into the clipboard-search editor —
+        // that editor holds plain text only, and the image belongs in the host app
+        // either way. Unwrapped for the duration of the call so the framework grants
+        // the receiving app read access to the URI (see icUnwrap).
+        override fun commitContent(
+            inputContentInfo: InputContentInfo,
+            flags: Int,
+            opts: android.os.Bundle?
+        ): Boolean {
+            icUnwrap.set(true)
+            return try {
+                super.commitContent(inputContentInfo, flags, opts)
+            } finally {
+                icUnwrap.set(false)
+            }
         }
         override fun commitCompletion(text: CompletionInfo?): Boolean =
             edit { it.commitCompletion(text) } ?: super.commitCompletion(text)
