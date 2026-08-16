@@ -290,6 +290,22 @@ They are independent — children-only means "when *I* open a group, its rows co
     AOSP's `updateExpansionStates()` is gone under the async-group-header-inflation flag, so
     `mIsSystemChildExpanded` is effectively unowned and nothing fights a write to it.
 
+15. **`isChildInGroup()` / `isSummaryWithChildren()` are view state and are FALSE on the pass that
+    matters.** They only flip once the row is attached under its summary, which is after the
+    engine first reconciles it. Classify from the `StatusBarNotification` instead — it is correct
+    from the first frame:
+    - `FLAG_GROUP_SUMMARY` (0x200) on `sbn.getNotification().flags` → this row is a summary.
+    - group key carries `|g:` → grouped; otherwise standalone. On OxygenOS 16 a single's group key
+      is **its own key** (`0|pkg|2000|null|10441`), not the AOSP `c:` form — so test for the
+      presence of `|g:`, whose failure mode is "treat as single", the existing behaviour.
+
+    Symptom when this is got wrong: an app group's children render as separate fully-expanded
+    cards scattered through the shade and the summary's own content is expanded too. Almost
+    certainly also the real story behind the old engine's ~10% failure rate (finding 4).
+16. **A summary must be held back until its children attach** (`skip=GroupNotReady`).
+    `setUserExpanded(true, true)` only reaches its group branch when `mIsSummaryWithChildren` is
+    set; before that it falls through to the single path and expands the summary's own content.
+
 **Verified on device** (CPH2747, OxygenOS 16 — screenshots + `AENotif` traces):
 groups open in shade and with `kg=true`; children follow their toggle and render natively (image
 previews, action buttons) with no forced sizing; a manual collapse survives shade close/reopen
@@ -315,3 +331,21 @@ toggle working there is nothing to tap.
 
 Note the engine never force-collapses anything, so turning a toggle **off** does not un-expand rows
 that are already expanded — it stops new writes. Restart SystemUI for a clean read.
+
+**Full test-shape sweep** (`POST_TEST`, shade, one shape at a time) — all pass:
+
+| Shape | Expected | Result |
+|---|---|---|
+| BigText | all four body lines | ✅ |
+| Messaging | all three messages | ✅ |
+| Inbox | all five lines | ✅ |
+| LongText | expanded; the system's own clamp shows 10 of 14 in the shade | ✅ (not our clamp — `headsup_max_lines` is heads-up only) |
+| Silent | expanded in the Silent section, no banner | ✅ |
+| AutoGroupFlood | five singles expanded; aggregate summary opens once ready | ✅ |
+| Group | children stay one-line; summary `GroupNotReady` → `EXPAND_GROUP` → `already` | ✅ |
+
+**Confirmed NOT ours:** a two-child app-declared group renders flattened, with its children as
+separate top-level rows and no summary. It does exactly the same with
+`disable_headsup_hooks_enabled = 1` and every expand pref off — i.e. with no hook of ours running —
+so it is stock OxygenOS 16. Do not "fix" it. `ungroup_notifications_enabled` is still a dead pref
+and is not involved.
