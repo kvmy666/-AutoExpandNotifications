@@ -28,6 +28,7 @@ is **human visual verification** (§5) — the automated evidence is done.
 | `ad022e5` | Baseline evidence log (static bytecode + runtime trace of the 3.2.1 engine) |
 | `cb7c9bc` | Probe upgraded to a trigger census; captured the lock-screen oscillation |
 | `d9945b3` | **The v2 engine** + debug SET_PREF receiver + engine-selection bugfix |
+| `866ecef` | **Group parent + children toggles** (§11) + POST_TEST/CANCEL_TEST broadcasts |
 
 - Version still `30201` / `3.2.1` — deliberately not bumped yet.
 
@@ -41,8 +42,10 @@ Debug APK installed with these prefs live:
 ```
 notif_engine_v2      = 1     <- v2 is ACTIVE
 notif_debug_logging  = 1
-notif_probe_enabled  = 1     <- verbose; turn off for normal daily use
+notif_probe_enabled  = 0     <- verbose; leave off for normal daily use
 expand_shade_enabled = 1  expand_lockscreen_enabled = 1  expand_headsup_enabled = 1
+expand_group_parents_enabled  = 1    <- groups open automatically
+expand_group_children_enabled = 0    <- rows inside a group stay one-line
 disable_headsup_hooks_enabled = 0
 ```
 
@@ -96,6 +99,18 @@ export JAVA_HOME="C:/Program Files/Android/Android Studio/jbr"
 ```bash
 "$ADB" shell 'cmd notification post -S bigtext -t "Title" tag1 "line one. line two. line three."'
 # styles: bigtext | inbox | messaging | bigpicture | media
+```
+
+`cmd notification post` cannot build a **grouped** notification, so debug builds expose the app's
+own sender over the same receiver. `kind` is any `TestNotifier.Kind` name; `delay` is in ms and is
+what makes a lock-screen test possible at all (the app must be behind the keyguard when it fires):
+
+```bash
+"$ADB" shell "am broadcast -a io.github.kvmy666.autoexpand.POST_TEST \
+  -n io.github.kvmy666.autoexpand/.DebugPrefReceiver --es kind Group --es delay 0"
+# kinds: BigText | Messaging | Inbox | LongText | Group | AutoGroupFlood | Silent
+"$ADB" shell "am broadcast -a io.github.kvmy666.autoexpand.CANCEL_TEST \
+  -n io.github.kvmy666.autoexpand/.DebugPrefReceiver"
 ```
 
 **Drive the UI:** lock `input keyevent 26`; wake `input keyevent 224`; unlock swipe
@@ -211,3 +226,70 @@ early-return via `useV2()`.
 `docs/trace-v2-lockscreen.log` (v2 on LS). `docs/notif-engine-v2-findings.md` is the full evidence
 log; `docs/notifications-ar.md` + `docs/notifications-architecture.drawio` describe the *old*
 architecture.
+
+## 11. Grouped notifications (added after the v2 engine)
+
+Two toggles, in **Notifications → Grouped notifications**:
+
+| Pref | Default | Effect |
+|---|---|---|
+| `expand_group_parents_enabled` | **ON** | Every group summary opens itself in shade and on LS |
+| `expand_group_children_enabled` | **OFF** | Inside an open group, expand each row too |
+
+They are independent — children-only means "when *I* open a group, its rows come out expanded".
+
+**The primitives, and why these and not others.** Read out of this device's dex, not guessed:
+
+- **Parent** — `setUserExpanded(true, allowChildExpansion = true)`. For a summary this branches to
+  `GroupExpansionManager.setGroupExpanded(entry, true)` and **returns** before it writes
+  `mUserExpanded`, `mHasUserChangedExpansion` or any height. It is exactly what the arrow does.
+  `setChildrenExpanded` remains forbidden — it drives the container directly and breaks the look.
+  SystemUI's own `shouldShowPublic()` sits in front of that branch, so a redacted group never opens.
+- **Child** — the ordinary `setSystemExpanded` path, gated on `isGroupExpanded()`. While a group is
+  closed the container sizes itself from each child's intrinsic height, so expanding children then
+  would inflate the collapsed preview.
+- **Trigger for summaries** — the *after* phase of `setSystemExpanded`. It fires on the parent every
+  time the shade renders it (this is the legacy engine's trigger, re-used). The *before*-phase
+  argument rewrite now **skips summaries**: setting `mIsSystemExpanded` on a summary expands its own
+  content, not the group.
+
+**Facts established — do not re-derive:**
+
+10. **The arrow does not reach the group through `setUserExpanded` on this ROM.**
+    `ExpandableNotificationRow$1.onClick` calls `GroupExpansionManagerImpl.setGroupExpanded`
+    directly. Hooking the row's setter observes nothing. Full caller census of that manager method:
+
+    | caller | expanded | meaning |
+    |---|---|---|
+    | `ExpandableNotificationRow$1.onClick` | toggled | the expand arrow — **the user** |
+    | `GroupExpansionManagerImpl.collapseGroups` | false | bulk reset when the shade closes |
+    | `GroupExpansionManagerImpl$$…Lambda0.onBeforeRenderList` | false | summary left the list |
+    | `NotificationRemoteInputManager.activateRemoteInput` | true | inline reply opened it |
+    | `StatusBarRemoteInputCallback$$…Lambda0.run` | true | inline reply, deferred |
+
+    Both non-user collapses originate *inside* the manager, so the presence of a frame from
+    `ExpandableNotificationRow` is what separates a tap from a shade close. That test is used
+    rather than the class names `$1` / `$$ExternalSynthetic…`, which are R8 output.
+11. **SystemUI keeps no record that a group collapse was deliberate** — the group branch of
+    `setUserExpanded` returns before writing `mHasUserChangedExpansion`. Hence
+    `RowStateStore.groupCollapsedByUser`. Without it the parent toggle reopens every group the user
+    just closed, on the very next render.
+12. **`isGroupExpanded` is named `isGroupExpanded$1`** on this build (R8; a synthetic accessor owns
+    the plain name). `RowApi` tries both.
+13. **`setSystemChildExpanded` has exactly one caller left** — `removeNotification`, setting false.
+    AOSP's `updateExpansionStates()` is gone under the async-group-header-inflation flag, so
+    `mIsSystemChildExpanded` is effectively unowned and nothing fights a write to it.
+
+**Verified on device** (CPH2747, OxygenOS 16 — screenshots + `AENotif` traces):
+groups open in shade and with `kg=true`; children follow their toggle and render natively (image
+previews, action buttons) with no forced sizing; a manual collapse survives shade close/reopen
+(`skip=UserCollapsed`) while *other* groups still open; reopening by hand clears the memory
+(`group user expanded=true`); three shade cycles produce one `EXPAND_GROUP` per group with no
+back-off and no oscillation.
+
+**Not covered by the automated pass:** a genuine keyguard screenshot. The device auto-unlocks via
+the paired OnePlus Watch as a trusted device, so `input keyevent 224` lands on the home screen.
+The keyguard *decisions* are in the log (`kg=true`); only the pixels need a human.
+
+Note the engine never force-collapses anything, so turning a toggle **off** does not un-expand rows
+that are already expanded — it stops new writes. Restart SystemUI for a clean read.
