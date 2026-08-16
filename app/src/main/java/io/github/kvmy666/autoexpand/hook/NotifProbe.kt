@@ -1,7 +1,6 @@
 package io.github.kvmy666.autoexpand.hook
 
 import android.util.Log
-import android.view.View
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
@@ -51,6 +50,18 @@ class NotifProbe(private val prefs: PrefsBridge) {
         (XposedHelpers.callMethod(entry, "getKey") as? String) ?: "?"
     } catch (_: Throwable) { "?" }
 
+    /** Android 16 bundles notifications into system sections (`g:Aggregate_AlertingSection`),
+     *  which is a different mechanism from app-declared groups — worth telling apart. */
+    private fun groupOf(row: Any): String = try {
+        val entry = try { XposedHelpers.callMethod(row, "getEntry") }
+                    catch (_: Throwable) { XposedHelpers.callMethod(row, "getEntryLegacy") }
+        val sbn = XposedHelpers.callMethod(entry, "getSbn")
+        val gk = (XposedHelpers.callMethod(sbn, "getGroupKey") as? String) ?: "?"
+        val notif = XposedHelpers.callMethod(sbn, "getNotification") as android.app.Notification
+        val isSummary = (notif.flags and android.app.Notification.FLAG_GROUP_SUMMARY) != 0
+        "${gk.substringAfterLast('|')}|summaryFlag=$isSummary"
+    } catch (_: Throwable) { "?" }
+
     private fun childCount(row: Any): String = try {
         val c = XposedHelpers.getObjectField(row, "mChildrenContainer")
         if (c == null) "0" else call(c, "getNotificationChildCount")
@@ -73,6 +84,7 @@ class NotifProbe(private val prefs: PrefsBridge) {
         append(" isExp(T)=").append(call(row, "isExpanded", true))
         append(" showingExp=").append(call(row, "isShowingExpanded"))
         append(" h=").append(call(row, "getIntrinsicHeight"))
+        append(" grp=").append(groupOf(row))
     }
 
     fun install(lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -80,27 +92,43 @@ class NotifProbe(private val prefs: PrefsBridge) {
             Log.e(TAG, "row class not found: $t"); return
         }
 
-        // 1. Per-row state on every layout — throttled, and only when the snapshot changed.
-        try {
-            XposedBridge.hookAllMethods(rowClass, "onLayout", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    if (!on()) return
-                    try {
-                        val row = param.thisObject
-                        if ((row as? View)?.isShown != true) return
-                        val now = android.os.SystemClock.uptimeMillis()
-                        val last = XposedHelpers.getAdditionalInstanceField(row, "probeTs") as? Long ?: 0L
-                        if (now - last < THROTTLE_MS) return
-                        val snap = snapshot(row)
-                        val prev = XposedHelpers.getAdditionalInstanceField(row, "probeSnap") as? String
-                        if (snap == prev) return
-                        XposedHelpers.setAdditionalInstanceField(row, "probeTs", now)
-                        XposedHelpers.setAdditionalInstanceField(row, "probeSnap", snap)
-                        Log.d(TAG, "layout key=${keyOf(row)} $snap")
-                    } catch (_: Throwable) {}
-                }
-            })
-        } catch (t: Throwable) { Log.e(TAG, "onLayout probe failed: $t") }
+        // 1. Trigger census. Every candidate trigger point from the design, each logging the
+        //    same snapshot so the traces are directly comparable. Deliberately NO isShown
+        //    guard: rows are laid out *before* they become visible, so gating on isShown is
+        //    exactly why the shipped engine's onLayout driver almost never fires.
+        //    Throttled + deduped per row so a layout storm doesn't flood the buffer.
+        val census = listOf(
+            "onLayout", "onMeasure", "onAttachedToWindow", "onVisibilityAggregated",
+            "setSystemExpanded", "setChildrenExpanded", "onNotificationUpdated",
+            "resetUserExpansion", "onExpansionChanged", "setHeadsUp", "setPinnedStatus"
+        )
+        for (name in census) {
+            try {
+                val hooked = XposedBridge.hookAllMethods(rowClass, name, object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!on()) return
+                        try {
+                            val row = param.thisObject
+                            val now = android.os.SystemClock.uptimeMillis()
+                            val lastKey = "probeTs_$name"
+                            val snapKey = "probeSnap_$name"
+                            val last = XposedHelpers.getAdditionalInstanceField(row, lastKey) as? Long ?: 0L
+                            if (now - last < THROTTLE_MS) return
+                            val snap = snapshot(row)
+                            val prev = XposedHelpers.getAdditionalInstanceField(row, snapKey) as? String
+                            if (snap == prev) return
+                            XposedHelpers.setAdditionalInstanceField(row, lastKey, now)
+                            XposedHelpers.setAdditionalInstanceField(row, snapKey, snap)
+                            val args = param.args.joinToString(",").let { if (it.isEmpty()) "" else "($it)" }
+                            Log.d(TAG, "T:$name$args key=${keyOf(row)} $snap")
+                        } catch (_: Throwable) {}
+                    }
+                })
+                // A count of 0 means the method is inherited, not declared here — the silent
+                // hookAllMethods failure mode. Worth knowing explicitly rather than guessing.
+                Log.d(TAG, "hook $name -> ${hooked.size} method(s)")
+            } catch (t: Throwable) { Log.e(TAG, "census hook $name failed: $t") }
+        }
 
         // 2. Who calls setUserExpanded? Separates our writes from real user taps and from
         //    the OEM locked-shade transition.

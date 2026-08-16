@@ -98,7 +98,94 @@ Notes:
 - The device re-locks lazily: powering the screen off and waking within the "lock after screen off"
   window leaves it **authenticated but showing the lock screen** — precisely the bug-2 state.
 
-## E. Still to measure (needs the probe, which needs a SystemUI restart)
+## E. Runtime — hook install census (P0)
+
+Probe logs the bind count for every candidate trigger. On this build:
+
+| method | methods bound |
+|---|---|
+| `onLayout` · `onMeasure` · `onAttachedToWindow` | 1 each |
+| `setSystemExpanded` · `setChildrenExpanded` · `onNotificationUpdated` | 1 each |
+| `resetUserExpansion` · `onExpansionChanged` · `setHeadsUp` · `setPinnedStatus` | 1 each |
+| **`onVisibilityAggregated`** | **0 — inherited, not declared** |
+
+So `hookAllMethods` silently binding nothing is a live hazard on this class, and
+`onVisibilityAggregated` is ruled out as a trigger. `onLayout` *is* bound (1 method), so the
+shipped engine's driver is installed — its rarity is caused by the `isShown` guard and the
+shared one-shot, not by a failed hook.
+
+## F. Grouping was NOT removed — it was replaced by system aggregation ⚠️
+
+The single most consequential finding, and it contradicts the working assumption for this rebuild.
+
+Android 16 / OxygenOS 16.0.9.400 bundles notifications into **system-created aggregate sections**.
+Observed group keys, live:
+
+| groupKey | count |
+|---|---|
+| `g:Aggregate_AlertingSection` (incl. a real summary row, `summaryFlag=true`) | 26 |
+| `g:Aggregate_SilentSection` | 3 |
+| app-declared groups (`g:incoming_message_group_key`, `g:prayer`, `g:…::SUMMARY::wx`, …) | rest |
+
+Consequences:
+
+1. **App-declared grouping still exists**, so the legacy group path stays necessary.
+2. **A new bundle layer sits on top**: individual notifications become **children of a system
+   aggregate summary**. `isChildInGroup()` returned **true for 13 of 58** observations.
+3. The shipped engine's shade *and* lock-screen drivers both begin with
+   `if (isChildInGroup()) return` — "the parent drives its children". With aggregation, the
+   "parent" is a system bundle that never expands them, **so those rows are silently skipped**.
+4. Whether a given notification is skipped depends on *when* our hook fires relative to the system
+   re-parenting it into the bundle. The trace shows a row that is `child=false` at
+   `onAttachedToWindow` and `child=true` a moment later at `setSystemExpanded`. **That race is the
+   most credible explanation of the ~10% "sometimes it just doesn't expand / collapses" rate.**
+
+## G. Lock screen — the loop, measured
+
+Full state table for one notification posted while locked (`h` is `getIntrinsicHeight()`;
+169 = collapsed, 245 = expanded):
+
+| trigger | userExp | userChanged | isExp(F) | isExp(T) | showingExp | h |
+|---|---|---|---|---|---|---|
+| `onAttachedToWindow` | false | false | false | false | false | 0 |
+| `setOnKeyguard(true)` | false | false | false | false | false | 0 |
+| `onLayout` | false | false | false | false | false | 169 |
+| *our* `setUserExpanded(true,true)` | → true | → true | **false** | false | false | 169 |
+| `onExpansionChanged(true,false)` | true | true | **false** | false | false | 169 |
+| **`resetUserExpansion`** | **false** | **false** | false | false | false | 169 |
+| *our* `setUserExpanded(true,true)` | true | true | **false** | **true** | false | **245** |
+| `setSystemExpanded(false)` | true | true | **false** | false | false | **169** |
+
+Four facts, all confirmed at runtime:
+
+1. **`isExpanded(false)` is `false` on every single sample**, including when `mUserExpanded` is
+   true. The keyguard gate from section A, observed live.
+2. **`isExpanded(true)` is the honest read**, and `getIntrinsicHeight()` tracks it exactly
+   (169 ↔ 245). This is the direct proof that rewriting `allowOnKeyguard` is sufficient *and*
+   that SystemUI computes the height itself — no size forcing required.
+3. **`isShowingExpanded()` is `false` throughout**, so the shipped engine's idempotence guard is
+   blind on the lock screen — it can never tell "already expanded" from "collapsed".
+4. **`resetUserExpansion()` fires on the lock screen and wipes our expansion**, after which the
+   driver re-applies. Five `setUserExpanded(true,true)` calls for a single notification, with `h`
+   oscillating 169 → 245 → 169 → 245 → 169. **That oscillation is the "forced expansion" the user
+   reports** — the row visibly flickers and cannot be kept collapsed.
+
+## H. Tooling win: root-free remote SystemUI restart
+
+`adb shell` has no root, but the user's status-bar zone shortcut is an Anywhere deep link, and
+`ActionDispatcher.launchShortcut` fires it as a plain intent. So it can be triggered from the host:
+
+```
+adb shell 'am start -a android.intent.action.VIEW -d "anywhere://open?sid=1776272750274"'
+```
+
+Verified: SystemUI pid 2290 → 9974. This gives a complete edit → build → install → reload → capture
+loop with no physical interaction.
+
+The probe pref can likewise be flipped from the host by patching the published prefs blob
+(decode `settings get global ae_prefs_json`, set `notif_probe_enabled`, re-encode, `settings put`).
+
+## I. Still to measure
 
 1. Does `mIsSystemExpanded` survive shade close → re-open? Decides whether any per-open re-apply is
    needed at all, or whether the `onLayout` driver can simply be deleted.
