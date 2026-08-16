@@ -1,0 +1,213 @@
+# CHECKPOINT — notification engine v2
+
+**Written 2026-08-16.** Resume file for a fresh session. Everything needed to continue is here or
+in the files it points at; nothing important lives only in chat history.
+
+---
+
+## 1. Where things stand in one paragraph
+
+The notification expand engine has been rebuilt as an opt-in **v2 engine** that drives expansion
+by *state* instead of clicking the expand arrow. It is **built, installed on the device, enabled,
+and working** — a notification posted while the phone is locked now renders **expanded in place**
+on the lock screen (`getIntrinsicHeight` 305 vs 169 collapsed), something the old engine could
+only achieve by opening the locked shade. Heads-up and swipe-to-toggle are untouched. What remains
+is **human visual verification** (§5) — the automated evidence is done.
+
+## 2. Repo state
+
+- Branch: **`feat/notif-engine-v2`**, working tree clean.
+- `main` is **code-untouched**. It received exactly one docs-only commit (`f8997bf`,
+  `docs/notifications-ar.md` + `docs/notifications-architecture.drawio`). `git diff 26de914 main`
+  shows only those two files.
+- Commits on the branch, oldest first:
+
+| commit | what |
+|---|---|
+| `6e78943` | Phase 1 instrumentation: test-notification sender, Restart-SystemUI button, read-only probe |
+| `ad022e5` | Baseline evidence log (static bytecode + runtime trace of the 3.2.1 engine) |
+| `cb7c9bc` | Probe upgraded to a trigger census; captured the lock-screen oscillation |
+| `d9945b3` | **The v2 engine** + debug SET_PREF receiver + engine-selection bugfix |
+
+- Version still `30201` / `3.2.1` — deliberately not bumped yet.
+
+## 3. Device state (as left)
+
+OnePlus **CPH2747**, Android 16 / SDK 36, OxygenOS **`CPH2747_16.0.9.400 (EX01)`**, wireless adb at
+`192.168.100.245:6666`.
+
+Debug APK installed with these prefs live:
+
+```
+notif_engine_v2      = 1     <- v2 is ACTIVE
+notif_debug_logging  = 1
+notif_probe_enabled  = 1     <- verbose; turn off for normal daily use
+expand_shade_enabled = 1  expand_lockscreen_enabled = 1  expand_headsup_enabled = 1
+disable_headsup_hooks_enabled = 0
+```
+
+> The probe is chatty. For a realistic day of use set `notif_probe_enabled = 0` and
+> `notif_debug_logging = 0` (§4), then restart SystemUI.
+
+## 4. How to resume — exact commands
+
+All adb commands need `MSYS_NO_PATHCONV=1` in Git Bash or remote paths get mangled.
+
+```bash
+export MSYS_NO_PATHCONV=1
+ADB="C:/Users/krom3/AppData/Local/Android/Sdk/platform-tools/adb.exe"
+"$ADB" connect 192.168.100.245:6666
+```
+
+**Restart SystemUI (no root needed on the host).** The user's status-bar triple-tap is an Anywhere
+deep link, and it can be fired directly — this is the reload loop:
+
+```bash
+"$ADB" shell 'am start -a android.intent.action.VIEW -d "anywhere://open?sid=1776272750274"'
+# verify it actually restarted:
+"$ADB" shell "pidof com.android.systemui"     # pid must change
+```
+
+**Flip any pref durably** (debug-only receiver, absent from release builds):
+
+```bash
+"$ADB" shell "am broadcast -a io.github.kvmy666.autoexpand.SET_PREF \
+  -n io.github.kvmy666.autoexpand/.DebugPrefReceiver --es key notif_engine_v2 --es value 0"
+```
+Then restart SystemUI — **engine choice is read once at startup by design**, so it never changes
+under live hooks. `value 1` goes back to v2. (Patching `Settings.Global` directly does *not* stick:
+any `writePrefsFile` call republishes from SharedPreferences and drops keys never written there.)
+
+**Build + install:**
+```bash
+export JAVA_HOME="C:/Program Files/Android/Android Studio/jbr"
+./gradlew.bat :app:assembleDebug -q
+"$ADB" install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+**Capture logs** — always a filtered background stream, never `logcat -d`; the buffer rolls in
+~12 s under OEM noise:
+```bash
+"$ADB" logcat -c
+"$ADB" logcat -s AENotif:D AENotifProbe:D TweaksHud:D &
+```
+
+**Post test notifications without touching the phone:**
+```bash
+"$ADB" shell 'cmd notification post -S bigtext -t "Title" tag1 "line one. line two. line three."'
+# styles: bigtext | inbox | messaging | bigpicture | media
+```
+
+**Drive the UI:** lock `input keyevent 26`; wake `input keyevent 224`; unlock swipe
+`input swipe 636 1800 636 700` then `input text <PIN>` then `input keyevent 66`; open shade
+`input swipe 636 5 636 1800 250`. Screen is 1272x2772. **`cmd statusbar expand-notifications` is a
+no-op on OxygenOS** — use the swipe. Lock-after-timeout is 5 s, so screen-off must exceed ~12 s to
+get a genuine keyguard.
+
+## 5. What still needs YOUR eyes
+
+This is the only outstanding work. Everything else is measured.
+
+| # | Test | Pass condition |
+|---|---|---|
+| 1 | Open/close the shade ~10 times with real notifications | Expanded every time, **no self-collapse** |
+| 2 | Collapse one manually in the shade | **Stays collapsed** until the app updates it |
+| 3 | Collapse one manually on the lock screen | **Stays collapsed** — this used to force itself open |
+| 4 | Lock screen, fresh lock, new notification | Expands **in place** — no scrim, no unlock prompt, no locked shade opening |
+| 5 | Lock screen while authenticated-but-still-locked | Same; this was the worst bug |
+| 6 | Heads-up banners, all app types | **Byte-identical to before** — this path was not modified |
+| 7 | Swipe down on a heads-up banner | Toggles expand/collapse, does **not** launch the app |
+| 8 | WhatsApp / Telegram threads with several messages | Sensible; app-declared groups still defer to their summary |
+| 9 | Turn on "hide sensitive content on lock screen" | Redacted rows stay **collapsed** — privacy must hold |
+
+If something fails, capture the log stream from §4 and read the `v2 <trigger> <decision>` lines —
+every decision logs its reason (`skip=UserCollapsed`, `skip=AppGroupChild`, …).
+
+To A/B against the old engine: flip `notif_engine_v2` to `0`, restart SystemUI, repeat. No rebuild.
+
+## 6. Facts established — do NOT re-derive these
+
+All verified against the **live** SystemUI pulled from this device (`dexdump`) and/or runtime traces.
+Full detail in `docs/notif-engine-v2-findings.md`.
+
+1. **`isExpanded(Z)` — the argument is `allowOnKeyguard`.** Order inside the method:
+   `shouldShowPublic()` → keyguard gate → `mHasUserChangedExpansion` / `mIsSystemExpanded` /
+   `mUserExpanded`. On keyguard **no state value can expand a row**; lock-screen expansion only
+   ever worked because clicking the arrow triggered `goToLockedShade`.
+2. **Therefore: rewrite the ARGUMENT, never the return value.** Forcing the return bypasses
+   `shouldShowPublic()` → sensitive notifications render expanded on the lock screen (privacy bug),
+   and bypasses the `mUserExpanded` tail → user can never collapse. Confirmed at runtime:
+   `public=true` correlates perfectly with `isExp(T)=false`.
+3. **`isShowingExpanded()` calls `isExpanded(false)`** → it lies on keyguard. The old idempotence
+   guard was blind there. `isExpanded(true)` is the honest read and `getIntrinsicHeight()` tracks it.
+4. **Grouping was not removed — Android 16 added system bundles** (`g:Aggregate_AlertingSection`,
+   `g:Aggregate_SilentSection`) with real summary rows. Ordinary notifications become children of
+   these, so `isChildInGroup()` is true for them, and the old blanket child-skip silently dropped
+   them. It is also a race (`child=false` at attach, `true` moments later) — the best explanation
+   of the old ~10% failure rate.
+5. **The old keyguard mitigation was dead code.** `getExpandClickListenerField` matches
+   `name.contains("expandclick")`, and dex sorts fields by name, so it always bound
+   `mExpandClickListener` (#107) rather than `mOnExpandClickListener` (#323). Zero occurrences of
+   `LS silent expand` / `onExpandClicked BLOCKED` in any trace.
+6. **`onVisibilityAggregated` binds 0 methods** (inherited, not declared) — ruled out as a trigger,
+   and proof that silent `hookAllMethods` failure is a live hazard on this class. Always log the
+   bind count.
+7. **`setSystemExpanded` fires on shade open**, not only on post — the old docs (§7.3 of
+   `notifications-ar.md`) are wrong on this build.
+8. **`resetUserExpansion()` fires twice for one logical reset** (~4 ms apart).
+9. `adb shell` has **no root**; `run-as` is refused because the app makes its data dir
+   world-readable. Hence the deep-link restart and the SET_PREF receiver.
+
+## 7. Design decisions locked (with the user)
+
+| Decision | Choice |
+|---|---|
+| Lock screen | Rewrite `allowOnKeyguard` argument; **no synthetic click on keyguard at all** |
+| Shade | Rewrite the argument of `setSystemExpanded(false)` — SystemUI does the write itself |
+| System aggregate children | Treat as **standalone and expand**; app-declared group children still defer to their summary |
+| `resetUserExpansion` | Re-apply once, then back off (debounced) — never oscillate |
+| Heads-up + swipe-toggle | **Frozen.** Not modified, not moved |
+| Rollout | Pref-gated `notif_engine_v2`, legacy path retained for A/B |
+| Test screen | Debug builds only |
+| Never | Force size/height/visible-type; hook notification creation; name an OEM-only class as a hard dependency |
+
+## 8. File map (new code)
+
+```
+hook/notif/RowApi.kt          reflection facade; resolves 14 handles once, logs `RowApi caps:`
+hook/notif/ExpandPolicy.kt    PURE decision logic (no Android/Xposed) + RowFacts + Decision
+hook/notif/RowStateStore.kt   per-notification-key state; wipe debounce + back-off
+hook/notif/Attribution.kt     thread-local "this write is ours" token (re-entrancy + attribution)
+hook/notif/NotifLog.kt        lambda-gated logging, zero allocation when off
+hook/notif/NotifEngineV2.kt   the engine: LS gate, shade rewrite, cold triggers, anti-thrash
+hook/NotifProbe.kt            read-only trigger census; pref-gated, ships disabled
+TestNotifier.kt               7 test notification shapes + delay
+TestingScreen.kt              debug-only screen: senders, engine toggle, probe toggles, restart
+RootShell.kt                  one-shot su for the APP process only
+src/debug/…/DebugPrefReceiver.kt   host-driven pref control; absent from release
+```
+
+`NotificationExpander.kt` keeps heads-up + swipe-toggle unchanged; its two legacy shade/LS drivers
+early-return via `useV2()`.
+
+## 9. Open items
+
+1. **Visual verification (§5)** — the gate for everything else.
+2. Remove the legacy shade/LS path and the dead `clickExpandSilentlyOnKeyguard` machinery once v2 is
+   confirmed; bump `versionCode`/`versionName`.
+3. **Verify on a non-OPlus ROM** (Xiaomi). Ask for the single `RowApi caps:` log line — that is the
+   whole compatibility report. If `isExpandedArg=0` the lock-screen gate simply doesn't engage.
+4. `ungroup_notifications_enabled` is still a **dead pref** (UI toggle, no hook reads it). Given
+   finding 4 it may become the user-facing switch for aggregate-bundle behaviour.
+5. Correct `docs/notifications-ar.md` §7.2/§7.3 — its claims about `setUserExpanded` not sticking
+   and `setSystemExpanded` firing only on post are wrong for this build.
+6. ProGuard: debug builds also minify (`build.gradle.kts:48`); watch for reflection-facing rules if
+   anything breaks only in an installed build.
+
+## 10. Traces kept in the repo
+
+`docs/trace-baseline-3.2.1.log` (old engine), `docs/trace-shade-probe.log`,
+`docs/trace-lockscreen-probe.log` (old engine on LS, the oscillation),
+`docs/trace-v2-lockscreen.log` (v2 on LS). `docs/notif-engine-v2-findings.md` is the full evidence
+log; `docs/notifications-ar.md` + `docs/notifications-architecture.drawio` describe the *old*
+architecture.
