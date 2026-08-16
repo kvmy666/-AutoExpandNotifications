@@ -7,6 +7,7 @@ import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import io.github.kvmy666.autoexpand.hook.GlobalSearchHook
 import io.github.kvmy666.autoexpand.hook.KeepScreenOnController
+import io.github.kvmy666.autoexpand.hook.NotifProbe
 import io.github.kvmy666.autoexpand.hook.NotificationExpander
 import io.github.kvmy666.autoexpand.hook.PrefsBridge
 import io.github.kvmy666.autoexpand.hook.SnapperChordHook
@@ -31,6 +32,9 @@ class MainHook : IXposedHookLoadPackage {
 
     /** All notification expand/collapse behavior + the SystemUI notification hooks. */
     private val notif = NotificationExpander(prefs)
+
+    /** Read-only diagnostic probe; inert unless notif_probe_enabled is ON. */
+    private val notifProbe = NotifProbe(prefs)
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         // Top-level safety net: any uncaught throwable must NOT propagate
@@ -114,6 +118,11 @@ class MainHook : IXposedHookLoadPackage {
 
         // Notification expand/collapse hooks (single + grouped, shade/LS/heads-up).
         notif.install(lpparam)
+
+        // Read-only state probe. Installed always, active only when the pref is ON.
+        try { notifProbe.install(lpparam) } catch (t: Throwable) {
+            Log.e("AutoExpand", "notif probe init failed: $t")
+        }
 
         // =====================================================
         // BACK GESTURE HAPTIC

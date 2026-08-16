@@ -257,6 +257,7 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
                             "guide"         -> "Guide"
                             "zones"         -> "Status Bar Zones"
                             "system"        -> "System Behavior"
+                            "testing"       -> "Testing"
                             else            -> stringResource(R.string.app_name)
                         }
                     )
@@ -678,6 +679,9 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
 
                     // ── Guide ──────────────────────────────────────────────────────
                     "guide" -> { GuideScreen() }
+
+                    // ── Testing (debug builds only) ────────────────────────────────
+                    "testing" -> { TestingScreen(prefs) { k, v -> onToggle(k, v) } }
 
                     // ── Status Bar Zones ───────────────────────────────────────────
                     "zones" -> {

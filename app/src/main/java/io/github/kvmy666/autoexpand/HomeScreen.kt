@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
@@ -305,6 +306,16 @@ internal fun HomeScreen(
             }
         }
         if (io.github.kvmy666.autoexpand.BuildConfig.DEBUG) {
+            item {
+                FeatureCard(
+                    icon      = Icons.Default.Science,
+                    iconColor = Color(0xFF4DB6AC),
+                    title     = "Testing",
+                    subtitle  = "Send test notifications, restart SystemUI, toggle the probe",
+                    isEnabled = null,
+                    onClick   = { onNavigate("testing") }
+                )
+            }
             item { DebugCard() }
         }
     }
