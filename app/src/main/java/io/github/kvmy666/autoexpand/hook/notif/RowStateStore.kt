@@ -100,6 +100,21 @@ object RowStateStore {
     fun isGroupCollapsedByUser(key: String): Boolean =
         states[key]?.groupCollapsedByUser == true
 
+    /**
+     * A repost is new content, so the collapse memory expires — the same lifetime SystemUI gives
+     * a single row, where it resets `mHasUserChangedExpansion` when the row is rebuilt.
+     *
+     * Without this the memory outlives every notification it was ever about. That is bad for an
+     * app-declared group and *much* worse for a system bundle, whose key
+     * (`…|g:Aggregate_AlertingSection`) covers everything that app puts in the section: closing
+     * one bundle once would stop that app's notifications auto-opening again for the rest of the
+     * SystemUI process, which reads exactly like the feature having quietly died.
+     */
+    @Synchronized
+    fun onNotificationUpdated(key: String) {
+        states[key]?.groupCollapsedByUser = false
+    }
+
     /** Called when a notification is genuinely reposted — a clean slate. */
     @Synchronized
     fun forget(key: String) { states.remove(key) }

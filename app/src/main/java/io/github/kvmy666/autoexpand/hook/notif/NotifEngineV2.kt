@@ -310,7 +310,14 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                 val hooks = XposedBridge.hookAllMethods(cls, name, object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         try {
-                            if (name == "onNotificationUpdated") refreshPrefs()
+                            if (name == "onNotificationUpdated") {
+                                refreshPrefs()
+                                // New content ends a collapse, exactly as the checkpoint's own
+                                // acceptance test says ("stays collapsed until the app updates
+                                // it"). Groups need this spelled out because, unlike a single
+                                // row, SystemUI keeps no expansion state of its own to reset.
+                                keyOf(param.thisObject)?.let { RowStateStore.onNotificationUpdated(it) }
+                            }
                             reconcile(param.thisObject, name)
                         } catch (_: Throwable) {}
                     }
