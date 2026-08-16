@@ -84,6 +84,12 @@ class NotifProbe(private val prefs: PrefsBridge) {
         append(" isExp(T)=").append(call(row, "isExpanded", true))
         append(" showingExp=").append(call(row, "isShowingExpanded"))
         append(" h=").append(call(row, "getIntrinsicHeight"))
+        // The two short-circuits that sit ABOVE the keyguard gate in isExpanded(): if either
+        // fires, no amount of expansion state matters. Redaction is also a hard privacy line.
+        append(" public=").append(call(row, "shouldShowPublic"))
+        append(" promoted=").append(call(row, "isPromotedOngoing"))
+        append(" saveSpace=").append(b(row, "mSaveSpaceOnLockscreen"))
+        append(" ignoreLsC=").append(b(row, "mIgnoreLockscreenConstraints"))
         append(" grp=").append(groupOf(row))
     }
 

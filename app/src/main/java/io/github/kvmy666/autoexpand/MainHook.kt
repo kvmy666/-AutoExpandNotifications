@@ -9,6 +9,7 @@ import io.github.kvmy666.autoexpand.hook.GlobalSearchHook
 import io.github.kvmy666.autoexpand.hook.KeepScreenOnController
 import io.github.kvmy666.autoexpand.hook.NotifProbe
 import io.github.kvmy666.autoexpand.hook.NotificationExpander
+import io.github.kvmy666.autoexpand.hook.notif.NotifEngineV2
 import io.github.kvmy666.autoexpand.hook.PrefsBridge
 import io.github.kvmy666.autoexpand.hook.SnapperChordHook
 import io.github.kvmy666.autoexpand.hook.ZonesHook
@@ -35,6 +36,9 @@ class MainHook : IXposedHookLoadPackage {
 
     /** Read-only diagnostic probe; inert unless notif_probe_enabled is ON. */
     private val notifProbe = NotifProbe(prefs)
+
+    /** Shade + lock-screen engine v2; installs only when notif_engine_v2 is ON. */
+    private val notifV2 = NotifEngineV2(prefs)
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         // Top-level safety net: any uncaught throwable must NOT propagate
@@ -96,6 +100,14 @@ class MainHook : IXposedHookLoadPackage {
                             prefs.loadFilePrefs()
                             prefs.startFileObserver()
                             prefs.startHeartbeatThread()
+                            // Only now are prefs actually readable, so this is the earliest
+                            // point the engine choice can be trusted. Still well before any
+                            // notification row exists.
+                            try {
+                                if (prefs.isOptInEnabled("notif_engine_v2")) notifV2.install(lpparam)
+                            } catch (t: Throwable) {
+                                Log.e("AutoExpand", "notif engine v2 init failed: $t")
+                            }
                             zones.registerReceiver(app)
                             keepScreenOn.registerPrefReceiver(app)
                             // Apply keep-screen-on from the persisted pref (default OFF).
@@ -117,7 +129,12 @@ class MainHook : IXposedHookLoadPackage {
         } catch (_: Throwable) {}
 
         // Notification expand/collapse hooks (single + grouped, shade/LS/heads-up).
+        // Heads-up and swipe-to-toggle always come from here; the shade/lock-screen drivers
+        // inside it stand down when v2 is enabled.
         notif.install(lpparam)
+
+        // Engine v2 is installed from the Application.onCreate hook instead, because the pref
+        // that selects it is only readable once prefs.loadFilePrefs() has run.
 
         // Read-only state probe. Installed always, active only when the pref is ON.
         try { notifProbe.install(lpparam) } catch (t: Throwable) {

@@ -48,6 +48,8 @@ internal fun TestingScreen(
 
     var delaySeconds by remember { mutableIntStateOf(0) }
     var probeEnabled by remember { mutableStateOf(prefs.getBoolean("notif_probe_enabled", false)) }
+    var v2Logging by remember { mutableStateOf(prefs.getBoolean("notif_debug_logging", false)) }
+    var engineV2 by remember { mutableStateOf(prefs.getBoolean("notif_engine_v2", false)) }
     var restarting by remember { mutableStateOf(false) }
 
     var hasPermission by remember {
@@ -145,6 +147,25 @@ internal fun TestingScreen(
             ) { Text("Clear all test notifications") }
         }
 
+        // ── Engine selection ──────────────────────────────────────────────────
+        SettingsCard {
+            SectionLabel("Expand engine", accent = true)
+            ToggleRow(
+                title = "Use engine v2 (shade + lock screen)",
+                description = "v2 drives expansion by state instead of clicking the arrow. " +
+                              "Heads-up and swipe-to-toggle are identical either way. " +
+                              "Takes effect on the next SystemUI restart.",
+                checked = engineV2,
+                onCheckedChange = { engineV2 = it; onToggle("notif_engine_v2", it) }
+            )
+            Text(
+                "Engine choice is read once when SystemUI starts — restart it below after changing this.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
+        }
+
         // ── Diagnostics ───────────────────────────────────────────────────────
         SettingsCard {
             SectionLabel("Diagnostics")
@@ -155,8 +176,14 @@ internal fun TestingScreen(
                 checked = probeEnabled,
                 onCheckedChange = { probeEnabled = it; onToggle("notif_probe_enabled", it) }
             )
+            ToggleRow(
+                title = "Engine v2 verbose logging",
+                description = "Logs every v2 decision (expand / already / skip reason) under AENotif.",
+                checked = v2Logging,
+                onCheckedChange = { v2Logging = it; onToggle("notif_debug_logging", it) }
+            )
             Text(
-                "adb logcat -s AENotifProbe:D",
+                "adb logcat -s AENotifProbe:D AENotif:D",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)

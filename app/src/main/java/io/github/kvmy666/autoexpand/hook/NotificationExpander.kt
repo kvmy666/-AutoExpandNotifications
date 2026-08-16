@@ -324,6 +324,27 @@ class NotificationExpander(private val prefs: PrefsBridge) {
         } catch (_: Throwable) {}
     }
 
+    /**
+     * When the v2 engine owns the shade/lock-screen path, the two legacy drivers below no-op.
+     *
+     * Resolved lazily on first hook invocation, NOT at install: `install()` runs from
+     * `handleLoadPackage`, which is before the `Application.onCreate` hook has captured a
+     * context and loaded the prefs, so a read here always falls back to XSharedPreferences and
+     * would see a stale value. Cached after the first read — two engines competing for the same
+     * rows would fight, so this must never change while hooks are live.
+     */
+    @Volatile private var engineV2 = false
+    @Volatile private var engineV2Resolved = false
+
+    private fun useV2(): Boolean {
+        if (!engineV2Resolved) {
+            engineV2Resolved = true
+            engineV2 = try { prefs.isOptInEnabled("notif_engine_v2") } catch (_: Throwable) { false }
+            Log.d(HUD_TAG, "engine selected: legacy shade/LS driver ${if (engineV2) "DISABLED — v2 owns it" else "active"}")
+        }
+        return engineV2
+    }
+
     fun install(lpparam: XC_LoadPackage.LoadPackageParam) {
 
         val rowClass = "com.android.systemui.statusbar.notification.row.ExpandableNotificationRow"
@@ -387,6 +408,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                 "setSystemExpanded", Boolean::class.javaPrimitiveType,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
+                        if (useV2()) return
                         try {
                             val row = param.thisObject
                             val rowView = row as? View ?: return
@@ -459,6 +481,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                 "onLayout",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
+                        if (useV2()) return
                         try {
                             val row = param.thisObject
                             val rowView = row as? View ?: return

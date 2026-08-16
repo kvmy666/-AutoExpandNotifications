@@ -185,7 +185,51 @@ loop with no physical interaction.
 The probe pref can likewise be flipped from the host by patching the published prefs blob
 (decode `settings get global ae_prefs_json`, set `notif_probe_enabled`, re-encode, `settings put`).
 
-## I. Still to measure
+## I. v2 engine — measured result
+
+Engine installed and verified on device (`RowApi caps:` all 14 handles resolved, `lsGate=true`,
+legacy driver stands down).
+
+**Lock screen, notification posted while locked:**
+
+| trigger | userExp | isExp(T) | public | h |
+|---|---|---|---|---|
+| `onLayout` | true | true | false | **305** |
+| `setSystemExpanded(false)` | true | false | **true** | 169 |
+| `setOnKeyguard(true)` | true | false | **true** | 169 |
+| `setSystemExpanded(false)` | true | true | false | **305** |
+
+`h=305` on the lock screen is expansion **in place** — the old engine could only ever reach that
+by transitioning to the locked shade. Decision counts for one notification: one `EXPAND`, the
+rest `already` / `rewritten`, i.e. one real write instead of the old engine's five, and no
+`performClick` anywhere, so the locked-shade transition can no longer be triggered by us.
+
+**`shouldShowPublic()` explains the remaining 305↔169 movement, and it is correct behaviour.**
+`public=true` correlates perfectly with `isExp(T)=false` and `h=169` across every sample. That is
+the redacted lock-screen view, which has no expanded variant. The row flips as the device moves
+between authenticated and not — the "unlocked but still on the lock screen" state.
+
+This is also the strongest possible validation of the argument-rewrite decision: because
+`shouldShowPublic()` is evaluated *before* the keyguard gate, our rewrite **cannot** expose
+redacted content. Had we forced the return value instead — the original plan — every one of those
+`public=true` rows would have rendered expanded with sensitive content on the lock screen.
+
+### Two bugs found in the v2 engine itself and fixed
+
+1. **Back-off tripped instantly.** `resetUserExpansion` fires twice for one logical reset
+   (measured 4 ms apart), so a single reset counted as two wipes. Added a 250 ms debounce.
+2. **Backing off collapsed the row.** The back-off path cleared the lock-screen token, which
+   stopped the gate rewriting and actively collapsed an already-open row. "Stop writing" must not
+   mean "un-expand" — `Decision.Reason.clearsLockscreenToken` now excludes `BackedOff`.
+
+### Engine-selection bug found in the shipped code
+
+`prefs.isOptInEnabled(...)` read from `install()` (i.e. from `handleLoadPackage`) always falls
+back to `XSharedPreferences`, because the `Application.onCreate` hook that captures a context and
+calls `loadFilePrefs()` has not run yet. Engine selection is now resolved lazily on first hook
+invocation, and v2 installs from the `Application.onCreate` hook.
+
+## J. Still to measure
 
 1. Does `mIsSystemExpanded` survive shade close → re-open? Decides whether any per-open re-apply is
    needed at all, or whether the `onLayout` driver can simply be deleted.

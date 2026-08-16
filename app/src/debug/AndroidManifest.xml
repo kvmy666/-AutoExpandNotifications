@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Debug-only. Merged into debug builds only, so no exported receiver reaches users.
+      Lets the host flip engine/probe prefs during a test run without physical interaction.
+    -->
+    <application>
+        <receiver
+            android:name=".DebugPrefReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="io.github.kvmy666.autoexpand.SET_PREF" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
