@@ -349,3 +349,83 @@ separate top-level rows and no summary. It does exactly the same with
 `disable_headsup_hooks_enabled = 1` and every expand pref off — i.e. with no hook of ours running —
 so it is stock OxygenOS 16. Do not "fix" it. `ungroup_notifications_enabled` is still a dead pref
 and is not involved.
+
+---
+
+## 12. Two field bugs from daily use (2026-08-18) — both fixed
+
+Reported after two days of real use, with screenshots. Both were reproduced on the device,
+A/B-confirmed against the toggles, and fixed. Device: CPH2747, OxygenOS 16, debug build of
+`feat/notif-engine-v2`.
+
+### 12.1 Rows painted over each other on the lock screen
+
+**Symptom.** With ~20 notifications from several apps on the lock screen, rows overlapped —
+one notification drawn on top of the one above and the one below.
+
+**Repro (deterministic).** Wake to the lock screen, then post 13+ notifications
+(`cmd notification post`, any app) so they auto-group. The bundle opens and the rows overlap.
+Same flood with `expand_group_parents_enabled = 0`: a clean collapsed bundle, no overlap.
+Two notifications is not enough — the lock screen has to be tight for space.
+
+**Cause.** An open group is a **shade-only shape**. SystemUI never draws one on the keyguard by
+any path of its own: tapping the arrow on a collapsed group there runs `goToLockedShade`. So
+`NotificationStackSizeCalculator.getSpaceNeeded` (which reads
+`ExpandableView.getHeightWithoutLockscreenConstraints`, verified in this device's dex) budgets a
+*collapsed* summary, and a group opened behind its back draws taller than its slot.
+
+**Fix.** `ExpandPolicy` skips a summary when `onKeyguard` → `skip=GroupOnKeyguard`. The group
+opens on the next shade render instead. Singles still expand in place on the lock screen — that
+path is untouched and was re-verified.
+
+### 12.2 A row showing one line of text inside a full-size card
+
+**Symptom.** Rows in an open group rendered as a full-size card holding a single line of
+"sender: message" at the top with blank space below — no icon, no timestamp, no expand arrow.
+Only some rows, and it healed itself later, which is why it looked random.
+
+**Cause — the two halves, both read out of this device's dex:**
+
+17. **`NotificationContentView.getVisualTypeForHeight` returns `VISIBLE_TYPE_SINGLELINE` (3) for
+    any child whose group reads closed** — checked *before* it looks at a height at all
+    (`mIsChildInGroup && !isGroupExpanded$1() && mSingleLineView != null && !mUserExpanding &&
+    !rowEx.isChildrenExpandedAnimating()`). And `calculateVisibleType()` otherwise just calls
+    `getVisualTypeForHeight(min(mContentHeight, getIntrinsicHeight()))`.
+18. **`ExpandableNotificationRow.getIntrinsicHeight()` sizes a child of an *open* group from its
+    contracted layout** (`isChildInGroup()` → group open → `isExpanded(true) ? getMaxExpandHeight()
+    : getShowingLayout().getMinHeight(false)`), and only returns `mPrivateLayout.getMinHeight()`
+    (the one-line height) while the group reads closed.
+
+So a child that never re-ran its layout selection after the group opened keeps one line of content
+inside a card sized for three. The engine opens groups from inside SystemUI's own callbacks, which
+run during a layout traversal, where a `requestLayout()` is dropped for the current pass.
+
+**Fix.** After every reconcile of a summary whose group reads open, any attached child still
+showing `VISIBLE_TYPE_SINGLELINE` — *and* whose own `isGroupExpanded()` is true, so the repair
+converges — gets `NotificationContentView.selectLayout(animate = false, force = true)`.
+That is SystemUI's own "work out what to show" primitive: it sets no height and no expansion
+state, and on a correct row it recomputes the same type and does nothing.
+
+**Measured.** 24 children repaired across one keyguard→shade transition — the same moment the
+reported screenshots were taken — 6 on a second lock/unlock cycle, and **0 across three ordinary
+shade open/close cycles**. So the stale state is specific to the keyguard transition and the
+repair does not churn.
+
+### 12.3 What the stock shapes look like (so a screenshot can be read at a glance)
+
+| State | Look |
+|---|---|
+| Group **collapsed** | *one* card, count badge on the icon, 2–3 one-line children inside, **no** section header |
+| Group **open** | section header (`WhatsApp ^`) + each child its **own** card with icon, timestamp, arrow |
+| The bug | section header + own cards, but children still drawing the **one-line** layout |
+
+### 12.4 Debug notes
+
+- `RowApi caps:` now ends with `content=1 visType=1 selectLayout=1` — the three handles the repair
+  needs. Zero there means the repair is a no-op on that ROM, nothing else changes.
+- `skip=` lines now carry `kg= grpExp= exp=`, so a wrong skip is diagnosable from the log alone.
+- The probe snapshot gained `actualH= grpExp= visType=` — `visType=3` with `grpExp=true` is
+  exactly the 12.2 state.
+- `cmd notification post` has **no cancel**, and `pm clear` / `pm revoke` are refused for
+  `com.android.shell`, so flood tests leave their notifications behind. Clear them by collapsing
+  the **Shell** section in the shade and swiping the collapsed bundle away.
