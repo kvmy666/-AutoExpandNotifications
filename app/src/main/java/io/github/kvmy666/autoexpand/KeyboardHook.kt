@@ -87,6 +87,12 @@ class KeyboardHook : IXposedHookLoadPackage {
     // When true, deliver DPAD via privileged `input keyevent` (root) instead of the
     // InputConnection — fallback for apps that swallow IME DPAD events.
     @Volatile private var cachedTrackpadRoot = false
+
+    // Set by the onStartInputView hook when input restarts on a target with no text
+    // (inputType == 0) — the signature of DPAD focus-search handing focus to a
+    // neighbouring, non-editable view. A trackpad gesture in flight uses this as a
+    // cheap "the field may be gone" hint and re-verifies with one caret read.
+    @Volatile private var inputRestartedNonEditable = false
     @Volatile private var lastCacheTime = 0L
     private val CACHE_INTERVAL_MS = 2000L
 
@@ -326,6 +332,8 @@ class KeyboardHook : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         val ims = param.thisObject as? InputMethodService ?: return
+                        // inputType == 0 → input restarted on something that holds no text.
+                        if ((param.args[0] as? EditorInfo)?.inputType == 0) inputRestartedNonEditable = true
                         try { refreshPrefs(ims.applicationContext); registerShake(ims.applicationContext) } catch (_: Throwable) {}
                     }
                 }
@@ -1154,13 +1162,14 @@ class KeyboardHook : IXposedHookLoadPackage {
             var textLen = -1          // total length (-1 = unknown → no right-edge detection)
             var rtl = false           // RTL field → DPAD_RIGHT decreases the logical index
             var canTrack = false      // true once we have a valid caret to count from
+            var escaped = false       // focus left the editor → send nothing more this gesture
             val blocked = HashSet<Int>()   // directions parked at a boundary this gesture
             btn.setOnTouchListener { v, e ->
                 when (e.action) {
                     MotionEvent.ACTION_DOWN -> {
                         active = true; accX = 0f; accY = 0f; steps = 0
                         lastX = e.rawX; lastY = e.rawY
-                        blocked.clear()
+                        blocked.clear(); escaped = false; inputRestartedNonEditable = false
                         predIndex = readCaret(ims); textLen = readLen(ims); rtl = isRtlContext(ims)
                         canTrack = predIndex >= 0
                         hapticHeavy(ctx)   // heavy "pop" on grab
@@ -1170,7 +1179,7 @@ class KeyboardHook : IXposedHookLoadPackage {
                         true
                     }
                     MotionEvent.ACTION_MOVE -> {
-                        if (!active) return@setOnTouchListener true
+                        if (!active || escaped) return@setOnTouchListener true
                         accX += e.rawX - lastX
                         accY += e.rawY - lastY
                         lastX = e.rawX; lastY = e.rawY
@@ -1178,12 +1187,27 @@ class KeyboardHook : IXposedHookLoadPackage {
                         val stepX = TRACKPAD_STEP_X / sens
                         val stepY = TRACKPAD_STEP_Y / sens
 
+                        // A restart with inputType == 0 means a DPAD may have just handed
+                        // focus to a neighbouring view. It also fires spuriously (Snapchat
+                        // restarts input mid-gesture while the composer keeps focus), so
+                        // confirm with ONE caret read before abandoning the gesture. Costs
+                        // nothing on the normal path — it only reads when the flag is up.
+                        fun fieldLost(): Boolean {
+                            if (escaped) return true
+                            if (!inputRestartedNonEditable) return false
+                            inputRestartedNonEditable = false
+                            if (readCaret(ims) >= 0) return false      // spurious restart
+                            escaped = true; hapticBoundary(ctx)
+                            XposedBridge.log("$TAG [KB] trackpad ESCAPED (input restarted with no text field) steps=$steps")
+                            return true
+                        }
+
                         // Horizontal step — PURE internal tracking, zero round-trips.
                         // We know the index moves ±1 per DPAD (RTL flips the sign), and the
                         // left edge is always 0, so we can refuse the escaping key from
                         // predIndex alone — no read to lag behind the finger, no rubber-band.
                         fun emitHoriz(keyCode: Int): Boolean {
-                            if (keyCode in blocked) return false
+                            if (fieldLost() || keyCode in blocked) return false
                             if (canTrack) {
                                 val atLeftEdge  = predIndex <= 0
                                 val atRightEdge = textLen >= 0 && predIndex >= textLen
@@ -1220,7 +1244,7 @@ class KeyboardHook : IXposedHookLoadPackage {
                         // exactly ONE resync read to restore predIndex (per line change, not
                         // per step). Block only at the true text start/end when known.
                         fun emitVert(keyCode: Int): Boolean {
-                            if (keyCode in blocked) return false
+                            if (fieldLost() || keyCode in blocked) return false
                             if (canTrack) {
                                 val escapes = when (keyCode) {
                                     KeyEvent.KEYCODE_DPAD_UP   -> predIndex <= 0
@@ -1233,16 +1257,33 @@ class KeyboardHook : IXposedHookLoadPackage {
                                     return false
                                 }
                             }
+                            val before = predIndex
                             moveCursorDpad(ims, keyCode); steps++
                             hapticTick(ctx)
                             val resync = readCaret(ims)
-                            if (resync >= 0) {
-                                predIndex = resync; canTrack = true
-                                blocked.remove(KeyEvent.KEYCODE_DPAD_LEFT)
-                                blocked.remove(KeyEvent.KEYCODE_DPAD_RIGHT)
-                            } else {
-                                canTrack = false   // editor stopped reporting → suspend H math
+                            if (resync < 0) {
+                                // The caret went unreadable the instant we sent a vertical key:
+                                // the editor is no longer the input target. Stop, rather than
+                                // walk DPADs through whatever view now holds focus. Losing the
+                                // caret is proof of an escape, so fail SAFE here — the old code
+                                // only cleared canTrack, which switched every guard OFF.
+                                canTrack = false; escaped = true; hapticBoundary(ctx)
+                                XposedBridge.log("$TAG [KB] trackpad ESCAPED key=$keyCode (caret unreadable after step)")
+                                return false
                             }
+                            if (resync == before) {
+                                // A vertical move that changed nothing means there is no line
+                                // that way — we are on the field's first/last line. Park the
+                                // direction NOW, because the next one is the one that hands
+                                // focus to the neighbouring view. The offset guards above miss
+                                // this whenever the caret sits mid-line (predIndex 1, not 0).
+                                blocked.add(keyCode); hapticBoundary(ctx)
+                                XposedBridge.log("$TAG [KB] trackpad LINE-boundary key=$keyCode pred=$predIndex")
+                                return false
+                            }
+                            predIndex = resync; canTrack = true
+                            blocked.remove(KeyEvent.KEYCODE_DPAD_LEFT)
+                            blocked.remove(KeyEvent.KEYCODE_DPAD_RIGHT)
                             XposedBridge.log("$TAG [KB] trackpad step key=$keyCode pred=$predIndex read=true")
                             return true
                         }
@@ -1258,7 +1299,7 @@ class KeyboardHook : IXposedHookLoadPackage {
                         v.parent?.requestDisallowInterceptTouchEvent(false)
                         // One resync on release to absorb any drift from internal counting.
                         val finalCaret = readCaret(ims)
-                        XposedBridge.log("$TAG [KB] trackpad UP steps=$steps pred=$predIndex actual=$finalCaret root=$cachedTrackpadRoot")
+                        XposedBridge.log("$TAG [KB] trackpad UP steps=$steps pred=$predIndex actual=$finalCaret escaped=$escaped root=$cachedTrackpadRoot")
                         true
                     }
                     else -> false
