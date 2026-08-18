@@ -13,6 +13,7 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.inputmethodservice.InputMethodService
+import java.text.BreakIterator
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -870,6 +871,17 @@ class KeyboardHook : IXposedHookLoadPackage {
         } catch (_: Throwable) { false }
     }
 
+    // The whole field's text, or null if the editor won't hand it over. Grabbed ONCE per
+    // gesture - dragging the caret never edits, so one snapshot holds - and it is what
+    // lets a horizontal step land on a grapheme boundary instead of inside an emoji or
+    // between an Arabic letter and its combining mark.
+    private fun readText(ims: InputMethodService): CharSequence? {
+        val ic = ims.currentInputConnection ?: return null
+        return try {
+            ic.getExtractedText(ExtractedTextRequest().apply { token = 0 }, 0)?.text
+        } catch (_: Throwable) { null }
+    }
+
     // Absolute caret offset, or -1 if the editor won't report it. We do NOT use this to
     // guess boundaries from logical before/after (that's wrong under RTL, where visual
     // DPAD direction ≠ logical direction). Instead we read it before/after a DPAD step
@@ -1178,6 +1190,8 @@ class KeyboardHook : IXposedHookLoadPackage {
             var canTrack = false      // true once we have a valid caret to count from
             var escaped = false       // focus left the editor → send nothing more this gesture
             var needsResync = false   // a vertical DPAD moved the caret; re-read before naming an offset
+            var gestureText: CharSequence? = null   // one snapshot per gesture, for grapheme steps
+            var graphemes: BreakIterator? = null    // grapheme boundaries over gestureText
             val blocked = HashSet<Int>()   // directions parked at a boundary this gesture
             btn.setOnTouchListener { v, e ->
                 when (e.action) {
@@ -1185,7 +1199,13 @@ class KeyboardHook : IXposedHookLoadPackage {
                         active = true; accX = 0f; accY = 0f; steps = 0
                         lastX = e.rawX; lastY = e.rawY
                         blocked.clear(); escaped = false; needsResync = false; inputRestartedNonEditable = false
-                        predIndex = readCaret(ims); textLen = readLen(ims); rtl = isRtlContext(ims)
+                        predIndex = readCaret(ims); rtl = isRtlContext(ims)
+                        gestureText = readText(ims)
+                        textLen = gestureText?.length ?: readLen(ims)
+                        graphemes = gestureText?.let { t ->
+                            try { BreakIterator.getCharacterInstance().apply { setText(t.toString()) } }
+                            catch (_: Throwable) { null }
+                        }
                         canTrack = predIndex >= 0
                         hapticHeavy(ctx)   // heavy "pop" on grab
                         // Keep the gesture ours — don't let the keyboard layout steal the drag.
@@ -1225,6 +1245,41 @@ class KeyboardHook : IXposedHookLoadPackage {
                         // to fall through, and it is exact: the +/-1 bookkeeping the old path
                         // kept drifted under RTL until the caret and predIndex disagreed.
                         // One IC call per touch event now, not one per step.
+                        // One offset step, measured in grapheme clusters. Stepping by raw
+                        // index would drop the caret inside an emoji (two chars) or between
+                        // an Arabic letter and its combining mark - the editor accepts that
+                        // offset, and the next keystroke splits the character. Falls back to
+                        // raw indices only when the editor refused to hand over its text.
+                        fun stepOffset(from: Int, delta: Int): Int {
+                            val limit = if (textLen >= 0) textLen else Int.MAX_VALUE
+                            val bi  = graphemes
+                            val len = gestureText?.length
+                            if (bi == null || len == null) return (from + delta).coerceIn(0, limit)
+                            return try {
+                                var idx = from.coerceIn(0, len)
+                                var n = kotlin.math.abs(delta)
+                                while (n > 0) {
+                                    // following()/preceding() snap to the nearest boundary even
+                                    // when idx is mid-cluster, so this self-corrects.
+                                    val next = if (delta > 0) bi.following(idx) else bi.preceding(idx)
+                                    if (next == BreakIterator.DONE) break   // start/end of text
+                                    idx = next; n--
+                                }
+                                idx.coerceIn(0, limit)
+                            } catch (_: Throwable) { (from + delta).coerceIn(0, limit) }
+                        }
+
+                        // Some editors report nothing until they have been touched, so a failed
+                        // read at grab time must not freeze the stick for the whole gesture.
+                        fun ensureCaret(): Boolean {
+                            if (canTrack) return true
+                            val c = readCaret(ims)
+                            if (c < 0) return false
+                            predIndex = c; canTrack = true
+                            if (textLen < 0) textLen = readLen(ims)
+                            return true
+                        }
+
                         fun applyHoriz(visualSteps: Int): Boolean {
                             if (fieldLost() || visualSteps == 0) return false
                             if (!canTrack) return false   // no caret to name - never guess an offset
@@ -1239,8 +1294,7 @@ class KeyboardHook : IXposedHookLoadPackage {
                             // In an RTL field a drag to the visual right walks the logical index
                             // down, so the sign flips.
                             val delta  = if (rtl) -visualSteps else visualSteps
-                            val limit  = if (textLen >= 0) textLen else Int.MAX_VALUE
-                            val target = (predIndex + delta).coerceIn(0, limit)
+                            val target = stepOffset(predIndex, delta)
                             if (target == predIndex) {
                                 hapticBoundary(ctx)
                                 XposedBridge.log("$TAG [KB] trackpad H-edge pred=$predIndex len=$textLen")
@@ -1254,9 +1308,11 @@ class KeyboardHook : IXposedHookLoadPackage {
                             return true
                         }
 
-                        // Root escape hatch: apps where the InputConnection is ignored need real
-                        // key events, so those keep the legacy per-step DPAD path and its guards.
-                        fun emitHorizRoot(keyCode: Int): Boolean {
+                        // The two cases setSelection cannot serve: root injection mode (the
+                        // InputConnection is bypassed on purpose) and editors that never report
+                        // a caret, where there is no offset to name. Both keep the legacy
+                        // per-step DPAD path, with 3.2.2's guards bounding the damage.
+                        fun emitHorizKey(keyCode: Int): Boolean {
                             if (fieldLost() || keyCode in blocked) return false
                             if (canTrack) {
                                 val atLeftEdge  = predIndex <= 0
@@ -1331,13 +1387,14 @@ class KeyboardHook : IXposedHookLoadPackage {
                         while (accX >= stepX)  { hSteps++; accX -= stepX }
                         while (accX <= -stepX) { hSteps--; accX += stepX }
                         if (hSteps != 0) {
-                            val ok = if (cachedTrackpadRoot) {
+                            val exact = !cachedTrackpadRoot && ensureCaret()
+                            val ok = if (exact) applyHoriz(hSteps) else {
                                 val key = if (hSteps > 0) KeyEvent.KEYCODE_DPAD_RIGHT
                                           else            KeyEvent.KEYCODE_DPAD_LEFT
                                 var any = false
-                                repeat(kotlin.math.abs(hSteps)) { if (emitHorizRoot(key)) any = true }
+                                repeat(kotlin.math.abs(hSteps)) { if (emitHorizKey(key)) any = true }
                                 any
-                            } else applyHoriz(hSteps)
+                            }
                             if (!ok) accX = 0f
                         }
 

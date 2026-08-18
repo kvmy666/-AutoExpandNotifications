@@ -42,6 +42,22 @@
             android:foregroundServiceType="specialUse"
             android:exported="false" />
 
+        <!--
+          Quick Settings tile. Without this declaration the class exists but Android never
+          learns about it, so it cannot appear in the QS editor at all - and R8 strips it.
+          BIND_QUICK_SETTINGS_TILE + exported=true is how SystemUI is allowed to bind it.
+        -->
+        <service
+            android:name=".SnapperTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_snapper_tile"
+            android:label="@string/snapper_tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
         <service
             android:name=".StatusBarZonesService"
             android:foregroundServiceType="specialUse"
