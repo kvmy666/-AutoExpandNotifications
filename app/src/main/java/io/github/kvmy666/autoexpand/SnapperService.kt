@@ -46,6 +46,12 @@ class SnapperService : Service() {
         /** Float a saved snap from history as an overlay; pass EXTRA_SNAP_PATH with the file path. */
         const val ACTION_FLOAT_SNAP       = "io.github.kvmy666.autoexpand.ACTION_FLOAT_SNAP"
         const val EXTRA_SNAP_PATH         = "snap_path"
+        /**
+         * How long to let the Quick Settings panel finish collapsing before grabbing the
+         * frame. Android's shade collapse animation runs ~360 ms; this leaves headroom for
+         * OEM skins that animate slower. Too low and the snap contains Quick Settings.
+         */
+        private const val QS_COLLAPSE_SETTLE_MS = 400L
         private const val NOTIFICATION_ID = 1001
         private const val TAG             = "Snapper"
         private const val FILE_PROVIDER   = "io.github.kvmy666.autoexpand.fileprovider"
@@ -112,7 +118,7 @@ class SnapperService : Service() {
         }
 
         when (intent?.action) {
-            ACTION_CAPTURE           -> startCapture()
+            ACTION_CAPTURE           -> startCapture(intent.getBooleanExtra(EXTRA_QS_TRIGGERED, false))
             ACTION_SHOW_EDGE_BUTTON  -> showEdgeButton()
             ACTION_HIDE_EDGE_BUTTON  -> { hideEdgeButton(); stopSelfIfIdle() }
             ACTION_FLOAT_SNAP        -> {
@@ -248,12 +254,25 @@ class SnapperService : Service() {
     }
 
     /** Single entry-point for all capture triggers (chord, edge button, QS tile). */
-    private fun startCapture() {
+    private fun startCapture(fromQs: Boolean = false) {
         if (cropView != null) return
-        startPrefetchScreencap()
-        // Delay crop UI by 100 ms — screencap grabs its SurfaceFlinger frame in ~16 ms
-        // (one vsync), so the crop overlay is guaranteed to be absent from the capture.
-        handler.postDelayed({ showCropUi() }, 100L)
+        // screencap grabs its SurfaceFlinger frame the moment the thread starts, so the
+        // trigger decides what ends up in the shot. From the edge button the screen is
+        // already what the user wants. From the Quick Settings tile it is NOT: the panel
+        // is still on screen, or mid-collapse, when the service starts, so capturing
+        // immediately snaps Quick Settings instead of the screen behind it.
+        //
+        // There is no public callback for "the shade has finished collapsing" that a
+        // tile can rely on - onStopListening() only fires once the panel is already
+        // going, and on some devices the panel does not begin closing until our overlay
+        // appears, which would deadlock a wait. So the QS path settles on a delay.
+        val settle = if (fromQs) QS_COLLAPSE_SETTLE_MS else 0L
+        handler.postDelayed({
+            startPrefetchScreencap()
+            // Delay crop UI - screencap grabs its frame in ~16 ms (one vsync), so the
+            // crop overlay is guaranteed to be absent from the capture.
+            handler.postDelayed({ showCropUi() }, 100L)
+        }, settle)
     }
 
     private fun startSuShell() {
