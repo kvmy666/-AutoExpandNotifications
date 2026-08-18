@@ -34,6 +34,14 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
         /** `Notification.FLAG_GROUP_SUMMARY` — read off the posted notification, so race-free. */
         const val FLAG_GROUP_SUMMARY = 0x00000200
 
+        /**
+         * `NotificationContentView.VISIBLE_TYPE_SINGLELINE` — the one-line layout a group child
+         * shows while its group is closed. Read out of this device's dex: `calculateVisibleType`
+         * returns this constant for any child whose group is closed, *before* it looks at any
+         * height at all.
+         */
+        const val VISIBLE_TYPE_SINGLE_LINE = 3
+
         const val GROUP_MANAGER_CLASS =
             "com.android.systemui.statusbar.notification.collection.render.GroupExpansionManagerImpl"
 
@@ -164,6 +172,53 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                     "v2 $trigger skip=${decision.why} key=${facts.key} kg=${facts.onKeyguard} " +
                     "grpExp=${facts.groupExpanded} exp=${facts.expandedUngated}"
                 }
+            }
+        }
+
+        // Read the group state again rather than from `facts`: the decision above may have just
+        // opened this group, and the repair below is about the state the children are in *now*.
+        if (facts.isSummaryWithChildren && RowApi.callBool(RowApi.isGroupExpanded, row))
+            repairChildLayouts(row, trigger)
+    }
+
+    /**
+     * Puts a child back on the right layout when its group is open but it is still drawing its
+     * one-line self.
+     *
+     * The symptom: rows in an open group rendered as a full-size card containing a single line
+     * of "sender: message" text at the top and blank space below — no icon, no timestamp, no
+     * expand arrow. Both halves are consistent with their own inputs, which is why it looks so
+     * strange: read out of this device's dex, `NotificationContentView.calculateVisibleType()`
+     * returns SINGLELINE for any child whose group reads closed, while
+     * `ExpandableNotificationRow.getIntrinsicHeight()` sizes a child of an *open* group from
+     * its contracted layout. So a child that never re-ran its layout selection after the group
+     * opened ends up one line of content inside a card sized for three.
+     *
+     * The engine opens groups from inside SystemUI's own callbacks, which run during a layout
+     * traversal, and a `requestLayout()` issued from there is dropped for the current pass —
+     * the most likely way for a child to miss the update. Rather than gamble on timing, this
+     * tests the state directly and repairs only what is actually wrong: `selectLayout` on a
+     * correct row recomputes the same type and does nothing, so the check runs on every render
+     * trigger and the display heals itself on the next frame no matter what caused the stale
+     * state.
+     *
+     * Deliberately independent of the children toggle. That toggle chooses between one-line and
+     * expanded *content*; this is about a row whose content does not match its own card, which
+     * is never a setting anyone would choose.
+     */
+    private fun repairChildLayouts(summary: Any, trigger: String) {
+        if (!RowApi.layoutRepairCapable) return
+        Attribution.ours {
+            for (child in RowApi.attachedChildrenOf(summary)) {
+                try {
+                    if (RowApi.visibleTypeOf(child) != VISIBLE_TYPE_SINGLE_LINE) continue
+                    // Ask the child itself, not the summary. If the child still reads its group
+                    // as closed then one line is the right answer for it and re-selecting would
+                    // return the same type on every render — a repair that never converges.
+                    if (!RowApi.callBool(RowApi.isGroupExpanded, child)) continue
+                    if (!RowApi.reselectLayout(child)) continue
+                    NotifLog.d { "v2 $trigger repaired stale single-line child key=${keyOf(child)}" }
+                } catch (_: Throwable) {}
             }
         }
     }

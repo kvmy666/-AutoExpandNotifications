@@ -46,6 +46,12 @@ object RowApi {
     var fChildrenExpanded: Field? = null; private set
     private var fChildrenContainer: Field? = null
     private var fAttachedChildren: Field? = null
+    private var fPrivateLayout: Field? = null
+
+    // NotificationContentView — the row's content, and the thing that decides which of the
+    // inflated layouts (contracted / expanded / heads-up / single-line) is on screen.
+    private var getVisibleType: Method? = null
+    private var selectLayout: Method? = null
 
     @Volatile private var bound = false
 
@@ -87,6 +93,12 @@ object RowApi {
         fChildrenExpanded        = field(cls, "mChildrenExpanded")
         fChildrenContainer       = field(cls, "mChildrenContainer")
         fAttachedChildren        = fChildrenContainer?.type?.let { field(it, "mAttachedChildren") }
+        fPrivateLayout           = field(cls, "mPrivateLayout")
+        fPrivateLayout?.type?.let { contentView ->
+            getVisibleType = method(contentView, "getVisibleType")
+            selectLayout   = method(contentView, "selectLayout",
+                Boolean::class.javaPrimitiveType!!, Boolean::class.javaPrimitiveType!!)
+        }
 
         Log.d(TAG, "RowApi caps: $caps")
         if (!usable) Log.e(TAG, "RowApi: insufficient capabilities — v2 engine will stay off")
@@ -101,11 +113,16 @@ object RowApi {
                 "fHU=${b(fIsHeadsUp)} fKG=${b(fOnKeyguard)} fUserExp=${b(fUserExpanded)} " +
                 "fUserChanged=${b(fHasUserChangedExpansion)} fSysExp=${b(fIsSystemExpanded)} " +
                 "fKidsExp=${b(fChildrenExpanded)} groupExp=${b(isGroupExpanded)} " +
-                "showPublic=${b(shouldShowPublic)} kids=${b(fChildrenContainer)}/${b(fAttachedChildren)}"
+                "showPublic=${b(shouldShowPublic)} kids=${b(fChildrenContainer)}/${b(fAttachedChildren)} " +
+                "content=${b(fPrivateLayout)} visType=${b(getVisibleType)} selectLayout=${b(selectLayout)}"
 
     /** True when the group parent/children toggles have everything they need on this ROM. */
     val groupCapable: Boolean
         get() = isSummaryWithChildren != null && isGroupExpanded != null && setUserExpanded2 != null
+
+    /** True when a stale child layout can be detected and re-selected. */
+    val layoutRepairCapable: Boolean
+        get() = fPrivateLayout != null && getVisibleType != null && selectLayout != null
 
     private fun b(o: Any?) = if (o != null) 1 else 0
 
@@ -160,6 +177,34 @@ object RowApi {
         val container = fChildrenContainer?.get(row) ?: return emptyList()
         (fAttachedChildren?.get(container) as? List<Any>)?.toList() ?: emptyList()
     } catch (_: Throwable) { emptyList() }
+
+    /**
+     * Which inflated layout the row is currently showing:
+     * `0` contracted, `1` expanded, `2` heads-up, `3` single-line, `-1` unknown.
+     *
+     * Read off `mPrivateLayout` — the public content. A group child renders its single-line
+     * layout while its group is closed, so this is how a child left on the wrong layout after
+     * the group opened can be told apart from one that is legitimately one line.
+     */
+    fun visibleTypeOf(row: Any): Int = try {
+        val content = fPrivateLayout?.get(row) ?: return -1
+        (getVisibleType?.invoke(content) as? Int) ?: -1
+    } catch (_: Throwable) { -1 }
+
+    /**
+     * Re-runs the row's own layout selection (`selectLayout(animate = false, force = true)`).
+     *
+     * This is SystemUI's own primitive for "the situation changed, work out what to show":
+     * it calls `calculateVisibleType()` and applies the answer. It sets no height and no
+     * expansion state, so it cannot fight the engine or the user — on a row that is already
+     * correct it recomputes the same type and does nothing.
+     */
+    fun reselectLayout(row: Any): Boolean = try {
+        val m = selectLayout ?: return false
+        val content = fPrivateLayout?.get(row) ?: return false
+        m.invoke(content, false, true)
+        true
+    } catch (_: Throwable) { false }
 
     fun entryOf(row: Any): Any? =
         try { getEntry?.invoke(row) } catch (_: Throwable) { null }
