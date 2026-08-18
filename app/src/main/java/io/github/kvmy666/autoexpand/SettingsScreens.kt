@@ -83,7 +83,7 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     var selectedFeature by remember { mutableStateOf<String?>(null) }
 
     // ── What's New dialog ─────────────────────────────────────────────────────
-    var showWhatsNew by remember { mutableStateOf(!prefs.getBoolean("whats_new_seen_3_2_1", false)) }
+    var showWhatsNew by remember { mutableStateOf(!prefs.getBoolean("whats_new_seen_3_2_2", false)) }
     var whatsNewDontShow by remember { mutableStateOf(false) }
 
     // ── Notifications state ───────────────────────────────────────────────────
@@ -108,7 +108,6 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     var snapperButtonSide    by remember { mutableStateOf(prefs.getString("snapper_button_side", "right") ?: "right") }
     var snapperDoubleTap     by remember { mutableStateOf(prefs.getBoolean("snapper_double_tap_dismiss", true)) }
     var snapperHistLimit     by remember { mutableStateOf(prefs.getString("snapper_history_limit", "50") ?: "50") }
-    var snapperHardwareChord   by remember { mutableStateOf(prefs.getBoolean("snapper_hardware_chord_enabled", true)) }
     var snapperMasterEnabled   by remember { mutableStateOf(prefs.getBoolean("enable_snapper_entirely", true)) }
 
     // ── Status Bar Zones state ────────────────────────────────────────────────
@@ -213,23 +212,23 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     if (showWhatsNew) {
         AlertDialog(
             onDismissRequest = {
-                if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_2_1", true).apply()
+                if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_2_2", true).apply()
                 showWhatsNew = false
             },
-            title = { Text("What's New in v3.2.1") },
+            title = { Text("What's New in v3.2.2") },
             text = {
                 Column(
                     modifier = Modifier.verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text("New features", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
-                    Text("• Clipboard Search (🔍) — tap Search in the Clipboard Vault to instantly find any saved clip. Fast, accent-insensitive, multi-word, with matches highlighted")
-                    Text("• Unlimited clipboard history — saved clips are no longer capped")
-                    Text("• Keep Screen On — new toggle in System Behavior that stops the screen from sleeping while you're using your phone")
-                    Spacer(Modifier.height(4.dp))
                     Text("Fixes", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
-                    Text("• Global Search: the Go / Enter key now launches the first app in the results")
-                    Text("• Several notification expand fixes for more reliable auto-expand")
+                    Text("• Screenshots work again — Volume Down + Power is no longer intercepted. The module no longer hooks system services at all, so it cannot affect your hardware buttons")
+                    Text("• Notifications: more reliable auto-expand on the lock screen and inside grouped notifications")
+                    Text("• Trackpad stick: it now stops at the edge of the text box instead of firing into the rest of the app")
+                    Text("• Keyboard: GIFs and stickers send correctly again")
+                    Spacer(Modifier.height(4.dp))
+                    Text("Changes", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+                    Text("• Snapper's Power + Volume Down shortcut has been removed. Open it from the Quick Settings tile or the edge button instead — pick one under Snapper › Activation method")
                     Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = whatsNewDontShow, onCheckedChange = { whatsNewDontShow = it })
@@ -239,7 +238,7 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
             },
             confirmButton = {
                 TextButton(onClick = {
-                    if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_2_1", true).apply()
+                    if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_2_2", true).apply()
                     showWhatsNew = false
                 }) { Text("Got it") }
             }
@@ -661,11 +660,9 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
                             },
                             onMethodChange    = { method ->
                                 snapperMethod = method
-                                val chordOn = method == "chord" || method == "both"
-                                val edgeOn  = method == "edge_button" || method == "both"
+                                val edgeOn = method == "edge_button" || method == "both"
                                 prefs.edit()
                                     .putString("snapper_activation_method", method)
-                                    .putBoolean("snapper_hardware_chord_enabled", chordOn)
                                     .apply()
                                 MainActivity.makePrefsWorldReadable(context)
                                 val svc = Intent(context, SnapperService::class.java)
