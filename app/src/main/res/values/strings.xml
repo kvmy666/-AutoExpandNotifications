@@ -53,6 +53,8 @@
     <string name="btn_selectall_desc">Tap = select last word · Long-press = select all</string>
     <string name="btn_cursor_title">← →  Cursor navigation</string>
     <string name="btn_cursor_desc">Jump cursor to start or end of field</string>
+    <string name="btn_selectmode_title">🖍️  Select mode</string>
+    <string name="btn_selectmode_desc">Adds a toggle next to the stick. While it is on, dragging the stick — forwards or backwards — highlights text instead of just moving the cursor</string>
     <string name="btn_shortcut_title">★  Text shortcut</string>
     <string name="btn_shortcut_desc">Tap / long-press to insert preset text</string>
     <string name="keyboard_shortcut1_title">Shortcut 1 — tap</string>
