@@ -65,6 +65,10 @@ object TestNotifier {
             "Silent (shade only)",
             "Low importance — lands in the shade with no heads-up banner"
         ),
+        LoneGroupChild(
+            "Lone group child (no summary)",
+            "Group key set but no summary posted — Instagram's shape. Renders as a plain single"
+        ),
     }
 
     /**
@@ -95,6 +99,7 @@ object TestNotifier {
                 Kind.Silent         -> nm.notify(nextId(), silent(context))
                 Kind.Group          -> postGroup(nm, context)
                 Kind.AutoGroupFlood -> repeat(5) { i -> nm.notify(nextId(), flood(context, i + 1)) }
+                Kind.LoneGroupChild -> nm.notify(nextId(), loneGroupChild(context))
             }
         } catch (_: Throwable) {
             // Most likely POST_NOTIFICATIONS was denied. The screen surfaces that separately.
@@ -195,6 +200,30 @@ object TestNotifier {
             .setGroupSummary(true)
             .build())
     }
+
+    /**
+     * A notification that asks to be grouped but is the only member and has no summary.
+     *
+     * This is the shape Instagram posts for every DM thread, and it is the regression test for
+     * the fix: SystemUI drops a group that has no summary and draws the row as an ordinary
+     * single card, while the notification still carries `|g:…` in its group key. Classifying it
+     * from the group key alone made the engine treat it as a group child and leave it collapsed.
+     *
+     * The key is unique per post so two of these stay two singles rather than accidentally
+     * forming a real group.
+     */
+    private fun loneGroupChild(context: Context) = base(context)
+        .setContentTitle("Lone group child")
+        .setContentText("Group key set, no summary posted")
+        .setStyle(
+            NotificationCompat.BigTextStyle().bigText(
+                "This notification declares a group but is its only member and posts no " +
+                "summary, so SystemUI renders it as a plain single. If auto-expand is working " +
+                "you are reading this without touching anything."
+            )
+        )
+        .setGroup("$GROUP_KEY.lone.${nextId}")
+        .build()
 
     private fun flood(context: Context, index: Int) = base(context)
         .setContentTitle("Ungrouped #$index")

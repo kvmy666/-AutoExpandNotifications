@@ -411,7 +411,64 @@ reported screenshots were taken — 6 on a second lock/unlock cycle, and **0 acr
 shade open/close cycles**. So the stale state is specific to the keyguard transition and the
 repair does not churn.
 
-### 12.3 What the stock shapes look like (so a screenshot can be read at a glance)
+### 12.3 Some apps' singles stayed collapsed (Instagram) — fixed
+
+**Symptom.** Instagram DMs rendered as ordinary single cards but **collapsed**, while other
+singles (Morphe, LSPosed) expanded normally. It looked like "some apps ignore the expand".
+
+**Repro.** `POST_TEST --es kind LoneGroupChild` — a notification with a group key set, no
+summary posted, and no sibling. That is Instagram's exact shape and it is now a permanent test
+kind.
+
+**Cause.** `RowFacts.isGroupChild` classified from the group key alone (`|g:` present). That
+records what the *app asked for*, not what SystemUI built. Read off the device:
+
+```
+pkg=com.instagram.android  flags=SHOW_LIGHTS|AUTO_CANCEL   (no GROUP_SUMMARY)
+groupKey=0|com.instagram.android|g:1133210746-ig_direct-direct-…thread_id:…
+pkg=app.morphe.manager     groupKey=0|app.morphe.manager|2001|null|10630   (no |g:)
+```
+
+Instagram gives **every DM thread its own group key** and posts **no summary**, so each
+notification is the only member of a group that never forms. `ShadeListBuilder` keeps a group
+only while it has a summary and promotes a lone child back to the top level — so the row is
+drawn as a plain single while still carrying `|g:…`. The engine called it a group child, the
+children toggle is off, and it logged `skip=GroupChild` and stayed shut. Morphe has no `|g:`
+at all, so it expanded — hence "some apps ignore the expand".
+
+19. **The authority is the pipeline, not the group key.** Bytecode of
+    `GroupMembershipManagerImpl.getGroupSummary` on this device:
+    `entry.getParent()`, reject `GroupEntry.ROOT_ENTRY` and `null`, then
+    `((GroupEntry) parent).getSummary()`. So a row is a group child **exactly when its parent is
+    a `GroupEntry` holding a summary**. `getParent()` moved from `ListEntry` up to
+    `PipelineEntry` in Android 16; `GroupEntry.getSummary()` is not obfuscated on this build.
+
+**Fix.** `RowApi.pipelineGroupedOf(row)` mirrors that method, and `RowFacts.pipelineGrouped`
+carries it into the policy: `isGroupChild = !isGroupSummary && (pipelineGrouped ?: belongsToGroup)`.
+The group key stays as the fallback for a ROM where the pipeline cannot be read.
+
+**Tri-state on purpose.** `null` means "cannot tell" — handles missing, parent not attached
+yet, or a parent of some other shape (an Android 16 `BundleEntry`). Measured: on the early
+`onAttachedToWindow` / `setOnKeyguard` triggers the entry has no parent yet and logs
+`pipeGrp=null grpKey=true`, so the fallback is load-bearing, not decoration. Guessing `false`
+there would expand real group children before their summary attached — finding 15's failure.
+
+**Verified on device.** `pipeGrp=false grpKey=true` → `EXPAND` → screenshot shows the card
+fully expanded. Genuine children (WhatsApp, Messages, LinkedIn) log `pipeGrp=true` and still
+`skip=GroupChild`. `RowApi caps:` now ends `entryParent=1 groupSummary=1`.
+
+**Convergence when a real group forms.** `Kind.Group` posts children before the summary — the
+order a real app uses. In that window the children genuinely have no summary, log
+`pipeGrp=false`, and expand; the moment the summary lands they flip to `pipeGrp=true` and
+`skip=GroupChild`, and the traces end `exp=false`. So it converges rather than leaving finding
+15's scattered expanded cards.
+
+**Not a bug, so do not "fix" it:** with 2+ notifications from one app, Android bundles them into
+`g:Aggregate_*` and they become real children of that bundle — collapsed while the children
+toggle is off. Same for a messaging app's rows (barq). A single from such an app expands only
+while it is alone.
+
+### 12.4 What the stock shapes look like (so a screenshot can be read at a glance)
 
 | State | Look |
 |---|---|
@@ -419,11 +476,11 @@ repair does not churn.
 | Group **open** | section header (`WhatsApp ^`) + each child its **own** card with icon, timestamp, arrow |
 | The bug | section header + own cards, but children still drawing the **one-line** layout |
 
-### 12.4 Debug notes
+### 12.5 Debug notes
 
 - `RowApi caps:` now ends with `content=1 visType=1 selectLayout=1` — the three handles the repair
   needs. Zero there means the repair is a no-op on that ROM, nothing else changes.
-- `skip=` lines now carry `kg= grpExp= exp=`, so a wrong skip is diagnosable from the log alone.
+- `skip=` lines now carry `kg= grpExp= exp= pipeGrp= grpKey=`, so a wrong skip is diagnosable from the log alone.
 - The probe snapshot gained `actualH= grpExp= visType=` — `visType=3` with `grpExp=true` is
   exactly the 12.2 state.
 - `cmd notification post` has **no cancel**, and `pm clear` / `pm revoke` are refused for

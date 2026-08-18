@@ -39,6 +39,15 @@ data class RowFacts(
     val groupUserCollapsed: Boolean = false,
     /** We have already collapsed this row once as a group child — see [Decision.Collapse]. */
     val childCollapseDone: Boolean = false,
+    /**
+     * SystemUI's own answer to "is this row drawn inside a group", read from the notification
+     * pipeline (`RowApi.pipelineGroupedOf`): its parent is a group that has a summary.
+     *
+     * `null` means the pipeline could not be read, and [isGroupChild] falls back to the group
+     * key. Anything else would be a guess: the two disagree precisely for the notifications
+     * this fact exists to get right.
+     */
+    val pipelineGrouped: Boolean? = null,
 ) {
     /**
      * Whether the notification belongs to *any* group.
@@ -65,9 +74,17 @@ data class RowFacts(
      *
      * A notification the system has *not* bundled has no group key marker at all and is still a
      * single, which is why one that arrives on its own expands as before.
+     *
+     * The group key is only the fallback, though. It records what the *app* asked for, and an
+     * app can ask for a group it never gets: SystemUI keeps a group only while a summary row
+     * exists for it and promotes a lone child back to the top level. Instagram gives every DM
+     * thread its own group key and posts no summary, so its notifications carry `|g:…` while
+     * rendering as ordinary single cards — and were skipped as group children, collapsed, for
+     * as long as the children toggle was off. [pipelineGrouped] is SystemUI's own verdict and
+     * wins wherever it can be read.
      */
     val isGroupChild: Boolean
-        get() = !isGroupSummary && belongsToGroup
+        get() = !isGroupSummary && (pipelineGrouped ?: belongsToGroup)
 
     /** Diagnostic only — which flavour of group this is, for the log line. */
     val isSystemAggregate: Boolean

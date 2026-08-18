@@ -115,6 +115,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                 groupExpanded = RowApi.callBool(RowApi.isGroupExpanded, row),
                 groupUserCollapsed = RowStateStore.isGroupCollapsedByUser(key),
                 childCollapseDone = RowStateStore.wasChildCollapsed(key),
+                pipelineGrouped = RowApi.pipelineGroupedOf(row),
             )
         } catch (_: Throwable) { null }
     }
@@ -170,7 +171,8 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                 // turning the (hot) probe on and reproducing it a second time.
                 NotifLog.d {
                     "v2 $trigger skip=${decision.why} key=${facts.key} kg=${facts.onKeyguard} " +
-                    "grpExp=${facts.groupExpanded} exp=${facts.expandedUngated}"
+                    "grpExp=${facts.groupExpanded} exp=${facts.expandedUngated} " +
+                    "pipeGrp=${facts.pipelineGrouped} grpKey=${facts.belongsToGroup}"
                 }
             }
         }

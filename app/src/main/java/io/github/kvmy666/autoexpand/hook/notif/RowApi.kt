@@ -22,6 +22,12 @@ object RowApi {
     private const val TAG = "AENotif"
     const val ROW_CLASS = "com.android.systemui.statusbar.notification.row.ExpandableNotificationRow"
 
+    private const val PKG = "com.android.systemui.statusbar.notification.collection"
+    /** Declares `getParent()` on this build; older ones declare it on `ListEntry`. */
+    private const val PIPELINE_ENTRY_CLASS = "$PKG.PipelineEntry"
+    private const val LIST_ENTRY_CLASS = "$PKG.ListEntry"
+    private const val GROUP_ENTRY_CLASS = "$PKG.GroupEntry"
+
     @Volatile var rowClass: Class<*>? = null; private set
 
     // Methods
@@ -36,6 +42,11 @@ object RowApi {
     var shouldShowPublic: Method? = null; private set
     private var getEntry: Method? = null
     private var getEntryLegacy: Method? = null
+
+    // The notification pipeline's own group model — see [pipelineGroupedOf].
+    private var groupEntryClass: Class<*>? = null
+    private var getParentEntry: Method? = null   // PipelineEntry.getParent()
+    private var getGroupSummary: Method? = null  // GroupEntry.getSummary()
 
     // Fields
     var fIsHeadsUp: Field? = null; private set
@@ -100,10 +111,30 @@ object RowApi {
                 Boolean::class.javaPrimitiveType!!, Boolean::class.javaPrimitiveType!!)
         }
 
+        bindPipeline(classLoader)
+
         Log.d(TAG, "RowApi caps: $caps")
         if (!usable) Log.e(TAG, "RowApi: insufficient capabilities — v2 engine will stay off")
         return usable
     }
+
+    /**
+     * Resolves the notification pipeline's group model.
+     *
+     * Separate from the row surface because it is optional: without it the engine falls back to
+     * reading the group key, which is what it always did. `getParent` moved from `ListEntry` up
+     * to `PipelineEntry` in Android 16, so both are tried.
+     */
+    private fun bindPipeline(classLoader: ClassLoader) {
+        val parentOwner = loadClass(classLoader, PIPELINE_ENTRY_CLASS)
+            ?: loadClass(classLoader, LIST_ENTRY_CLASS) ?: return
+        getParentEntry = method(parentOwner, "getParent")
+        groupEntryClass = loadClass(classLoader, GROUP_ENTRY_CLASS)
+        getGroupSummary = groupEntryClass?.let { method(it, "getSummary") }
+    }
+
+    private fun loadClass(classLoader: ClassLoader, name: String): Class<*>? =
+        try { classLoader.loadClass(name) } catch (_: Throwable) { null }
 
     val caps: String
         get() = "isExpandedArg=${b(isExpandedArg)} setSysExp=${b(setSystemExpanded)} " +
@@ -114,7 +145,8 @@ object RowApi {
                 "fUserChanged=${b(fHasUserChangedExpansion)} fSysExp=${b(fIsSystemExpanded)} " +
                 "fKidsExp=${b(fChildrenExpanded)} groupExp=${b(isGroupExpanded)} " +
                 "showPublic=${b(shouldShowPublic)} kids=${b(fChildrenContainer)}/${b(fAttachedChildren)} " +
-                "content=${b(fPrivateLayout)} visType=${b(getVisibleType)} selectLayout=${b(selectLayout)}"
+                "content=${b(fPrivateLayout)} visType=${b(getVisibleType)} selectLayout=${b(selectLayout)} " +
+                "entryParent=${b(getParentEntry)} groupSummary=${b(getGroupSummary)}"
 
     /** True when the group parent/children toggles have everything they need on this ROM. */
     val groupCapable: Boolean
@@ -205,6 +237,42 @@ object RowApi {
         m.invoke(content, false, true)
         true
     } catch (_: Throwable) { false }
+
+    /**
+     * Whether the notification pipeline draws this row *inside a group* — SystemUI's own answer,
+     * not the app's.
+     *
+     * The group key only says the app asked for grouping. It does not say a group was formed:
+     * `ShadeListBuilder` keeps a group only while it has a summary, and promotes a lone child
+     * back to the top level. Instagram gives every DM thread its own group key and posts no
+     * summary, so each notification carries `|g:…` while rendering as an ordinary single card —
+     * and the group-key test alone classified it as a group child and left it collapsed.
+     *
+     * Mirrors `GroupMembershipManagerImpl.getGroupSummary` as read out of this device's dex:
+     * a row is a group child exactly when its parent is a `GroupEntry` holding a summary.
+     * `GroupEntry.ROOT_ENTRY` — the top level — never has one, so it needs no special case.
+     *
+     * This is the *model*, set by the pipeline before the views are bound, which is why it is
+     * trustworthy on the pass where the view-level `isChildInGroup()` is still false.
+     *
+     * Returns `null` for "cannot tell" — the handles are missing, the entry is not attached to
+     * the pipeline yet, or the parent is some other shape (an Android 16 `BundleEntry`). The
+     * caller falls back to the group key there, which is the previous behaviour.
+     */
+    fun pipelineGroupedOf(row: Any): Boolean? = try {
+        val getParent = getParentEntry
+        val groupEntry = groupEntryClass
+        val getSummary = getGroupSummary
+        if (getParent == null || groupEntry == null || getSummary == null) null
+        else {
+            val parent = entryOf(row)?.let { getParent.invoke(it) }
+            when {
+                parent == null -> null
+                !groupEntry.isInstance(parent) -> null
+                else -> getSummary.invoke(parent) != null
+            }
+        }
+    } catch (_: Throwable) { null }
 
     fun entryOf(row: Any): Any? =
         try { getEntry?.invoke(row) } catch (_: Throwable) { null }
