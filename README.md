@@ -3,6 +3,7 @@
 **Four handy tweaks for Android 16, in one module.** Auto-expand your notifications, a power-user Gboard toolbar, instant screenshot capture, and tap-anywhere status-bar shortcuts.
 
 [![GitHub release](https://img.shields.io/github/v/release/kvmy666/-AutoExpandNotifications?style=flat-square)](https://github.com/kvmy666/-AutoExpandNotifications/releases)
+[![Downloads](https://img.shields.io/github/downloads/kvmy666/-AutoExpandNotifications/total?style=flat-square&label=downloads&color=blue)](https://github.com/kvmy666/-AutoExpandNotifications/releases)
 [![License](https://img.shields.io/github/license/kvmy666/-AutoExpandNotifications?style=flat-square)](LICENSE)
 ![Android](https://img.shields.io/badge/Android-16%2B-green?style=flat-square)
 [![Star on GitHub](https://img.shields.io/github/stars/kvmy666/-AutoExpandNotifications?style=flat-square&logo=github)](https://github.com/kvmy666/-AutoExpandNotifications/stargazers)

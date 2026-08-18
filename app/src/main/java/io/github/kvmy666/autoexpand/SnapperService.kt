@@ -46,6 +46,13 @@ class SnapperService : Service() {
         /** Float a saved snap from history as an overlay; pass EXTRA_SNAP_PATH with the file path. */
         const val ACTION_FLOAT_SNAP       = "io.github.kvmy666.autoexpand.ACTION_FLOAT_SNAP"
         const val EXTRA_SNAP_PATH         = "snap_path"
+        /**
+         * How long to let the Quick Settings panel finish collapsing, after we have asked
+         * it to close, before grabbing the frame. Android's shade collapse animation runs
+         * ~360 ms; this leaves headroom for OEM skins that animate slower. Too low and the
+         * snap still contains a half-faded Quick Settings.
+         */
+        private const val QS_COLLAPSE_SETTLE_MS = 400L
         private const val NOTIFICATION_ID = 1001
         private const val TAG             = "Snapper"
         private const val FILE_PROVIDER   = "io.github.kvmy666.autoexpand.fileprovider"
@@ -112,7 +119,7 @@ class SnapperService : Service() {
         }
 
         when (intent?.action) {
-            ACTION_CAPTURE           -> startCapture()
+            ACTION_CAPTURE           -> startCapture(intent.getBooleanExtra(EXTRA_QS_TRIGGERED, false))
             ACTION_SHOW_EDGE_BUTTON  -> showEdgeButton()
             ACTION_HIDE_EDGE_BUTTON  -> { hideEdgeButton(); stopSelfIfIdle() }
             ACTION_FLOAT_SNAP        -> {
@@ -225,7 +232,7 @@ class SnapperService : Service() {
      * so the bitmap is ready before the user finishes selecting a crop region.
      * The crop UI is added with FLAG_SECURE so SurfaceFlinger excludes it automatically.
      */
-    private fun startPrefetchScreencap() {
+    private fun startPrefetchScreencap(onReady: (() -> Unit)? = null) {
         prefetchBitmap = null
         prefetchDone   = false
         // Hide our persistent overlays so they don't bleed into the screenshot.
@@ -234,9 +241,12 @@ class SnapperService : Service() {
         trashZone?.alpha  = 0f
         floatingSnaps.forEach { it.alpha = 0f }
         prefetchThread = Thread {
-            // screencap calls SurfaceFlinger which captures the current frame immediately
-            // (within one vsync, ~16 ms). File write/encode takes longer. The crop UI is
-            // shown after a 100 ms delay so it is never in the captured frame.
+            // screencap runs as root, and a root screencap captures secure layers too - so
+            // nothing on screen is excluded from the frame, FLAG_SECURE or not. The only way
+            // to keep our own crop overlay out of the shot is to not have it on screen yet,
+            // which is why the caller waits for onReady instead of guessing a delay. The
+            // grab itself takes one vsync, but opening the su shell (Magisk grant, cold
+            // process) can take far longer, and that is what used to overrun a fixed wait.
             prefetchBitmap = runScreencap()
             handler.post {
                 edgeButton?.alpha = 1f
@@ -244,16 +254,45 @@ class SnapperService : Service() {
             }
             prefetchDone = true
             Log.d(TAG, "Prefetch screencap done — bitmap=${prefetchBitmap != null}")
+            onReady?.let { handler.post(it) }
         }.also { it.start() }
     }
 
-    /** Single entry-point for all capture triggers (chord, edge button, QS tile). */
-    private fun startCapture() {
+    /**
+     * Asks SystemUI to close the shade. Tapping a Quick Settings tile does NOT collapse the
+     * panel by itself - only startActivityAndCollapse() does that, and we start a service,
+     * not an activity. So without this the panel is still fully open when screencap runs and
+     * the snap is of Quick Settings, even though the crop UI that appears a moment later
+     * looks correct (adding our overlay is what finally dismissed the shade).
+     *
+     * `cmd statusbar collapse` goes through the same persistent su shell screencap already
+     * depends on, so this adds no new requirement: Snapper cannot capture without root anyway.
+     */
+    private fun collapseStatusBar() {
+        try {
+            if (suProcess?.isAlive != true || suStdin == null) startSuShell()
+            suStdin?.writeBytes("cmd statusbar collapse\n")
+            suStdin?.flush()
+            Log.d(TAG, "statusbar collapse requested")
+        } catch (e: Exception) {
+            Log.w(TAG, "statusbar collapse failed: ${e.message}")
+        }
+    }
+
+    /** Single entry-point for all capture triggers (edge button, QS tile). */
+    private fun startCapture(fromQs: Boolean = false) {
         if (cropView != null) return
-        startPrefetchScreencap()
-        // Delay crop UI by 100 ms — screencap grabs its SurfaceFlinger frame in ~16 ms
-        // (one vsync), so the crop overlay is guaranteed to be absent from the capture.
-        handler.postDelayed({ showCropUi() }, 100L)
+        Log.d(TAG, "startCapture fromQs=$fromQs")
+        // screencap grabs its SurfaceFlinger frame the moment the thread starts, so whatever
+        // is on screen then is what gets captured. From the edge button that is already the
+        // screen the user wants. From the QS tile it is the panel itself, so close it first
+        // and give the collapse animation time to finish before grabbing the frame.
+        if (!fromQs) {
+            startPrefetchScreencap { showCropUi() }
+            return
+        }
+        collapseStatusBar()
+        handler.postDelayed({ startPrefetchScreencap { showCropUi() } }, QS_COLLAPSE_SETTLE_MS)
     }
 
     private fun startSuShell() {

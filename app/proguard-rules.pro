@@ -16,3 +16,7 @@
 # Kotlin
 -dontwarn kotlin.**
 -keep class kotlin.** { *; }
+
+# Quick Settings tile - instantiated by SystemUI by name from the manifest, never from
+# our own code, so R8 has no reference to follow and would otherwise remove it.
+-keep class io.github.kvmy666.autoexpand.SnapperTileService { *; }

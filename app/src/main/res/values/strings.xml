@@ -63,6 +63,7 @@
 
     <!-- Screen Snapper settings -->
     <string name="snapper_section_title">Screen Snapper</string>
+    <string name="snapper_tile_label">Screen Snapper</string>
     <string name="snapper_enabled_title">Enable Screen Snapper</string>
     <string name="snapper_enabled_desc">Activate via QS tile or edge button</string>
     <string name="snapper_master_toggle_title">Enable Screen Snapper</string>

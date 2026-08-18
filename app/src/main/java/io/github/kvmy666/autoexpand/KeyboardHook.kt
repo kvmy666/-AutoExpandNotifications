@@ -13,6 +13,7 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.inputmethodservice.InputMethodService
+import java.text.BreakIterator
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -856,6 +857,31 @@ class KeyboardHook : IXposedHookLoadPackage {
         }
     }
 
+    // Move the caret to an absolute offset. This is the safe way to move horizontally:
+    // a DPAD at the edge of the text is left unhandled by the editor and falls through to
+    // Android's focus search, which is exactly what threw the cursor out of the composer.
+    // setSelection names an offset, the editor clamps it, and no key event is ever produced,
+    // so focus cannot move. finishComposingText() first — a live composing region fights the
+    // new selection and the editor would snap the caret back to the end of it.
+    private fun setCaret(ims: InputMethodService, offset: Int): Boolean {
+        val ic = ims.currentInputConnection ?: return false
+        return try {
+            ic.finishComposingText()
+            ic.setSelection(offset, offset)
+        } catch (_: Throwable) { false }
+    }
+
+    // The whole field's text, or null if the editor won't hand it over. Grabbed ONCE per
+    // gesture - dragging the caret never edits, so one snapshot holds - and it is what
+    // lets a horizontal step land on a grapheme boundary instead of inside an emoji or
+    // between an Arabic letter and its combining mark.
+    private fun readText(ims: InputMethodService): CharSequence? {
+        val ic = ims.currentInputConnection ?: return null
+        return try {
+            ic.getExtractedText(ExtractedTextRequest().apply { token = 0 }, 0)?.text
+        } catch (_: Throwable) { null }
+    }
+
     // Absolute caret offset, or -1 if the editor won't report it. We do NOT use this to
     // guess boundaries from logical before/after (that's wrong under RTL, where visual
     // DPAD direction ≠ logical direction). Instead we read it before/after a DPAD step
@@ -1163,14 +1189,23 @@ class KeyboardHook : IXposedHookLoadPackage {
             var rtl = false           // RTL field → DPAD_RIGHT decreases the logical index
             var canTrack = false      // true once we have a valid caret to count from
             var escaped = false       // focus left the editor → send nothing more this gesture
+            var needsResync = false   // a vertical DPAD moved the caret; re-read before naming an offset
+            var gestureText: CharSequence? = null   // one snapshot per gesture, for grapheme steps
+            var graphemes: BreakIterator? = null    // grapheme boundaries over gestureText
             val blocked = HashSet<Int>()   // directions parked at a boundary this gesture
             btn.setOnTouchListener { v, e ->
                 when (e.action) {
                     MotionEvent.ACTION_DOWN -> {
                         active = true; accX = 0f; accY = 0f; steps = 0
                         lastX = e.rawX; lastY = e.rawY
-                        blocked.clear(); escaped = false; inputRestartedNonEditable = false
-                        predIndex = readCaret(ims); textLen = readLen(ims); rtl = isRtlContext(ims)
+                        blocked.clear(); escaped = false; needsResync = false; inputRestartedNonEditable = false
+                        predIndex = readCaret(ims); rtl = isRtlContext(ims)
+                        gestureText = readText(ims)
+                        textLen = gestureText?.length ?: readLen(ims)
+                        graphemes = gestureText?.let { t ->
+                            try { BreakIterator.getCharacterInstance().apply { setText(t.toString()) } }
+                            catch (_: Throwable) { null }
+                        }
                         canTrack = predIndex >= 0
                         hapticHeavy(ctx)   // heavy "pop" on grab
                         // Keep the gesture ours — don't let the keyboard layout steal the drag.
@@ -1202,11 +1237,82 @@ class KeyboardHook : IXposedHookLoadPackage {
                             return true
                         }
 
-                        // Horizontal step — PURE internal tracking, zero round-trips.
-                        // We know the index moves ±1 per DPAD (RTL flips the sign), and the
-                        // left edge is always 0, so we can refuse the escaping key from
-                        // predIndex alone — no read to lag behind the finger, no rubber-band.
-                        fun emitHoriz(keyCode: Int): Boolean {
+                        // -- Horizontal: setSelection, not DPAD --------------------------
+                        // Android's Selection.moveLeft/moveRight return false once the caret is
+                        // at the end of the text. An unhandled DPAD falls through to focus
+                        // search, which hands focus to a neighbouring view - the escape. Naming
+                        // an absolute offset removes the key event entirely, so there is nothing
+                        // to fall through, and it is exact: the +/-1 bookkeeping the old path
+                        // kept drifted under RTL until the caret and predIndex disagreed.
+                        // One IC call per touch event now, not one per step.
+                        // One offset step, measured in grapheme clusters. Stepping by raw
+                        // index would drop the caret inside an emoji (two chars) or between
+                        // an Arabic letter and its combining mark - the editor accepts that
+                        // offset, and the next keystroke splits the character. Falls back to
+                        // raw indices only when the editor refused to hand over its text.
+                        fun stepOffset(from: Int, delta: Int): Int {
+                            val limit = if (textLen >= 0) textLen else Int.MAX_VALUE
+                            val bi  = graphemes
+                            val len = gestureText?.length
+                            if (bi == null || len == null) return (from + delta).coerceIn(0, limit)
+                            return try {
+                                var idx = from.coerceIn(0, len)
+                                var n = kotlin.math.abs(delta)
+                                while (n > 0) {
+                                    // following()/preceding() snap to the nearest boundary even
+                                    // when idx is mid-cluster, so this self-corrects.
+                                    val next = if (delta > 0) bi.following(idx) else bi.preceding(idx)
+                                    if (next == BreakIterator.DONE) break   // start/end of text
+                                    idx = next; n--
+                                }
+                                idx.coerceIn(0, limit)
+                            } catch (_: Throwable) { (from + delta).coerceIn(0, limit) }
+                        }
+
+                        // Some editors report nothing until they have been touched, so a failed
+                        // read at grab time must not freeze the stick for the whole gesture.
+                        fun ensureCaret(): Boolean {
+                            if (canTrack) return true
+                            val c = readCaret(ims)
+                            if (c < 0) return false
+                            predIndex = c; canTrack = true
+                            if (textLen < 0) textLen = readLen(ims)
+                            return true
+                        }
+
+                        fun applyHoriz(visualSteps: Int): Boolean {
+                            if (fieldLost() || visualSteps == 0) return false
+                            if (!canTrack) return false   // no caret to name - never guess an offset
+                            if (needsResync) {
+                                // A vertical DPAD just moved the caret somewhere only the app
+                                // knows. Re-read before naming an offset, or we would yank the
+                                // caret back to a stale one.
+                                val c = readCaret(ims)
+                                if (c < 0) { canTrack = false; return false }
+                                predIndex = c; needsResync = false
+                            }
+                            // In an RTL field a drag to the visual right walks the logical index
+                            // down, so the sign flips.
+                            val delta  = if (rtl) -visualSteps else visualSteps
+                            val target = stepOffset(predIndex, delta)
+                            if (target == predIndex) {
+                                hapticBoundary(ctx)
+                                XposedBridge.log("$TAG [KB] trackpad H-edge pred=$predIndex len=$textLen")
+                                return false
+                            }
+                            if (!setCaret(ims, target)) { canTrack = false; return false }
+                            steps += kotlin.math.abs(target - predIndex)
+                            predIndex = target
+                            hapticTick(ctx)
+                            XposedBridge.log("$TAG [KB] trackpad H-set pred=$predIndex")
+                            return true
+                        }
+
+                        // The two cases setSelection cannot serve: root injection mode (the
+                        // InputConnection is bypassed on purpose) and editors that never report
+                        // a caret, where there is no offset to name. Both keep the legacy
+                        // per-step DPAD path, with 3.2.2's guards bounding the damage.
+                        fun emitHorizKey(keyCode: Int): Boolean {
                             if (fieldLost() || keyCode in blocked) return false
                             if (canTrack) {
                                 val atLeftEdge  = predIndex <= 0
@@ -1231,67 +1337,76 @@ class KeyboardHook : IXposedHookLoadPackage {
                                 if (predIndex < 0) predIndex = 0
                                 if (textLen >= 0 && predIndex > textLen) predIndex = textLen
                             }
-                            // Moved away from one edge → re-arm the opposite direction.
                             blocked.remove(if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)
                                 KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT)
                             hapticTick(ctx)
-                            XposedBridge.log("$TAG [KB] trackpad step key=$keyCode pred=$predIndex read=false")
                             return true
                         }
 
-                        // Vertical step — the target editor owns line wrapping, so after a
-                        // DPAD_UP/DOWN the absolute horizontal index is unknown. Emit, then do
-                        // exactly ONE resync read to restore predIndex (per line change, not
-                        // per step). Block only at the true text start/end when known.
+                        // -- Vertical: still a DPAD, but one key in flight at a time -----
+                        // Only the app knows its own soft-wrap layout, so there is no offset we
+                        // could name for "one line up". Selection.moveUp returns false - and so
+                        // escapes - only when the caret is ALREADY at offset 0; moveDown likewise
+                        // at textLen. The old code tested exactly that and still let the escape
+                        // through, because the burst loop fired several keys per touch event while
+                        // sendKeyEvent is asynchronous: the app was a key or two behind, so the
+                        // offset being tested was stale. Sending at most one key per event, gated
+                        // on a caret read taken immediately before it, makes the test mean
+                        // something again.
                         fun emitVert(keyCode: Int): Boolean {
                             if (fieldLost() || keyCode in blocked) return false
-                            if (canTrack) {
-                                val escapes = when (keyCode) {
-                                    KeyEvent.KEYCODE_DPAD_UP   -> predIndex <= 0
-                                    KeyEvent.KEYCODE_DPAD_DOWN -> textLen >= 0 && predIndex >= textLen
-                                    else -> false
-                                }
-                                if (escapes) {
-                                    blocked.add(keyCode); hapticBoundary(ctx)
-                                    XposedBridge.log("$TAG [KB] trackpad PRE-boundary key=$keyCode pred=$predIndex len=$textLen")
-                                    return false
-                                }
+                            val now = readCaret(ims)
+                            if (now < 0) {
+                                canTrack = false; escaped = true; hapticBoundary(ctx)
+                                XposedBridge.log("$TAG [KB] trackpad ESCAPED key=$keyCode (caret unreadable)")
+                                return false
                             }
-                            val before = predIndex
+                            predIndex = now; canTrack = true; needsResync = false
+                            val escapes = when (keyCode) {
+                                KeyEvent.KEYCODE_DPAD_UP   -> now <= 0
+                                KeyEvent.KEYCODE_DPAD_DOWN -> textLen >= 0 && now >= textLen
+                                else -> false
+                            }
+                            if (escapes) {
+                                blocked.add(keyCode); hapticBoundary(ctx)
+                                XposedBridge.log("$TAG [KB] trackpad V-boundary key=$keyCode pred=$now len=$textLen")
+                                return false
+                            }
                             moveCursorDpad(ims, keyCode); steps++
                             hapticTick(ctx)
-                            val resync = readCaret(ims)
-                            if (resync < 0) {
-                                // The caret went unreadable the instant we sent a vertical key:
-                                // the editor is no longer the input target. Stop, rather than
-                                // walk DPADs through whatever view now holds focus. Losing the
-                                // caret is proof of an escape, so fail SAFE here — the old code
-                                // only cleared canTrack, which switched every guard OFF.
-                                canTrack = false; escaped = true; hapticBoundary(ctx)
-                                XposedBridge.log("$TAG [KB] trackpad ESCAPED key=$keyCode (caret unreadable after step)")
-                                return false
-                            }
-                            if (resync == before) {
-                                // A vertical move that changed nothing means there is no line
-                                // that way — we are on the field's first/last line. Park the
-                                // direction NOW, because the next one is the one that hands
-                                // focus to the neighbouring view. The offset guards above miss
-                                // this whenever the caret sits mid-line (predIndex 1, not 0).
-                                blocked.add(keyCode); hapticBoundary(ctx)
-                                XposedBridge.log("$TAG [KB] trackpad LINE-boundary key=$keyCode pred=$predIndex")
-                                return false
-                            }
-                            predIndex = resync; canTrack = true
+                            needsResync = true      // the app owns the new offset now
                             blocked.remove(KeyEvent.KEYCODE_DPAD_LEFT)
                             blocked.remove(KeyEvent.KEYCODE_DPAD_RIGHT)
-                            XposedBridge.log("$TAG [KB] trackpad step key=$keyCode pred=$predIndex read=true")
+                            XposedBridge.log("$TAG [KB] trackpad V-step key=$keyCode from=$now")
                             return true
                         }
 
-                        while (accX >= stepX)  { if (emitHoriz(KeyEvent.KEYCODE_DPAD_RIGHT)) accX -= stepX else { accX = 0f; break } }
-                        while (accX <= -stepX) { if (emitHoriz(KeyEvent.KEYCODE_DPAD_LEFT))  accX += stepX else { accX = 0f; break } }
-                        while (accY >= stepY)  { if (emitVert(KeyEvent.KEYCODE_DPAD_DOWN))   accY -= stepY else { accY = 0f; break } }
-                        while (accY <= -stepY) { if (emitVert(KeyEvent.KEYCODE_DPAD_UP))     accY += stepY else { accY = 0f; break } }
+                        // Horizontal drains fully - setSelection is one call regardless of
+                        // distance, so a fast flick costs no more than a slow one.
+                        var hSteps = 0
+                        while (accX >= stepX)  { hSteps++; accX -= stepX }
+                        while (accX <= -stepX) { hSteps--; accX += stepX }
+                        if (hSteps != 0) {
+                            val exact = !cachedTrackpadRoot && ensureCaret()
+                            val ok = if (exact) applyHoriz(hSteps) else {
+                                val key = if (hSteps > 0) KeyEvent.KEYCODE_DPAD_RIGHT
+                                          else            KeyEvent.KEYCODE_DPAD_LEFT
+                                var any = false
+                                repeat(kotlin.math.abs(hSteps)) { if (emitHorizKey(key)) any = true }
+                                any
+                            }
+                            if (!ok) accX = 0f
+                        }
+
+                        // Vertical takes ONE step per event and caps the leftover, so a fast
+                        // flick cannot build a backlog that keeps firing after the finger stops.
+                        if (accY >= stepY) {
+                            if (emitVert(KeyEvent.KEYCODE_DPAD_DOWN)) accY = (accY - stepY).coerceAtMost(stepY)
+                            else accY = 0f
+                        } else if (accY <= -stepY) {
+                            if (emitVert(KeyEvent.KEYCODE_DPAD_UP)) accY = (accY + stepY).coerceAtLeast(-stepY)
+                            else accY = 0f
+                        }
                         true
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {

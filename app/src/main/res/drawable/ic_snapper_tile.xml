@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Quick Settings tile icon: a crop frame with a centre dot, matching what the tile does
+  (drag out a region, capture it). Tile icons are tinted by SystemUI and drawn as a flat
+  silhouette, so this is a single path with no colour of its own.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+
+    <!-- Crop frame: four corner brackets. -->
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M3,3h6v2H5v4H3V3zM15,3h6v6h-2V5h-4V3zM3,15h2v4h4v2H3V15zM19,15h2v6h-6v-2h4V15z" />
+
+    <!-- Centre dot: the thing being captured. -->
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M12,9.5A2.5,2.5 0,1 1,12 14.5A2.5,2.5 0,1 1,12 9.5Z" />
+</vector>
