@@ -11,7 +11,6 @@ import io.github.kvmy666.autoexpand.hook.NotifProbe
 import io.github.kvmy666.autoexpand.hook.NotificationExpander
 import io.github.kvmy666.autoexpand.hook.notif.NotifEngineV2
 import io.github.kvmy666.autoexpand.hook.PrefsBridge
-import io.github.kvmy666.autoexpand.hook.SnapperChordHook
 import io.github.kvmy666.autoexpand.hook.ZonesHook
 
 class MainHook : IXposedHookLoadPackage {
@@ -21,9 +20,6 @@ class MainHook : IXposedHookLoadPackage {
 
     /** Phase D — global-search Enter/Go launches the first result. */
     private val globalSearch = GlobalSearchHook(prefs)
-
-    /** Snapper hardware chord (Power + Volume-Down), installed in system_server. */
-    private val snapperChord = SnapperChordHook(prefs)
 
     /** Status-bar zones (taps/long-press) + privileged-action receiver, in SystemUI. */
     private val zones = ZonesHook(prefs)
@@ -45,9 +41,6 @@ class MainHook : IXposedHookLoadPackage {
         // to Zygote/system_server. Silent fail > bootloop.
         try {
             when (lpparam.packageName) {
-                "android"              -> try { handleSystemServer(lpparam) } catch (t: Throwable) {
-                    Log.e("AutoExpand", "system_server hook init failed: $t")
-                }
                 "com.android.systemui" -> try { handleSystemUi(lpparam) } catch (t: Throwable) {
                     Log.e("AutoExpand", "SystemUI hook init failed: $t")
                 }
@@ -63,23 +56,10 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     // =====================================================
-    // system_server — Snapper hardware chord (Power + Volume-Down).
-    // Delegated to SnapperChordHook; see that class for the full
-    // two-hook strategy and safety contract.
-    // =====================================================
-    private fun handleSystemServer(lpparam: XC_LoadPackage.LoadPackageParam) {
-        try {
-            snapperChord.install(lpparam)
-        } catch (t: Throwable) {
-            Log.e("Snapper", "handleSystemServer crashed: $t")
-        }
-    }
-
-    // =====================================================
-    // SystemUI hooks — notification tweaks only
-    // Screenshot hooks removed: OxygenOS 16 routes screenshots through
-    // com.oplus.exsystemservice / com.oplus.screenshot (not SystemUI).
-    // Interception is handled in system_server via handleSystemServer().
+    // SystemUI hooks — notification tweaks only.
+    // The module deliberately hooks NO system services: it is not in the
+    // `android` (system_server) scope at all, so it cannot affect hardware
+    // key handling. Snapper is triggered from its QS tile or edge button.
     // =====================================================
 
     private fun handleSystemUi(lpparam: XC_LoadPackage.LoadPackageParam) {

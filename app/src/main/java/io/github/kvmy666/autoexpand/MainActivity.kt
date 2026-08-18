@@ -175,8 +175,20 @@ class MainActivity : ComponentActivity() {
                 .putString("snapper_history_limit", "50")
                 .apply()
         }
-        if (!prefs.contains("snapper_hardware_chord_enabled")) {
-            prefs.edit().putBoolean("snapper_hardware_chord_enabled", true).apply()
+        // 3.2.2 migration — the Power + Volume-Down chord is gone. Anyone who was on a
+        // chord-based method needs a trigger that still exists, or Snapper becomes
+        // unreachable after the upgrade: "chord" had no on-screen control, so it maps to
+        // the QS tile; "both" already included the edge button, so that one is kept.
+        if (prefs.contains("snapper_hardware_chord_enabled")) {
+            val migrated = when (prefs.getString("snapper_activation_method", "qs_tile")) {
+                "chord" -> "qs_tile"
+                "both"  -> "edge_button"
+                else    -> null
+            }
+            prefs.edit()
+                .remove("snapper_hardware_chord_enabled")
+                .also { e -> migrated?.let { e.putString("snapper_activation_method", it) } }
+                .apply()
         }
         if (!prefs.contains("enable_snapper_entirely")) {
             prefs.edit().putBoolean("enable_snapper_entirely", true).apply()
