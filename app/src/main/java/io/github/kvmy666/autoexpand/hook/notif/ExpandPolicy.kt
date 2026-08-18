@@ -122,6 +122,8 @@ sealed interface Decision {
         UserCollapsed, GroupSummary, BackedOff,
         /** Group parents left alone because the toggle is off. */
         GroupParentsOff,
+        /** A group summary on the lock screen — a state SystemUI's keyguard layout cannot draw. */
+        GroupOnKeyguard,
         /** A summary whose children have not attached yet — writing anything now breaks it. */
         GroupNotReady,
         /** A child whose group is still closed — expanding it would inflate the collapsed preview. */
@@ -168,6 +170,19 @@ object ExpandPolicy {
         // inside the 1.5 s window trip the back-off, and the parent then refused to open for the
         // 5 s cooldown — reported as "open and close twice quickly and it stops working".
         if (facts.isGroupSummary) {
+            // An open group is a shade-only shape. SystemUI never draws one on the keyguard by
+            // any path of its own: tapping the arrow on a collapsed group there runs
+            // `goToLockedShade` instead of expanding in place. So the keyguard's own size
+            // calculator (`NotificationStackSizeCalculator.getSpaceNeeded`, which reads
+            // `getHeightWithoutLockscreenConstraints`) budgets for a *collapsed* summary, and a
+            // group we opened behind its back draws taller than the slot it was given —
+            // measured on device as rows painted straight over their neighbours once the lock
+            // screen held enough notifications to be tight for space. The same flood with this
+            // toggle off renders as a clean collapsed bundle.
+            //
+            // Nothing is lost: the group opens the moment the shade is pulled down, which is
+            // where an expanded group belongs and where the space to draw it exists.
+            if (facts.onKeyguard) return Decision.Skip(Decision.Reason.GroupOnKeyguard)
             // The group primitive only works once the row has adopted its children: until then
             // `setUserExpanded(true, true)` misses its group branch and falls through to the
             // single path, which expands the summary's *own* content and tears the group apart

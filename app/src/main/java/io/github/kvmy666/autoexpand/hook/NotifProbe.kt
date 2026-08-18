@@ -62,6 +62,20 @@ class NotifProbe(private val prefs: PrefsBridge) {
         "${gk.substringAfterLast('|')}|summaryFlag=$isSummary"
     } catch (_: Throwable) { "?" }
 
+    /** R8 gives the plain name to a synthetic accessor on OxygenOS 16 — try both. */
+    private fun groupExpanded(row: Any): String =
+        try { XposedHelpers.callMethod(row, "isGroupExpanded").toString() }
+        catch (_: Throwable) {
+            try { XposedHelpers.callMethod(row, "isGroupExpanded\$1").toString() }
+            catch (_: Throwable) { "?" }
+        }
+
+    /** The content view's own answer to "which layout am I showing right now". */
+    private fun visibleType(row: Any): String = try {
+        val layout = XposedHelpers.getObjectField(row, "mPrivateLayout")
+        if (layout == null) "?" else call(layout, "getVisibleType")
+    } catch (_: Throwable) { "?" }
+
     private fun childCount(row: Any): String = try {
         val c = XposedHelpers.getObjectField(row, "mChildrenContainer")
         if (c == null) "0" else call(c, "getNotificationChildCount")
@@ -84,6 +98,13 @@ class NotifProbe(private val prefs: PrefsBridge) {
         append(" isExp(T)=").append(call(row, "isExpanded", true))
         append(" showingExp=").append(call(row, "isShowingExpanded"))
         append(" h=").append(call(row, "getIntrinsicHeight"))
+        append(" actualH=").append(call(row, "getActualHeight"))
+        // The pair that decides what a *child* row actually draws. `getVisualTypeForHeight`
+        // returns SINGLELINE for any child whose group is closed, whatever the height says, so
+        // a row showing one line of text inside a full-size card means these two disagree with
+        // the height above. 0=contracted 1=expanded 2=heads-up 3=single-line.
+        append(" grpExp=").append(groupExpanded(row))
+        append(" visType=").append(visibleType(row))
         // The two short-circuits that sit ABOVE the keyguard gate in isExpanded(): if either
         // fires, no amount of expansion state matters. Redaction is also a hard privacy line.
         append(" public=").append(call(row, "shouldShowPublic"))

@@ -157,7 +157,13 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                 // The two group toggles are independent: with parents off but children on, a
                 // group the *user* opens still gets its rows expanded.
                 if (facts.isSummaryWithChildren && facts.groupExpanded) reconcileChildren(row, trigger)
-                NotifLog.d { "v2 $trigger skip=${decision.why} key=${facts.key}" }
+                // A skip is the answer to "why is this row not expanded", so it carries the
+                // state the reason was derived from — otherwise diagnosing a wrong skip means
+                // turning the (hot) probe on and reproducing it a second time.
+                NotifLog.d {
+                    "v2 $trigger skip=${decision.why} key=${facts.key} kg=${facts.onKeyguard} " +
+                    "grpExp=${facts.groupExpanded} exp=${facts.expandedUngated}"
+                }
             }
         }
     }
