@@ -79,6 +79,8 @@ class KeyboardHook : IXposedHookLoadPackage {
     @Volatile private var cachedBtnCursor = false   // A3: cursor-nav button OFF by default
     @Volatile private var cachedBtnShortcut = true
     @Volatile private var cachedBtnTrackpad = true
+    // Select-mode toggle button (🖍️) — rides alongside the stick, never alone.
+    @Volatile private var cachedBtnSelectMode = true
     // Trackpad stick haptics (grab pop + steering ticks). Independent of the stick itself.
     @Volatile private var cachedTrackpadHaptics = true
     // CopyVault row rendering: full text (default) vs first-line-only truncation.
@@ -89,11 +91,25 @@ class KeyboardHook : IXposedHookLoadPackage {
     // InputConnection — fallback for apps that swallow IME DPAD events.
     @Volatile private var cachedTrackpadRoot = false
 
+    // The floating Cut/Copy/Paste bar, while one is on screen. Held so a second request
+    // replaces it instead of stacking on top of it.
+    @Volatile private var selectionMenu: PopupWindow? = null
+
     // Set by the onStartInputView hook when input restarts on a target with no text
     // (inputType == 0) — the signature of DPAD focus-search handing focus to a
     // neighbouring, non-editable view. A trackpad gesture in flight uses this as a
     // cheap "the field may be gone" hint and re-verifies with one caret read.
     @Volatile private var inputRestartedNonEditable = false
+
+    // ── Select mode (🖍️) ──
+    // A live toggle, not a pref: while it is on, the stick drags a SELECTION instead of
+    // the bare caret. Object-level so it survives toolbar rebuilds (Gboard recreates the
+    // input view on every app switch) — the button paints itself from this on build.
+    @Volatile private var selectModeOn = false
+    // The fixed end of the selection. Kept between gestures so a second grab keeps
+    // extending from where the first one started instead of re-anchoring. -1 = none.
+    @Volatile private var selAnchor = -1
+
     @Volatile private var lastCacheTime = 0L
     private val CACHE_INTERVAL_MS = 2000L
 
@@ -170,7 +186,7 @@ class KeyboardHook : IXposedHookLoadPackage {
     // UNIFORMLY by diffing the editor text on each onUpdateSelection against a
     // shadow snapshot — no per-path hooking, works in every app/WebView.
     @Volatile private var cachedUndoEnabled = true       // master (undo_enabled)
-    @Volatile private var cachedUndoButton  = true       // toolbar button (undo_button_enabled)
+    @Volatile private var cachedUndoButton  = false      // toolbar button (undo_button_enabled) — OFF by default, shake undoes
     private data class UndoRecord(
         var deletedText: String,
         var anchor: Int,          // absolute index where the text was removed
@@ -239,6 +255,13 @@ class KeyboardHook : IXposedHookLoadPackage {
             cachedBtnCursor    = cache["btn_cursor_enabled"]?.let { it == "1" } ?: cachedBtnCursor
             cachedBtnShortcut  = cache["btn_shortcut_enabled"]?.let { it == "1" } ?: cachedBtnShortcut
             cachedBtnTrackpad  = cache["btn_trackpad_enabled"]?.let { it == "1" } ?: cachedBtnTrackpad
+            cachedBtnSelectMode = cache["btn_selectmode_enabled"]?.let { it == "1" } ?: cachedBtnSelectMode
+            // Losing the button must lose the mode with it — otherwise the stick keeps
+            // selecting with nothing on screen to say why, and no way to switch it off.
+            if ((!cachedBtnSelectMode || !cachedBtnTrackpad) && selectModeOn) {
+                selectModeOn = false; selAnchor = -1
+                XposedBridge.log("$TAG [KB] select mode OFF (button hidden)")
+            }
             cachedTrackpadHaptics = cache["trackpad_haptics_enabled"]?.let { it == "1" } ?: cachedTrackpadHaptics
             cachedClipFullText = cache["clip_full_text_enabled"]?.let { it == "1" } ?: cachedClipFullText
             cachedUndoEnabled  = cache["undo_enabled"]?.let { it == "1" } ?: cachedUndoEnabled
@@ -871,6 +894,78 @@ class KeyboardHook : IXposedHookLoadPackage {
         } catch (_: Throwable) { false }
     }
 
+    // Select-mode twin of setCaret: name BOTH ends of the selection. anchor stays put,
+    // active is the end the stick is dragging. Same reasoning as setCaret — naming
+    // offsets produces no key event, so nothing can fall through to focus search.
+    private fun setSelectionRange(ims: InputMethodService, anchor: Int, active: Int): Boolean {
+        val ic = ims.currentInputConnection ?: return false
+        return try {
+            ic.finishComposingText()
+            ic.setSelection(anchor, active)
+        } catch (_: Throwable) { false }
+    }
+
+    // Both ends of the current selection, or null if the editor won't report them.
+    // start/end come back in document order — which end is the anchor is OUR bookkeeping,
+    // not something the editor tells us.
+    private fun readSelection(ims: InputMethodService): IntArray? {
+        val ic = ims.currentInputConnection ?: return null
+        try {
+            val ext = ic.getExtractedText(ExtractedTextRequest().apply { token = 0 }, 0)
+            if (ext != null && ext.selectionStart >= 0 && ext.selectionEnd >= 0)
+                return intArrayOf(
+                    minOf(ext.selectionStart, ext.selectionEnd),
+                    maxOf(ext.selectionStart, ext.selectionEnd)
+                )
+        } catch (_: Throwable) {}
+        try {
+            val st = ic.getSurroundingText(0, 0, 0)
+            if (st != null && st.selectionStart >= 0 && st.selectionEnd >= 0)
+                return intArrayOf(
+                    st.offset + minOf(st.selectionStart, st.selectionEnd),
+                    st.offset + maxOf(st.selectionStart, st.selectionEnd)
+                )
+        } catch (_: Throwable) {}
+        return null
+    }
+
+    // Vertical selection: a DPAD with SHIFT held. There is no offset we could name for
+    // "one line up" (only the app knows its own wrapping), so the key stays — but the
+    // real SHIFT_LEFT down/up around it is what makes the editor extend instead of move:
+    // ArrowKeyMovementMethod reads MetaKeyKeyListener's selecting state off the buffer,
+    // which only a genuine shift press sets. The metaState on the DPAD itself is for the
+    // editors that check the event instead.
+    private fun moveCursorDpadShift(ims: InputMethodService, keyCode: Int) {
+        if (cachedTrackpadRoot) { rootShiftKeyEvent(keyCode); return }
+        try {
+            val ic = ims.currentInputConnection ?: return
+            val now = SystemClock.uptimeMillis()
+            fun ev(action: Int, code: Int, meta: Int) =
+                KeyEvent(now, now, action, code, 0, meta)
+            ic.sendKeyEvent(ev(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_SHIFT_LEFT, 0))
+            ic.sendKeyEvent(ev(KeyEvent.ACTION_DOWN, keyCode, KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON))
+            ic.sendKeyEvent(ev(KeyEvent.ACTION_UP,   keyCode, KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON))
+            ic.sendKeyEvent(ev(KeyEvent.ACTION_UP,   KeyEvent.KEYCODE_SHIFT_LEFT, 0))
+        } catch (_: Throwable) {}
+    }
+
+    // Root fallback for the above. `input keyevent` can't hold a modifier, so this uses
+    // `input keycombination`, which presses its keycodes together.
+    private fun rootShiftKeyEvent(keyCode: Int) {
+        try {
+            if (rootStdin == null) {
+                val proc = Runtime.getRuntime().exec("su")
+                rootStdin = proc.outputStream
+            }
+            rootStdin?.apply {
+                write("input keycombination ${KeyEvent.KEYCODE_SHIFT_LEFT} $keyCode\n".toByteArray())
+                flush()
+            }
+        } catch (_: Throwable) {
+            rootStdin = null   // force re-open next time
+        }
+    }
+
     // The whole field's text, or null if the editor won't hand it over. Grabbed ONCE per
     // gesture - dragging the caret never edits, so one snapshot holds - and it is what
     // lets a horizontal step land on a grapheme boundary instead of inside an emoji or
@@ -1169,6 +1264,37 @@ class KeyboardHook : IXposedHookLoadPackage {
             add(makeCursorBtn("➡️", forward = true))
         }
 
+        // Button 3a — Select mode 🖍️ (toggle)
+        // While it is ON the stick drags a SELECTION instead of the bare caret: the offset
+        // the gesture started from stays anchored, and everything between it and the moving
+        // cursor stays highlighted — forwards or backwards. It does nothing without the
+        // stick, so it only appears alongside it.
+        if (cachedBtnTrackpad && cachedBtnSelectMode) {
+            val btn = makeBtn("🖍️")
+            // The button IS the state readout — dimmed when off, lit as an accent pill when
+            // on. The pill is the module's own accent tint + hairline (same treatment as a
+            // selected row in the vault), which reads on light and dark keyboard themes
+            // alike; a plain white wash would vanish on a light one.
+            fun paint() {
+                btn.alpha = if (selectModeOn) 1f else 0.45f
+                btn.background = if (selectModeOn)
+                    roundRect(UI.ACCENT_BG, 10f * dp, UI.ACCENT, (1f * dp).toInt())
+                else null
+            }
+            paint()
+            btn.setOnClickListener {
+                selectModeOn = !selectModeOn
+                selAnchor = -1             // next grab re-anchors wherever the caret is
+                paint()
+                btn.performHapticFeedback(
+                    if (selectModeOn) HapticFeedbackConstants.LONG_PRESS
+                    else             HapticFeedbackConstants.KEYBOARD_TAP
+                )
+                XposedBridge.log("$TAG [KB] select mode ${if (selectModeOn) "ON" else "OFF"}")
+            }
+            add(btn)
+        }
+
         // Button 3b — 2D Trackpad 🕹️ (free cursor control)
         // Press-and-hold + drag: X drag → LEFT/RIGHT, Y drag → UP/DOWN (true multi-line,
         // navigated natively by the target editor). DPAD events go through the
@@ -1185,6 +1311,8 @@ class KeyboardHook : IXposedHookLoadPackage {
             // cursor backward (the rubber-band). The only reads are grab, release, and one
             // resync after each vertical line change (line layout is owned by the app).
             var predIndex = -1        // internally-tracked caret offset (-1 = unknown at grab)
+                                      // in select mode this is the ACTIVE end of the selection
+            var anchor = -1           // select mode: the fixed end (-1 = plain caret dragging)
             var textLen = -1          // total length (-1 = unknown → no right-edge detection)
             var rtl = false           // RTL field → DPAD_RIGHT decreases the logical index
             var canTrack = false      // true once we have a valid caret to count from
@@ -1199,7 +1327,25 @@ class KeyboardHook : IXposedHookLoadPackage {
                         active = true; accX = 0f; accY = 0f; steps = 0
                         lastX = e.rawX; lastY = e.rawY
                         blocked.clear(); escaped = false; needsResync = false; inputRestartedNonEditable = false
-                        predIndex = readCaret(ims); rtl = isRtlContext(ims)
+                        // Select mode seeds two offsets, not one. A selection already on
+                        // screen whose anchor we recognise is CONTINUED (so a second grab
+                        // keeps growing the same highlight); anything else re-anchors here.
+                        val sel = if (selectModeOn) readSelection(ims) else null
+                        if (sel != null) {
+                            when {
+                                sel[0] == sel[1]    -> { anchor = sel[0]; predIndex = sel[0] }
+                                selAnchor == sel[1] -> { anchor = sel[1]; predIndex = sel[0] }
+                                else                -> { anchor = sel[0]; predIndex = sel[1] }
+                            }
+                            selAnchor = anchor
+                        } else {
+                            // Not in select mode, or the editor won't report a selection —
+                            // fall back to plain caret dragging rather than guess an anchor.
+                            anchor = -1
+                            predIndex = readCaret(ims)
+                            if (!selectModeOn) selAnchor = -1
+                        }
+                        rtl = isRtlContext(ims)
                         gestureText = readText(ims)
                         textLen = gestureText?.length ?: readLen(ims)
                         graphemes = gestureText?.let { t ->
@@ -1210,7 +1356,7 @@ class KeyboardHook : IXposedHookLoadPackage {
                         hapticHeavy(ctx)   // heavy "pop" on grab
                         // Keep the gesture ours — don't let the keyboard layout steal the drag.
                         v.parent?.requestDisallowInterceptTouchEvent(true)
-                        XposedBridge.log("$TAG [KB] trackpad DOWN caret=$predIndex len=$textLen rtl=$rtl track=$canTrack root=$cachedTrackpadRoot")
+                        XposedBridge.log("$TAG [KB] trackpad DOWN caret=$predIndex anchor=$anchor sel=$selectModeOn len=$textLen rtl=$rtl track=$canTrack root=$cachedTrackpadRoot")
                         true
                     }
                     MotionEvent.ACTION_MOVE -> {
@@ -1280,6 +1426,42 @@ class KeyboardHook : IXposedHookLoadPackage {
                             return true
                         }
 
+                        // Re-read the offset the stick is steering after the app moved it
+                        // (a vertical step). Outside select mode that is just the caret;
+                        // inside it, it is whichever end of the selection is NOT the anchor.
+                        fun resyncActive(): Boolean {
+                            if (selectModeOn && anchor >= 0) {
+                                val s = readSelection(ims) ?: return false
+                                when {
+                                    // Collapsed. Either the caret came home to the anchor
+                                    // (a genuine empty selection), or this editor ignored the
+                                    // SHIFT and just MOVED the caret a line. The second case is
+                                    // repairable and common: the app has already done the part
+                                    // only it can do — placing the caret on the right line —
+                                    // so we simply rebuild the range around it. That makes
+                                    // vertical selection work even where shift is swallowed.
+                                    s[0] == s[1] -> {
+                                        predIndex = s[0]
+                                        if (predIndex != anchor) {
+                                            setSelectionRange(ims, anchor, predIndex)
+                                            XposedBridge.log("$TAG [KB] trackpad V-repair anchor=$anchor active=$predIndex")
+                                        }
+                                    }
+                                    s[0] == anchor -> predIndex = s[1]
+                                    s[1] == anchor -> predIndex = s[0]
+                                    // Neither end is ours any more (the editor re-selected
+                                    // on its own). Adopt what it reports rather than yank
+                                    // the highlight back to a stale anchor.
+                                    else -> { anchor = s[0]; selAnchor = anchor; predIndex = s[1] }
+                                }
+                                return true
+                            }
+                            val c = readCaret(ims)
+                            if (c < 0) return false
+                            predIndex = c
+                            return true
+                        }
+
                         fun applyHoriz(visualSteps: Int): Boolean {
                             if (fieldLost() || visualSteps == 0) return false
                             if (!canTrack) return false   // no caret to name - never guess an offset
@@ -1287,9 +1469,8 @@ class KeyboardHook : IXposedHookLoadPackage {
                                 // A vertical DPAD just moved the caret somewhere only the app
                                 // knows. Re-read before naming an offset, or we would yank the
                                 // caret back to a stale one.
-                                val c = readCaret(ims)
-                                if (c < 0) { canTrack = false; return false }
-                                predIndex = c; needsResync = false
+                                if (!resyncActive()) { canTrack = false; return false }
+                                needsResync = false
                             }
                             // In an RTL field a drag to the visual right walks the logical index
                             // down, so the sign flips.
@@ -1300,11 +1481,16 @@ class KeyboardHook : IXposedHookLoadPackage {
                                 XposedBridge.log("$TAG [KB] trackpad H-edge pred=$predIndex len=$textLen")
                                 return false
                             }
-                            if (!setCaret(ims, target)) { canTrack = false; return false }
+                            // Select mode names both ends; plain mode collapses onto one.
+                            val moved = if (selectModeOn && anchor >= 0)
+                                setSelectionRange(ims, anchor, target)
+                            else
+                                setCaret(ims, target)
+                            if (!moved) { canTrack = false; return false }
                             steps += kotlin.math.abs(target - predIndex)
                             predIndex = target
                             hapticTick(ctx)
-                            XposedBridge.log("$TAG [KB] trackpad H-set pred=$predIndex")
+                            XposedBridge.log("$TAG [KB] trackpad H-set pred=$predIndex anchor=$anchor")
                             return true
                         }
 
@@ -1328,7 +1514,12 @@ class KeyboardHook : IXposedHookLoadPackage {
                                     return false
                                 }
                             }
-                            moveCursorDpad(ims, keyCode); steps++
+                            // Shift-DPAD when selecting: this path is only reached in root
+                            // mode or when the caret is unreadable, so there is no offset to
+                            // name — the modifier is the only way to extend instead of move.
+                            if (selectModeOn) moveCursorDpadShift(ims, keyCode)
+                            else             moveCursorDpad(ims, keyCode)
+                            steps++
                             if (canTrack) {
                                 predIndex += when (keyCode) {
                                     KeyEvent.KEYCODE_DPAD_RIGHT -> if (rtl) -1 else 1
@@ -1355,13 +1546,13 @@ class KeyboardHook : IXposedHookLoadPackage {
                         // something again.
                         fun emitVert(keyCode: Int): Boolean {
                             if (fieldLost() || keyCode in blocked) return false
-                            val now = readCaret(ims)
-                            if (now < 0) {
+                            if (!resyncActive()) {
                                 canTrack = false; escaped = true; hapticBoundary(ctx)
                                 XposedBridge.log("$TAG [KB] trackpad ESCAPED key=$keyCode (caret unreadable)")
                                 return false
                             }
-                            predIndex = now; canTrack = true; needsResync = false
+                            val now = predIndex
+                            canTrack = true; needsResync = false
                             val escapes = when (keyCode) {
                                 KeyEvent.KEYCODE_DPAD_UP   -> now <= 0
                                 KeyEvent.KEYCODE_DPAD_DOWN -> textLen >= 0 && now >= textLen
@@ -1372,7 +1563,9 @@ class KeyboardHook : IXposedHookLoadPackage {
                                 XposedBridge.log("$TAG [KB] trackpad V-boundary key=$keyCode pred=$now len=$textLen")
                                 return false
                             }
-                            moveCursorDpad(ims, keyCode); steps++
+                            if (selectModeOn && anchor >= 0) moveCursorDpadShift(ims, keyCode)
+                            else                            moveCursorDpad(ims, keyCode)
+                            steps++
                             hapticTick(ctx)
                             needsResync = true      // the app owns the new offset now
                             blocked.remove(KeyEvent.KEYCODE_DPAD_LEFT)
@@ -1412,9 +1605,24 @@ class KeyboardHook : IXposedHookLoadPackage {
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                         active = false
                         v.parent?.requestDisallowInterceptTouchEvent(false)
+                        // Remember the anchor so the next grab keeps growing THIS highlight
+                        // instead of collapsing it and starting over.
+                        if (selectModeOn && anchor >= 0) selAnchor = anchor
                         // One resync on release to absorb any drift from internal counting.
                         val finalCaret = readCaret(ims)
-                        XposedBridge.log("$TAG [KB] trackpad UP steps=$steps pred=$predIndex actual=$finalCaret escaped=$escaped root=$cachedTrackpadRoot")
+                        XposedBridge.log("$TAG [KB] trackpad UP steps=$steps pred=$predIndex anchor=$anchor actual=$finalCaret escaped=$escaped root=$cachedTrackpadRoot")
+                        // Selecting is nearly always the first half of "copy this" — so the
+                        // action bar comes to the finger instead of costing another tap.
+                        // steps > 0 keeps a stray tap on the stick from popping it, and the
+                        // getSelectedText check keeps it shut when the drag selected nothing.
+                        if (selectModeOn && !escaped && steps > 0) {
+                            val sel = try { ims.currentInputConnection?.getSelectedText(0) }
+                                      catch (_: Throwable) { null }
+                            if (!sel.isNullOrEmpty()) {
+                                XposedBridge.log("$TAG [KB] select mode: opening action bar len=${sel.length}")
+                                showSelectionMenu(ctx, ims, toolbar)
+                            }
+                        }
                         true
                     }
                     else -> false
@@ -1523,6 +1731,13 @@ class KeyboardHook : IXposedHookLoadPackage {
     // app's editor, which a keyboard cannot summon cross-process).
     // ─────────────────────────────────────────────────────
     private fun showSelectionMenu(ctx: Context, ims: InputMethodService, anchor: View) {
+        // One bar at a time. Two entry points can reach this (the ✂️ button and releasing
+        // the stick in select mode), and each call builds its own PopupWindow — without
+        // this, a tap on ✂️ followed by a stick release leaves two stacked bars, the lower
+        // one unreachable.
+        try { selectionMenu?.dismiss() } catch (_: Throwable) {}
+        selectionMenu = null
+
         val dp = ctx.resources.displayMetrics.density
         val radius = 18f * dp
         // OLED-dark floating pill: rounded #191921 surface with a hairline border and
@@ -1545,6 +1760,8 @@ class KeyboardHook : IXposedHookLoadPackage {
             isOutsideTouchable = true
             isClippingEnabled = false
         }
+        selectionMenu = popup
+        popup.setOnDismissListener { if (selectionMenu === popup) selectionMenu = null }
 
         fun clip(): ClipboardManager? =
             ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager

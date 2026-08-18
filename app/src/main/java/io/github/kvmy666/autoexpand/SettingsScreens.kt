@@ -83,7 +83,7 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     var selectedFeature by remember { mutableStateOf<String?>(null) }
 
     // ── What's New dialog ─────────────────────────────────────────────────────
-    var showWhatsNew by remember { mutableStateOf(!prefs.getBoolean("whats_new_seen_3_2_2", false)) }
+    var showWhatsNew by remember { mutableStateOf(!prefs.getBoolean("whats_new_seen_3_3_0", false)) }
     var whatsNewDontShow by remember { mutableStateOf(false) }
 
     // ── Notifications state ───────────────────────────────────────────────────
@@ -149,6 +149,7 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     var btnCursorEnabled    by remember { mutableStateOf(prefs.getBoolean("btn_cursor_enabled", false)) }   // A3: OFF by default
     var btnTrackpadEnabled  by remember { mutableStateOf(prefs.getBoolean("btn_trackpad_enabled", true)) }  // A4: ON by default
     var trackpadHaptics     by remember { mutableStateOf(prefs.getBoolean("trackpad_haptics_enabled", true)) } // A2
+    var btnSelectMode       by remember { mutableStateOf(prefs.getBoolean("btn_selectmode_enabled", true)) }
     var vibStrength         by remember { mutableIntStateOf(prefs.getString("vibration_strength", "100")?.toIntOrNull() ?: 100) }
     var clipFullText        by remember { mutableStateOf(prefs.getBoolean("clip_full_text_enabled", true)) }    // A1
     var btnShortcutEnabled  by remember { mutableStateOf(prefs.getBoolean("btn_shortcut_enabled", true)) }
@@ -158,7 +159,7 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
             ?.getDefaultSensor(android.hardware.Sensor.TYPE_ACCELEROMETER) != null
     }
     var undoEnabled       by remember { mutableStateOf(prefs.getBoolean("undo_enabled", true)) }
-    var undoButtonEnabled by remember { mutableStateOf(prefs.getBoolean("undo_button_enabled", true)) }
+    var undoButtonEnabled by remember { mutableStateOf(prefs.getBoolean("undo_button_enabled", false)) }
     var shakeUndoEnabled  by remember { mutableStateOf(prefs.getBoolean("shake_undo_enabled", true) && hasAccelerometer) }
     var shakeSensitivity  by remember { mutableFloatStateOf(prefs.getString("shake_sensitivity", "1.0")?.toFloatOrNull() ?: 1.0f) }
 
@@ -212,25 +213,22 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     if (showWhatsNew) {
         AlertDialog(
             onDismissRequest = {
-                if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_2_2", true).apply()
+                if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_3_0", true).apply()
                 showWhatsNew = false
             },
-            title = { Text("What's New in v3.2.2") },
+            title = { Text("What's New in v3.3.0") },
             text = {
                 Column(
                     modifier = Modifier.verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text("Fixes", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
-                    Text("• Screenshots work again — Volume Down + Power is no longer intercepted. The module no longer hooks system services at all, so it cannot affect your hardware buttons")
-                    Text("• Notifications: more reliable auto-expand on the lock screen and inside grouped notifications")
-                    Text("• Trackpad stick: the cursor now stops at the edge of the text box instead of jumping out of it, and it steps correctly over emoji and Arabic letters")
-                    Text("• Screen Snapper: the Quick Settings tile can now be added — it was missing from the tile list entirely")
-                    Text("• Screen Snapper: snaps taken from the tile capture the screen behind Quick Settings, and no longer come out dimmed")
-                    Text("• Keyboard: GIFs and stickers send correctly again")
+                    Text("New", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+                    Text("• Select mode (🖍️) — a new toggle next to the trackpad stick. Switch it on and dragging the stick highlights text instead of moving the cursor, in either direction, across lines as well")
+                    Text("• Lift your finger and the Cut / Copy / Paste bar opens on what you selected, so copying a phrase is one gesture")
+                    Text("• The toggle stays on until you tap it again, and lights up while it is active")
                     Spacer(Modifier.height(4.dp))
                     Text("Changes", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
-                    Text("• Snapper's Power + Volume Down shortcut has been removed. Open it from the Quick Settings tile or the edge button instead — pick one under Snapper › Activation method")
+                    Text("• The undo button (↩️) is now hidden by default to make room on the toolbar — shake the phone to undo instead. Bring it back any time under Keyboard › Undo button")
                     Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = whatsNewDontShow, onCheckedChange = { whatsNewDontShow = it })
@@ -240,7 +238,7 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
             },
             confirmButton = {
                 TextButton(onClick = {
-                    if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_2_2", true).apply()
+                    if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_3_0", true).apply()
                     showWhatsNew = false
                 }) { Text("Got it") }
             }
@@ -539,12 +537,20 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
                                 onCheckedChange = { btnTrackpadEnabled = it; onToggle("btn_trackpad_enabled", it) }
                             )
                             AnimatedVisibility(visible = btnTrackpadEnabled) {
+                              Column {
                                 ToggleRow(
                                     title = "Stick Haptics",
                                     description = "Vibration feedback while using the trackpad stick (grab pop + steering ticks).",
                                     checked = trackpadHaptics,
                                     onCheckedChange = { trackpadHaptics = it; onToggle("trackpad_haptics_enabled", it) }
                                 )
+                                ToggleRow(
+                                    title = stringResource(R.string.btn_selectmode_title),
+                                    description = stringResource(R.string.btn_selectmode_desc),
+                                    checked = btnSelectMode,
+                                    onCheckedChange = { btnSelectMode = it; onToggle("btn_selectmode_enabled", it) }
+                                )
+                              }
                             }
                             ToggleRow(
                                 title = stringResource(R.string.btn_shortcut_title),

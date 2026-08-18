@@ -157,10 +157,11 @@ class MainActivity : ComponentActivity() {
                 .putBoolean("btn_cursor_enabled", false)   // A3: cursor-nav OFF by default
                 .putBoolean("btn_trackpad_enabled", true)  // A4: trackpad stick ON by default
                 .putBoolean("trackpad_haptics_enabled", true) // A2
+                .putBoolean("btn_selectmode_enabled", true)   // 🖍️ select-mode toggle
                 .putString("vibration_strength", "100")       // global haptic strength 0..100
                 .putBoolean("clip_full_text_enabled", true)   // A1
                 .putBoolean("undo_enabled", true)             // B
-                .putBoolean("undo_button_enabled", true)
+                .putBoolean("undo_button_enabled", false)     // shake-to-undo instead; keeps the bar short
                 .putBoolean("shake_undo_enabled", true)
                 .putString("shake_sensitivity", "1.0")        // shake-undo trigger strength
                 .putBoolean("btn_shortcut_enabled", true)
@@ -188,6 +189,16 @@ class MainActivity : ComponentActivity() {
             prefs.edit()
                 .remove("snapper_hardware_chord_enabled")
                 .also { e -> migrated?.let { e.putString("snapper_activation_method", it) } }
+                .apply()
+        }
+        // Select-mode migration — 🖍️ joins the toolbar, so something has to leave it or the
+        // bar runs out of width. The undo button goes: shaking the phone already undoes,
+        // and it is the only button with a gesture that fully replaces it. One-time, so
+        // switching ↩️ back on in Settings sticks.
+        if (!prefs.contains("undo_button_default_off_migrated")) {
+            prefs.edit()
+                .putBoolean("undo_button_enabled", false)
+                .putBoolean("undo_button_default_off_migrated", true)
                 .apply()
         }
         if (!prefs.contains("enable_snapper_entirely")) {
