@@ -41,6 +41,7 @@ import android.view.inputmethod.ExtractedText
 import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputConnectionWrapper
+import android.view.inputmethod.InputContentInfo
 import android.view.inputmethod.TextAttribute
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -86,6 +87,12 @@ class KeyboardHook : IXposedHookLoadPackage {
     // When true, deliver DPAD via privileged `input keyevent` (root) instead of the
     // InputConnection — fallback for apps that swallow IME DPAD events.
     @Volatile private var cachedTrackpadRoot = false
+
+    // Set by the onStartInputView hook when input restarts on a target with no text
+    // (inputType == 0) — the signature of DPAD focus-search handing focus to a
+    // neighbouring, non-editable view. A trackpad gesture in flight uses this as a
+    // cheap "the field may be gone" hint and re-verifies with one caret read.
+    @Volatile private var inputRestartedNonEditable = false
     @Volatile private var lastCacheTime = 0L
     private val CACHE_INTERVAL_MS = 2000L
 
@@ -124,6 +131,32 @@ class KeyboardHook : IXposedHookLoadPackage {
     // Cache so we hand the same wrapper back for the same underlying connection.
     @Volatile private var icWrapReal: InputConnection? = null
     @Volatile private var icWrapWrapper: InputConnection? = null
+
+    // ── Rich content (GIF / sticker) pass-through ──
+    // While this is set (per-thread), getCurrentInputConnection() hands back the REAL
+    // connection instead of our wrapper.
+    //
+    // WHY: inserting a GIF or sticker goes through InputConnection.commitContent().
+    // The receiving app is handed a content:// URI it can only open if the framework
+    // grants it read permission, and the code that creates that grant identifies the
+    // caller by REFERENCE — it proceeds only when the connection commitContent was
+    // invoked on is the very same object getCurrentInputConnection() returns.
+    // (Historically that check lived in InputMethodService.exposeContent(); no method
+    // by that name exists on Android 16, but the behaviour is unchanged.)
+    //
+    // Our wrapper is a different object, so the check fails and the grant is silently
+    // skipped. commitContent still reports success to Gboard, so the keyboard thinks
+    // it worked, but the app can't read the file and nothing is sent. The giveaway in
+    // logcat is these two lines in the same millisecond:
+    //
+    //   CommitContentHelper: Committed image with mime-type=[image/gif] ... success=true
+    //   ContentProviderHelper: Permission Denial: opening provider ...fileprovider
+    //                          from ProcessRecord{...target app}
+    //
+    // Unwrapping for the duration of the call makes the check pass. Set from BOTH
+    // ends so it holds no matter which connection object Gboard committed through:
+    // our wrapper's commitContent override, and the grant method itself.
+    private val icUnwrap = ThreadLocal.withInitial { false }
 
     // Last drag position of the floating selection bar (null = default placement).
     // Persisted across opens so the bar reappears where the user left it.
@@ -299,6 +332,8 @@ class KeyboardHook : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         val ims = param.thisObject as? InputMethodService ?: return
+                        // inputType == 0 → input restarted on something that holds no text.
+                        if ((param.args[0] as? EditorInfo)?.inputType == 0) inputRestartedNonEditable = true
                         try { refreshPrefs(ims.applicationContext); registerShake(ims.applicationContext) } catch (_: Throwable) {}
                     }
                 }
@@ -1127,13 +1162,14 @@ class KeyboardHook : IXposedHookLoadPackage {
             var textLen = -1          // total length (-1 = unknown → no right-edge detection)
             var rtl = false           // RTL field → DPAD_RIGHT decreases the logical index
             var canTrack = false      // true once we have a valid caret to count from
+            var escaped = false       // focus left the editor → send nothing more this gesture
             val blocked = HashSet<Int>()   // directions parked at a boundary this gesture
             btn.setOnTouchListener { v, e ->
                 when (e.action) {
                     MotionEvent.ACTION_DOWN -> {
                         active = true; accX = 0f; accY = 0f; steps = 0
                         lastX = e.rawX; lastY = e.rawY
-                        blocked.clear()
+                        blocked.clear(); escaped = false; inputRestartedNonEditable = false
                         predIndex = readCaret(ims); textLen = readLen(ims); rtl = isRtlContext(ims)
                         canTrack = predIndex >= 0
                         hapticHeavy(ctx)   // heavy "pop" on grab
@@ -1143,7 +1179,7 @@ class KeyboardHook : IXposedHookLoadPackage {
                         true
                     }
                     MotionEvent.ACTION_MOVE -> {
-                        if (!active) return@setOnTouchListener true
+                        if (!active || escaped) return@setOnTouchListener true
                         accX += e.rawX - lastX
                         accY += e.rawY - lastY
                         lastX = e.rawX; lastY = e.rawY
@@ -1151,12 +1187,27 @@ class KeyboardHook : IXposedHookLoadPackage {
                         val stepX = TRACKPAD_STEP_X / sens
                         val stepY = TRACKPAD_STEP_Y / sens
 
+                        // A restart with inputType == 0 means a DPAD may have just handed
+                        // focus to a neighbouring view. It also fires spuriously (Snapchat
+                        // restarts input mid-gesture while the composer keeps focus), so
+                        // confirm with ONE caret read before abandoning the gesture. Costs
+                        // nothing on the normal path — it only reads when the flag is up.
+                        fun fieldLost(): Boolean {
+                            if (escaped) return true
+                            if (!inputRestartedNonEditable) return false
+                            inputRestartedNonEditable = false
+                            if (readCaret(ims) >= 0) return false      // spurious restart
+                            escaped = true; hapticBoundary(ctx)
+                            XposedBridge.log("$TAG [KB] trackpad ESCAPED (input restarted with no text field) steps=$steps")
+                            return true
+                        }
+
                         // Horizontal step — PURE internal tracking, zero round-trips.
                         // We know the index moves ±1 per DPAD (RTL flips the sign), and the
                         // left edge is always 0, so we can refuse the escaping key from
                         // predIndex alone — no read to lag behind the finger, no rubber-band.
                         fun emitHoriz(keyCode: Int): Boolean {
-                            if (keyCode in blocked) return false
+                            if (fieldLost() || keyCode in blocked) return false
                             if (canTrack) {
                                 val atLeftEdge  = predIndex <= 0
                                 val atRightEdge = textLen >= 0 && predIndex >= textLen
@@ -1193,7 +1244,7 @@ class KeyboardHook : IXposedHookLoadPackage {
                         // exactly ONE resync read to restore predIndex (per line change, not
                         // per step). Block only at the true text start/end when known.
                         fun emitVert(keyCode: Int): Boolean {
-                            if (keyCode in blocked) return false
+                            if (fieldLost() || keyCode in blocked) return false
                             if (canTrack) {
                                 val escapes = when (keyCode) {
                                     KeyEvent.KEYCODE_DPAD_UP   -> predIndex <= 0
@@ -1206,16 +1257,33 @@ class KeyboardHook : IXposedHookLoadPackage {
                                     return false
                                 }
                             }
+                            val before = predIndex
                             moveCursorDpad(ims, keyCode); steps++
                             hapticTick(ctx)
                             val resync = readCaret(ims)
-                            if (resync >= 0) {
-                                predIndex = resync; canTrack = true
-                                blocked.remove(KeyEvent.KEYCODE_DPAD_LEFT)
-                                blocked.remove(KeyEvent.KEYCODE_DPAD_RIGHT)
-                            } else {
-                                canTrack = false   // editor stopped reporting → suspend H math
+                            if (resync < 0) {
+                                // The caret went unreadable the instant we sent a vertical key:
+                                // the editor is no longer the input target. Stop, rather than
+                                // walk DPADs through whatever view now holds focus. Losing the
+                                // caret is proof of an escape, so fail SAFE here — the old code
+                                // only cleared canTrack, which switched every guard OFF.
+                                canTrack = false; escaped = true; hapticBoundary(ctx)
+                                XposedBridge.log("$TAG [KB] trackpad ESCAPED key=$keyCode (caret unreadable after step)")
+                                return false
                             }
+                            if (resync == before) {
+                                // A vertical move that changed nothing means there is no line
+                                // that way — we are on the field's first/last line. Park the
+                                // direction NOW, because the next one is the one that hands
+                                // focus to the neighbouring view. The offset guards above miss
+                                // this whenever the caret sits mid-line (predIndex 1, not 0).
+                                blocked.add(keyCode); hapticBoundary(ctx)
+                                XposedBridge.log("$TAG [KB] trackpad LINE-boundary key=$keyCode pred=$predIndex")
+                                return false
+                            }
+                            predIndex = resync; canTrack = true
+                            blocked.remove(KeyEvent.KEYCODE_DPAD_LEFT)
+                            blocked.remove(KeyEvent.KEYCODE_DPAD_RIGHT)
                             XposedBridge.log("$TAG [KB] trackpad step key=$keyCode pred=$predIndex read=true")
                             return true
                         }
@@ -1231,7 +1299,7 @@ class KeyboardHook : IXposedHookLoadPackage {
                         v.parent?.requestDisallowInterceptTouchEvent(false)
                         // One resync on release to absorb any drift from internal counting.
                         val finalCaret = readCaret(ims)
-                        XposedBridge.log("$TAG [KB] trackpad UP steps=$steps pred=$predIndex actual=$finalCaret root=$cachedTrackpadRoot")
+                        XposedBridge.log("$TAG [KB] trackpad UP steps=$steps pred=$predIndex actual=$finalCaret escaped=$escaped root=$cachedTrackpadRoot")
                         true
                     }
                     else -> false
@@ -1473,6 +1541,9 @@ class KeyboardHook : IXposedHookLoadPackage {
                 imsClass, lpparam.classLoader, "getCurrentInputConnection",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
+                        // A GIF/sticker commit is in flight — leave the REAL connection
+                        // in place so the URI grant's identity check passes (see icUnwrap).
+                        if (icUnwrap.get() == true) return
                         val real = param.result as? InputConnection ?: return
                         if (real is SearchRedirectConnection) return
                         val cached = icWrapWrapper
@@ -1484,6 +1555,42 @@ class KeyboardHook : IXposedHookLoadPackage {
             XposedBridge.log("$TAG [KB] getCurrentInputConnection wrap installed")
         } catch (t: Throwable) {
             XposedBridge.log("$TAG [KB] getCurrentInputConnection hook failed: ${t.message}")
+        }
+
+        // Unwrap around the grant method too. Covers the case where Gboard commits
+        // through a connection reference it cached itself rather than through our
+        // wrapper — then our commitContent override never runs, but this still lets the
+        // grant through. Inert on Android 16 (no such method); the override carries it.
+        try {
+            val hook = object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) { icUnwrap.set(true) }
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    icUnwrap.set(false)
+                    XposedBridge.log("$TAG [KB] rich-content grant passed through")
+                }
+            }
+            // Matched by SIGNATURE, not by name: the grant hook has historically been
+            // called exposeContent() but is absent under that name on Android 16, so
+            // look for whatever method takes (InputContentInfo, InputConnection) —
+            // that pair is unambiguous — anywhere up the service's class hierarchy.
+            var cls: Class<*>? = XposedHelpers.findClass(imsClass, lpparam.classLoader)
+            var hooked = 0
+            while (cls != null && hooked == 0) {
+                for (m in cls.declaredMethods) {
+                    val p = m.parameterTypes
+                    if (p.size == 2 &&
+                        InputContentInfo::class.java.isAssignableFrom(p[0]) &&
+                        InputConnection::class.java.isAssignableFrom(p[1])) {
+                        XposedBridge.hookMethod(m, hook)
+                        hooked++
+                        XposedBridge.log("$TAG [KB] rich-content grant hook on ${cls!!.name}.${m.name}")
+                    }
+                }
+                cls = cls.superclass
+            }
+            if (hooked == 0) XposedBridge.log("$TAG [KB] no grant method found — relying on commitContent unwrap")
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG [KB] rich-content grant hook failed: ${t.message}")
         }
     }
 
@@ -1543,6 +1650,22 @@ class KeyboardHook : IXposedHookLoadPackage {
                 return true
             }
             return super.sendKeyEvent(event)
+        }
+        // GIF / sticker insertion. Never redirected into the clipboard-search editor —
+        // that editor holds plain text only, and the image belongs in the host app
+        // either way. Unwrapped for the duration of the call so the framework grants
+        // the receiving app read access to the URI (see icUnwrap).
+        override fun commitContent(
+            inputContentInfo: InputContentInfo,
+            flags: Int,
+            opts: android.os.Bundle?
+        ): Boolean {
+            icUnwrap.set(true)
+            return try {
+                super.commitContent(inputContentInfo, flags, opts)
+            } finally {
+                icUnwrap.set(false)
+            }
         }
         override fun commitCompletion(text: CompletionInfo?): Boolean =
             edit { it.commitCompletion(text) } ?: super.commitCompletion(text)

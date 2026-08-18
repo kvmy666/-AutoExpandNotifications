@@ -137,22 +137,26 @@ internal fun SnapperSettingsCard(
                 }
             )
 
-            // Activation method: Software (edge button) | Hardware (chord) | Both
+            // Activation method: QS tile | Edge button | Both.
+            // The Power + Volume-Down chord was removed in 3.2.2 — it had to block the
+            // system screenshot before it knew whether Snapper would replace it, which
+            // broke screenshots outright on some devices. Snapper no longer touches
+            // hardware keys at all.
             Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                 Text(text = stringResource(R.string.snapper_activation_title), style = MaterialTheme.typography.bodyLarge)
                 Spacer(modifier = Modifier.padding(top = 8.dp))
                 SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                     SegmentedButton(
-                        selected = snapperMethod == "edge_button",
-                        onClick  = { onMethodChange("edge_button") },
+                        selected = snapperMethod == "qs_tile",
+                        onClick  = { onMethodChange("qs_tile") },
                         shape    = SegmentedButtonDefaults.itemShape(index = 0, count = 3),
-                        label    = { Text("Software") }
+                        label    = { Text(stringResource(R.string.snapper_method_qs)) }
                     )
                     SegmentedButton(
-                        selected = snapperMethod == "chord",
-                        onClick  = { onMethodChange("chord") },
+                        selected = snapperMethod == "edge_button",
+                        onClick  = { onMethodChange("edge_button") },
                         shape    = SegmentedButtonDefaults.itemShape(index = 1, count = 3),
-                        label    = { Text("Hardware") }
+                        label    = { Text(stringResource(R.string.snapper_method_edge)) }
                     )
                     SegmentedButton(
                         selected = snapperMethod == "both",
