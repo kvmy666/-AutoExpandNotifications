@@ -12,6 +12,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -263,5 +265,54 @@ internal fun ToggleRow(
         }
         Spacer(modifier = Modifier.width(16.dp))
         Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+// =============================================================================
+// Segmented choice row — a small fixed set of values (budget caps, limits).
+// A free OutlinedTextField would let someone type "999999"; these caps exist to
+// protect device storage, so the UI only offers the values the policy supports.
+// =============================================================================
+@Composable
+internal fun ChoiceRow(
+    title: String,
+    options: List<String>,
+    selected: String,
+    onSelect: (String) -> Unit,
+    suffix: String = ""
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+        Text(text = title, style = MaterialTheme.typography.bodyLarge)
+        Spacer(modifier = Modifier.width(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            options.forEach { opt ->
+                val isSel = opt == selected
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (isSel) AppColors.AccentTint else AppColors.Surface)
+                        .border(
+                            width = 1.dp,
+                            color = if (isSel) AppColors.Accent else AppColors.Divider,
+                            shape = RoundedCornerShape(12.dp)
+                        )
+                        .clickable { onSelect(opt) }
+                        .padding(vertical = 10.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = opt + suffix,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (isSel) AppColors.Accent else AppColors.TextDim,
+                        fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        }
     }
 }

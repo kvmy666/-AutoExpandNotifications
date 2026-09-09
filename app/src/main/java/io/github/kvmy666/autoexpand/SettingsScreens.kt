@@ -152,6 +152,9 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     var btnSelectMode       by remember { mutableStateOf(prefs.getBoolean("btn_selectmode_enabled", true)) }
     var vibStrength         by remember { mutableIntStateOf(prefs.getString("vibration_strength", "100")?.toIntOrNull() ?: 100) }
     var clipFullText        by remember { mutableStateOf(prefs.getBoolean("clip_full_text_enabled", true)) }    // A1
+    var clipImages          by remember { mutableStateOf(prefs.getBoolean("clip_images_enabled", false)) }
+    var clipImgMaxEntries   by remember { mutableStateOf(prefs.getString("clip_img_max_entries", "50") ?: "50") }
+    var clipImgMaxMb        by remember { mutableStateOf(prefs.getString("clip_img_max_mb", "100") ?: "100") }
     var btnShortcutEnabled  by remember { mutableStateOf(prefs.getBoolean("btn_shortcut_enabled", true)) }
     // ── Undo (B2/B3/B4) ──
     val hasAccelerometer = remember {
@@ -498,6 +501,45 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
                                 checked = clipFullText,
                                 onCheckedChange = { clipFullText = it; onToggle("clip_full_text_enabled", it) }
                             )
+                            ToggleRow(
+                                title = "Save copied images",
+                                description = "Copied images are kept in the vault alongside text. " +
+                                    "Stored inside Gboard's own private data — nothing leaves the device.",
+                                checked = clipImages,
+                                onCheckedChange = { clipImages = it; onToggle("clip_images_enabled", it) }
+                            )
+                            AnimatedVisibility(visible = clipImages) {
+                                Column {
+                                    ChoiceRow(
+                                        title = "Max images kept",
+                                        options = listOf("20", "50", "100"),
+                                        selected = clipImgMaxEntries,
+                                        onSelect = {
+                                            clipImgMaxEntries = it
+                                            onStringPref("clip_img_max_entries", it)
+                                        }
+                                    )
+                                    ChoiceRow(
+                                        title = "Max image storage",
+                                        options = listOf("25", "50", "100", "200"),
+                                        suffix = " MB",
+                                        selected = clipImgMaxMb,
+                                        onSelect = {
+                                            clipImgMaxMb = it
+                                            onStringPref("clip_img_max_mb", it)
+                                        }
+                                    )
+                                    Text(
+                                        "Oldest unpinned images are removed first when a limit is reached. " +
+                                            "Pinned images are never removed automatically. " +
+                                            "Counts and usage are shown in the clipboard popup on the keyboard, " +
+                                            "which is the only process that can read the store.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = AppColors.TextDim,
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                    )
+                                }
+                            }
                             AnimatedVisibility(visible = btnClipboardEnabled) {
                                 OutlinedTextField(
                                     value = clipboardMaxEntries,

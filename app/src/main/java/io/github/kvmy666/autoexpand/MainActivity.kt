@@ -167,6 +167,17 @@ class MainActivity : ComponentActivity() {
                 .putBoolean("btn_shortcut_enabled", true)
                 .apply()
         }
+        // 3.4.0 — clipboard images. Seeded separately from the keyboard block above so
+        // existing installs (which already have keyboard_enhancer_enabled) get the budget
+        // defaults too. The feature itself stays OFF until the user opts in.
+        if (!prefs.contains("clip_images_enabled")) {
+            prefs.edit()
+                .putBoolean("clip_images_enabled", false)
+                .putString("clip_img_max_entries", "50")
+                .putString("clip_img_max_mb", "100")
+                .apply()
+        }
+
         if (!prefs.contains("snapper_enabled")) {
             prefs.edit()
                 .putBoolean("snapper_enabled", false)
