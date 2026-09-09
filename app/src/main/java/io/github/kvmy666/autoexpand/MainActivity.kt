@@ -178,6 +178,15 @@ class MainActivity : ComponentActivity() {
                 .apply()
         }
 
+        // 3.4.0 — system screenshot auto-capture. Both halves default OFF; the second one
+        // overwrites the user's clipboard, which must never happen without them asking.
+        if (!prefs.contains("shot_capture_enabled")) {
+            prefs.edit()
+                .putBoolean("shot_capture_enabled", false)
+                .putBoolean("shot_to_clipboard_enabled", false)
+                .apply()
+        }
+
         if (!prefs.contains("snapper_enabled")) {
             prefs.edit()
                 .putBoolean("snapper_enabled", false)

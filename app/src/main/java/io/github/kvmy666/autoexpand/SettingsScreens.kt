@@ -155,6 +155,8 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     var clipImages          by remember { mutableStateOf(prefs.getBoolean("clip_images_enabled", false)) }
     var clipImgMaxEntries   by remember { mutableStateOf(prefs.getString("clip_img_max_entries", "50") ?: "50") }
     var clipImgMaxMb        by remember { mutableStateOf(prefs.getString("clip_img_max_mb", "100") ?: "100") }
+    var shotCapture         by remember { mutableStateOf(prefs.getBoolean("shot_capture_enabled", false)) }
+    var shotToClipboard     by remember { mutableStateOf(prefs.getBoolean("shot_to_clipboard_enabled", false)) }
     var btnShortcutEnabled  by remember { mutableStateOf(prefs.getBoolean("btn_shortcut_enabled", true)) }
     // ── Undo (B2/B3/B4) ──
     val hasAccelerometer = remember {
@@ -534,6 +536,37 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
                                             "Pinned images are never removed automatically. " +
                                             "Counts and usage are shown in the clipboard popup on the keyboard, " +
                                             "which is the only process that can read the store.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = AppColors.TextDim,
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                    )
+                                }
+                            }
+                            ToggleRow(
+                                title = "Save screenshots to vault",
+                                description = "Every system screenshot is added to the vault automatically — " +
+                                    "chord, power menu, tile or gesture. The screenshot still saves to your " +
+                                    "gallery exactly as before.",
+                                checked = shotCapture,
+                                onCheckedChange = { shotCapture = it; onToggle("shot_capture_enabled", it) }
+                            )
+                            AnimatedVisibility(visible = shotCapture) {
+                                Column {
+                                    ToggleRow(
+                                        title = "Also copy screenshot to clipboard",
+                                        description = "The next paste in any app is the screenshot. " +
+                                            "This replaces whatever you had copied — the replaced item is " +
+                                            "saved to the vault first.",
+                                        checked = shotToClipboard,
+                                        onCheckedChange = {
+                                            shotToClipboard = it; onToggle("shot_to_clipboard_enabled", it)
+                                        }
+                                    )
+                                    Text(
+                                        "Screenshots share the limits above. They are picked up by the " +
+                                            "keyboard, so one taken while the keyboard has not run yet appears " +
+                                            "the next time you open it. Requires Gboard's photo access, which " +
+                                            "it already has — nothing new is asked for.",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = AppColors.TextDim,
                                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
