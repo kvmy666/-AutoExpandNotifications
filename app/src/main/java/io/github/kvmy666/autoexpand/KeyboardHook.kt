@@ -3,7 +3,15 @@ package io.github.kvmy666.autoexpand
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.pm.PackageManager
 import android.content.res.ColorStateList
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
+import android.graphics.RectF
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
@@ -13,6 +21,7 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.inputmethodservice.InputMethodService
+import android.net.Uri
 import java.text.BreakIterator
 import android.os.Build
 import android.os.Handler
@@ -46,6 +55,7 @@ import android.view.inputmethod.InputContentInfo
 import android.view.inputmethod.TextAttribute
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupWindow
 import android.widget.ScrollView
@@ -85,6 +95,11 @@ class KeyboardHook : IXposedHookLoadPackage {
     @Volatile private var cachedTrackpadHaptics = true
     // CopyVault row rendering: full text (default) vs first-line-only truncation.
     @Volatile private var cachedClipFullText = true
+    // Save copied images. Opt-in, default OFF for the first release: with it off, not one
+    // line of the capture path runs and the vault behaves exactly as 3.3.0 did.
+    @Volatile private var cachedClipImages = false
+    @Volatile private var cachedImgMaxEntries = ClipboardImagePolicy.DEFAULT_MAX_ENTRIES
+    @Volatile private var cachedImgMaxBytes = ClipboardImagePolicy.DEFAULT_MAX_BYTES
     // Sensitivity: >1 = faster (smaller effective step). Tunable via pref "trackpad_sensitivity".
     @Volatile private var cachedTrackpadSensitivity = 1.0f
     // When true, deliver DPAD via privileged `input keyevent` (root) instead of the
@@ -129,6 +144,42 @@ class KeyboardHook : IXposedHookLoadPackage {
     private var clipboardDb: ClipboardDatabase? = null
     private var activeImsRef: InputMethodService? = null
     @Volatile private var clipSortMode = ClipboardDatabase.SortMode.NEWEST
+
+    // ── Clipboard images (3.4.0) ──
+    // Decode/compress must never share dbExecutor: a 2048px WEBP encode takes long
+    // enough that queueing it behind the DB thread would stall list reloads.
+    private val imgExecutor = Executors.newSingleThreadExecutor()
+    @Volatile private var imageStore: ClipboardImageStore? = null
+    // One-shot per process: commit any delete that a process death interrupted, and GC.
+    @Volatile private var imageStoreRepaired = false
+    // Thumbnails are decoded off the main thread and cached by hash. Bounded so a long
+    // scroll through a 100-image vault cannot grow Gboard's heap without limit.
+    private val thumbCache = object : LinkedHashMap<String, Bitmap>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Bitmap>) = size > 60
+    }
+    // One-line note shown above the list when a save was refused to protect a pin.
+    @Volatile private var imgBudgetHint: String? = null
+
+    /**
+     * Suppression window for our own clipboard writes.
+     *
+     * The paste-back fallback puts the image on the system clipboard so the user can paste
+     * it manually — which fires our own OnPrimaryClipChangedListener and re-captures the
+     * image we just handed out, as a brand-new entry. Observed on device: pasting a stored
+     * image added a second row whose bytes were our own re-encoded WebP (and which the
+     * animated sniffer flagged GIF, since WebP shares the RIFF container).
+     *
+     * Hash matching cannot fix this — the re-read bytes are the WebP, not the original
+     * source — so the guard is a short time window instead. Losing a genuine user copy
+     * inside it costs one uncaptured image; without it every paste silently grows the vault.
+     */
+    @Volatile private var selfClipUntilMs = 0L
+
+    // Soft-delete undo window. The deadline is absolute wall-clock, not a countdown, so
+    // that a process death resolves deterministically instead of leaving a batch dangling.
+    private val UNDO_WINDOW_MS = 15_000L
+    @Volatile private var pendingDeleteDeadline = 0L
+    @Volatile private var pendingDeleteLabel = ""
 
     // ── Clipboard-search input redirection ──
     // The clipboard popup lives inside Gboard's own process, so when its search
@@ -264,6 +315,11 @@ class KeyboardHook : IXposedHookLoadPackage {
             }
             cachedTrackpadHaptics = cache["trackpad_haptics_enabled"]?.let { it == "1" } ?: cachedTrackpadHaptics
             cachedClipFullText = cache["clip_full_text_enabled"]?.let { it == "1" } ?: cachedClipFullText
+            // Opt-in: absent key means OFF, unlike the toggles above which default ON.
+            cachedClipImages   = cache["clip_images_enabled"]?.let { it == "1" } ?: cachedClipImages
+            cachedImgMaxEntries = cache["clip_img_max_entries"]?.toIntOrNull() ?: cachedImgMaxEntries
+            cachedImgMaxBytes  = cache["clip_img_max_mb"]?.toLongOrNull()?.times(1024 * 1024)
+                ?: cachedImgMaxBytes
             cachedUndoEnabled  = cache["undo_enabled"]?.let { it == "1" } ?: cachedUndoEnabled
             cachedUndoButton   = cache["undo_button_enabled"]?.let { it == "1" } ?: cachedUndoButton
             cachedShakeUndo    = cache["shake_undo_enabled"]?.let { it == "1" } ?: cachedShakeUndo
@@ -741,7 +797,9 @@ class KeyboardHook : IXposedHookLoadPackage {
                             activeImsRef = ims
                             if (clipboardDb == null) {
                                 clipboardDb = ClipboardDatabase(ctx, cachedMaxEntries)
+                                imageStore = ClipboardImageStore(ctx)
                                 registerClipboardListener(ctx, ims)
+                                repairImageStore()
                             }
 
                             // ─────────────────────────────────────────────
@@ -2160,19 +2218,64 @@ class KeyboardHook : IXposedHookLoadPackage {
             setPadding((12f * dp).toInt(), (7f * dp).toInt(), (12f * dp).toInt(), (7f * dp).toInt())
             background = ripple(UI.SURFACE, chipR)
         }
-        val deleteAllBtn = TextView(ctx).apply {
-            text = "🗑  Delete all"
+        // The single "Delete all" is now two type-scoped buttons. They must NEVER touch
+        // the other type — that is the highest-risk regression in this feature, and it is
+        // enforced in SQL by softDeleteAll(kind) rather than trusted to the caller.
+        fun dangerChip(label: String) = TextView(ctx).apply {
+            text = label
             setTextColor(UI.DANGER)
             textSize = 11f
-            setPadding((12f * dp).toInt(), (7f * dp).toInt(), (12f * dp).toInt(), (7f * dp).toInt())
+            setPadding((10f * dp).toInt(), (7f * dp).toInt(), (10f * dp).toInt(), (7f * dp).toInt())
             background = ripple(Color.parseColor("#1FFF6B6B"), chipR)
         }
+        val deleteTextsBtn = dangerChip("🗑  Texts")
+        val deleteImagesBtn = dangerChip("🗑  Images")
+
         sortRow.addView(sortBtn)
         sortRow.addView(View(ctx), LinearLayout.LayoutParams(0, 1, 1f))
         sortRow.addView(searchBtn)
-        sortRow.addView(View(ctx), LinearLayout.LayoutParams((8f * dp).toInt(), 1))
-        sortRow.addView(deleteAllBtn)
+        sortRow.addView(View(ctx), LinearLayout.LayoutParams((6f * dp).toInt(), 1))
+        sortRow.addView(deleteTextsBtn)
+        sortRow.addView(View(ctx), LinearLayout.LayoutParams((6f * dp).toInt(), 1))
+        sortRow.addView(deleteImagesBtn)
         outerContainer.addView(sortRow)
+
+        // ── Undo bar: hidden until a delete arms it, then ticks 15 → 0 ──
+        val undoBar = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+            background = roundRect(UI.ELEVATED, 12f * dp, UI.DIVIDER, (1f * dp).toInt())
+            setPadding((14f * dp).toInt(), (9f * dp).toInt(), (8f * dp).toInt(), (9f * dp).toInt())
+        }
+        val undoLabel = TextView(ctx).apply {
+            setTextColor(UI.TEXT)
+            textSize = 12f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val undoBtn = TextView(ctx).apply {
+            text = "↩  Undo"
+            setTextColor(UI.ACCENT)
+            textSize = 12f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setPadding((12f * dp).toInt(), (6f * dp).toInt(), (12f * dp).toInt(), (6f * dp).toInt())
+            background = ripple(null, 10f * dp)
+        }
+        undoBar.addView(undoLabel)
+        undoBar.addView(undoBtn)
+        outerContainer.addView(undoBar, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { setMargins((14f * dp).toInt(), 0, (14f * dp).toInt(), (8f * dp).toInt()) })
+
+        // ── Counters: "Images: 34 items · 41.2 MB / 100 MB" ──
+        // The spec puts this in the settings app; it lives here because the store sits in
+        // Gboard's private data dir, which the module's own process cannot read.
+        val statsLabel = TextView(ctx).apply {
+            setTextColor(UI.TEXT_DIM)
+            textSize = 10f
+            setPadding((16f * dp).toInt(), 0, (16f * dp).toInt(), (6f * dp).toInt())
+        }
+        outerContainer.addView(statsLabel)
 
         // ── Scrollable list ──
         val scrollView = ScrollView(ctx).apply {
@@ -2213,6 +2316,22 @@ class KeyboardHook : IXposedHookLoadPackage {
                 val rows: List<Pair<ClipboardDatabase.Entry, List<IntRange>>> =
                     if (query.isBlank()) all.map { it to emptyList() }
                     else ClipboardSearch.search(all, query).map { it.entry to it.matchRanges }
+
+                // Cost readout, computed on the DB thread with the rest of the query.
+                val imgCount = db.countLive(ClipboardDatabase.KIND_IMAGE)
+                val imgBytes = db.liveImageBytes()
+                val hint = imgBudgetHint
+                statsLabel.post {
+                    statsLabel.visibility = if (cachedClipImages || imgCount > 0) View.VISIBLE else View.GONE
+                    statsLabel.text = when {
+                        hint != null -> hint
+                        else -> "Images: $imgCount item${if (imgCount == 1) "" else "s"} · " +
+                            "${ClipboardImagePolicy.formatBytes(imgBytes)} / " +
+                            ClipboardImagePolicy.formatBytes(cachedImgMaxBytes)
+                    }
+                    statsLabel.setTextColor(if (hint != null) UI.DANGER else UI.TEXT_DIM)
+                }
+
                 listContainer.post {
                     listContainer.removeAllViews()
                     if (rows.isEmpty()) {
@@ -2270,13 +2389,101 @@ class KeyboardHook : IXposedHookLoadPackage {
             displayLimit = pageSize
             reloadList()
         }
-        deleteAllBtn.setOnClickListener {
+        // ── Delete + 15-second undo ──
+        //
+        // No confirmation dialog: the rows vanish at once and an undo bar counts down.
+        // Deletion is SOFT — rows are tombstoned and the countdown holds the only path
+        // back. Files are never moved to a trash directory: under content-hash dedup the
+        // file being "trashed" may still back an entry that was NOT deleted, so bytes are
+        // released only at commit, and only for hashes whose last reference has gone.
+        val undoTicker = object : Runnable {
+            override fun run() {
+                val remain = ((pendingDeleteDeadline - System.currentTimeMillis()) / 1000L).toInt()
+                if (remain <= 0) {
+                    commitPendingDelete()
+                    undoBar.visibility = View.GONE
+                    reloadList()
+                    return
+                }
+                undoLabel.text = "$pendingDeleteLabel · ${remain}s"
+                undoBar.postDelayed(this, 250L)
+            }
+        }
+
+        fun hideUndo() {
+            undoBar.removeCallbacks(undoTicker)
+            undoBar.visibility = View.GONE
+        }
+
+        fun armUndo(kind: Int, count: Int, deadline: Long) {
+            pendingDeleteDeadline = deadline
+            pendingDeleteLabel = if (kind == ClipboardDatabase.KIND_IMAGE)
+                "Deleted $count image${if (count == 1) "" else "s"}"
+            else
+                "Deleted $count text${if (count == 1) "" else "s"}"
+            undoBar.visibility = View.VISIBLE
+            undoBar.removeCallbacks(undoTicker)
+            undoTicker.run()
+        }
+
+        fun deleteAllOfKind(kind: Int) {
+            dbExecutor.submit {
+                try {
+                    // Exactly one pending undo at a time: a second delete commits the first
+                    // immediately rather than merging the two batches.
+                    if (db.hasPendingDelete()) commitPendingDeleteBlocking()
+                    val deadline = System.currentTimeMillis() + UNDO_WINDOW_MS
+                    val n = db.softDeleteAll(kind, deadline)
+                    undoBar.post {
+                        if (n > 0) armUndo(kind, n, deadline) else hideUndo()
+                        reloadList()
+                    }
+                } catch (t: Throwable) {
+                    XposedBridge.log("$TAG [KB] delete-all failed: ${t.message}")
+                }
+            }
+        }
+
+        deleteTextsBtn.setOnClickListener { deleteAllOfKind(ClipboardDatabase.KIND_TEXT) }
+        deleteImagesBtn.setOnClickListener { deleteAllOfKind(ClipboardDatabase.KIND_IMAGE) }
+
+        undoBtn.setOnClickListener {
+            hideUndo()
+            dbExecutor.submit {
+                val n = db.undoPendingDelete()
+                undoBar.post { reloadList() }
+                XposedBridge.log("$TAG [KB] undo restored $n entries")
+            }
+        }
+
+        // A dangling Handler callback would hold this popup's views (and Gboard's context)
+        // alive, so the countdown is torn down when the bar leaves the window. The pending
+        // delete itself survives — it is a row state with an absolute deadline, and the
+        // next process start commits it.
+        undoBar.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) {}
+            override fun onViewDetachedFromWindow(v: View) { undoBar.removeCallbacks(undoTicker) }
+        })
+
+        // A pending batch can outlive the popup that created it — the user deletes, then
+        // closes the keyboard. Because the deadline is absolute, reopening resolves it the
+        // same way a fresh process would: past the deadline it commits, still inside the
+        // window it re-arms the bar with the time that is actually left. Without this the
+        // rows would stay invisible-but-uncommitted, with no way to take the delete back.
+        dbExecutor.submit {
             try {
-                showDeleteAllConfirm(ctx, dp, deleteAllBtn) {
-                    dbExecutor.submit { db.deleteAll(); deleteAllBtn.post { reloadList() } }
+                if (!db.hasPendingDelete()) return@submit
+                val deadline = db.pendingDeadline()
+                val kind = db.pendingKind()
+                val n = db.countPending()
+                if (System.currentTimeMillis() >= deadline) {
+                    commitPendingDeleteBlocking()
+                    undoBar.post { hideUndo(); reloadList() }
+                } else {
+                    undoBar.post { armUndo(kind, n, deadline) }
                 }
             } catch (t: Throwable) {
-                XposedBridge.log("$TAG [KB] deleteAll confirm failed: ${t.message}")
+                XposedBridge.log("$TAG [KB] pending-delete resume failed: ${t.message}")
             }
         }
 
@@ -2389,6 +2596,82 @@ class KeyboardHook : IXposedHookLoadPackage {
         return span
     }
 
+    /**
+     * Decode a row thumbnail off the main thread and drop it in, unless the row was reused
+     * for a different entry while we were working.
+     *
+     * The vault list has no RecyclerView — `reloadList()` rebuilds every row — but rows are
+     * still handed to `post {}` callbacks that can outlive them, so the id tag check is the
+     * same guard a ViewHolder would need. Cache hits paint synchronously, which keeps a
+     * scroll through already-seen images free of flicker.
+     */
+    private fun loadThumb(entry: ClipboardDatabase.Entry, view: ImageView) {
+        val hash = entry.imageHash ?: return
+        val path = entry.thumbPath ?: return
+        synchronized(thumbCache) { thumbCache[hash] }?.let { view.setImageBitmap(it); return }
+        view.setImageBitmap(null)
+        imgExecutor.submit {
+            try {
+                val bmp = BitmapFactory.decodeFile(path) ?: return@submit
+                synchronized(thumbCache) { thumbCache[hash] = bmp }
+                view.post {
+                    // Same entry still in this view? Otherwise the row was rebuilt.
+                    if (view.tag == entry.id) view.setImageBitmap(bmp)
+                }
+            } catch (_: Throwable) {
+            } catch (_: OutOfMemoryError) {
+            }
+        }
+    }
+
+    /**
+     * Commit the outstanding soft-delete and release any bytes it orphaned.
+     * Must run on [dbExecutor] — call [commitPendingDelete] from anywhere else.
+     */
+    private fun commitPendingDeleteBlocking() {
+        try {
+            val db = clipboardDb ?: return
+            val released = db.commitPendingDelete()
+            val store = imageStore
+            if (store != null) {
+                for (h in released) store.deleteHash(h)
+                if (released.isNotEmpty()) {
+                    synchronized(thumbCache) { released.forEach { thumbCache.remove(it) } }
+                }
+            }
+            if (released.isNotEmpty()) {
+                XposedBridge.log("$TAG [KB] delete committed, ${released.size} image file(s) freed")
+            }
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG [KB] delete commit failed: ${t.message}")
+        }
+    }
+
+    private fun commitPendingDelete() {
+        dbExecutor.submit { commitPendingDeleteBlocking() }
+    }
+
+    /** A brief inline message. An IME has no Activity, so Toast styling is done by hand. */
+    private fun toastLike(ctx: Context, dp: Float, anchor: View, msg: String) {
+        try {
+            val tv = TextView(ctx).apply {
+                text = msg
+                setTextColor(UI.TEXT)
+                textSize = 12f
+                background = roundRect(UI.ELEVATED, 10f * dp, UI.DIVIDER, (1f * dp).toInt())
+                setPadding((12f * dp).toInt(), (8f * dp).toInt(), (12f * dp).toInt(), (8f * dp).toInt())
+            }
+            val pw = PopupWindow(tv, LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT, false).apply {
+                setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+                elevation = 20f * dp
+            }
+            pw.showAsDropDown(anchor)
+            anchor.postDelayed({ try { pw.dismiss() } catch (_: Throwable) {} }, 2200L)
+        } catch (_: Throwable) {
+        }
+    }
+
     private fun buildClipboardRow(
         ctx: Context, dp: Float,
         entry: ClipboardDatabase.Entry,
@@ -2418,12 +2701,46 @@ class KeyboardHook : IXposedHookLoadPackage {
             setPadding(0, 0, if (entry.isPinned || entry.isFavorite) (6f * dp).toInt() else 0, 0)
         }
 
+        // ── Image rows: a 40dp thumbnail ahead of the existing text column ──
+        // Everything else about the row is untouched — same card, same 14dp radius, same
+        // padding, same ⋮ on the right — so an image row reads as a text row that happens
+        // to carry a picture. addView order below puts it after the badge, and the row is
+        // a plain horizontal LinearLayout, so Gravity/START resolution mirrors it in RTL.
+        val thumbView: ImageView? = if (entry.isImage) ImageView(ctx).apply {
+            val side = (40f * dp).toInt()
+            layoutParams = LinearLayout.LayoutParams(side, side).apply {
+                marginEnd = (10f * dp).toInt()
+            }
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            background = roundRect(UI.ELEVATED, 8f * dp)
+            clipToOutline = true
+            outlineProvider = object : android.view.ViewOutlineProvider() {
+                override fun getOutline(v: View, o: android.graphics.Outline) {
+                    o.setRoundRect(0, 0, v.width, v.height, 8f * dp)
+                }
+            }
+            // Tagged with the entry id so a decode that finishes after the row was
+            // reused for another entry is discarded instead of showing the wrong image.
+            tag = entry.id
+        } else null
+
         val textView = TextView(ctx).apply {
-            text = if (matchRanges.isEmpty()) entry.text else highlight(entry.text, matchRanges)
-            setTextColor(UI.TEXT)
+            text = when {
+                entry.isImage -> ClipboardImagePolicy.rowLabel(
+                    entry.imgW, entry.imgH, entry.imgBytes, entry.isAnimated
+                )
+                matchRanges.isEmpty() -> entry.text
+                else -> highlight(entry.text, matchRanges)
+            }
+            if (entry.isImage) setTextColor(UI.TEXT_DIM) else setTextColor(UI.TEXT)
             textSize = 14f
             // A1: full text by default; with the toggle off, show a 3-line preview.
-            if (cachedClipFullText) {
+            // An image label is always one line, which is what keeps an image row exactly
+            // as tall as a single-line text row.
+            if (entry.isImage) {
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            } else if (cachedClipFullText) {
                 maxLines = Int.MAX_VALUE
                 ellipsize = null
             } else {
@@ -2444,13 +2761,25 @@ class KeyboardHook : IXposedHookLoadPackage {
         }
 
         row.addView(badge)
+        if (thumbView != null) row.addView(thumbView)
         row.addView(textView)
         row.addView(optBtn)
+
+        if (thumbView != null) loadThumb(entry, thumbView)
 
         row.setOnClickListener {
             // Disarm the search redirect first so the clip lands in the HOST app.
             clipSearchActive = false
-            try { ims.currentInputConnection?.commitText(entry.text, 1); popup.dismiss() } catch (_: Throwable) {}
+            if (entry.isImage) {
+                // Paste-back is I/O (a copy into the host provider's directory), so it
+                // must not run on the touch handler's thread.
+                imgExecutor.submit {
+                    val ok = pasteImage(ctx, ims, entry)
+                    row.post { if (ok) popup.dismiss() else toastLike(ctx, dp, row, "Couldn't paste image") }
+                }
+            } else {
+                try { ims.currentInputConnection?.commitText(entry.text, 1); popup.dismiss() } catch (_: Throwable) {}
+            }
         }
 
         optBtn.setOnClickListener {
@@ -2462,67 +2791,6 @@ class KeyboardHook : IXposedHookLoadPackage {
         ).apply { setMargins(0, (3f * dp).toInt(), 0, (3f * dp).toInt()) })
     }
 
-    // PopupWindow-based confirm (AlertDialog needs Activity context — IME has none).
-    // Mirrors showEntryOptions: WRAP_CONTENT height + showAsDropDown to stay anchored
-    // inside the IME window, avoiding BadTokenException from showAtLocation.
-    private fun showDeleteAllConfirm(ctx: Context, dp: Float, anchor: View, onConfirm: () -> Unit) {
-        val cardR = 18f * dp
-        val container = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            background = roundRect(UI.ELEVATED, cardR, UI.DIVIDER, (1f * dp).toInt())
-            clipToOutline = true
-            setPadding((16f * dp).toInt(), (14f * dp).toInt(), (16f * dp).toInt(), (10f * dp).toInt())
-        }
-        val msg = TextView(ctx).apply {
-            text = "Delete all clipboard items?\nThis cannot be undone."
-            setTextColor(UI.TEXT)
-            textSize = 13f
-            setPadding(0, 0, 0, (12f * dp).toInt())
-        }
-        val btnRow = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.END
-        }
-        val popup = PopupWindow(
-            container,
-            (250f * dp).toInt(),
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-            true
-        ).apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            isOutsideTouchable = true
-            elevation = 20f * dp
-        }
-        val cancelBtn = TextView(ctx).apply {
-            text = "Cancel"
-            setTextColor(UI.TEXT_DIM)
-            textSize = 13f
-            gravity = Gravity.CENTER
-            setPadding((16f * dp).toInt(), (9f * dp).toInt(), (16f * dp).toInt(), (9f * dp).toInt())
-            background = ripple(null, 10f * dp)
-            setOnClickListener { popup.dismiss() }
-        }
-        val confirmBtn = TextView(ctx).apply {
-            text = "Delete all"
-            setTextColor(UI.DANGER)
-            textSize = 13f
-            gravity = Gravity.CENTER
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
-            setPadding((16f * dp).toInt(), (9f * dp).toInt(), (16f * dp).toInt(), (9f * dp).toInt())
-            background = ripple(Color.parseColor("#1FFF6B6B"), 10f * dp)
-            setOnClickListener { popup.dismiss(); onConfirm() }
-        }
-        btnRow.addView(cancelBtn)
-        btnRow.addView(View(ctx), LinearLayout.LayoutParams((6f * dp).toInt(), 1))
-        btnRow.addView(confirmBtn)
-        container.addView(msg)
-        container.addView(btnRow)
-        try { popup.showAsDropDown(anchor) } catch (t: Throwable) {
-            XposedBridge.log("$TAG [KB] showDeleteAllConfirm.showAsDropDown failed: ${t.message}")
-        }
-    }
-
-    // Uses PopupWindow instead of AlertDialog — AlertDialog requires Activity context, IME has none
     private fun showEntryOptions(
         ctx: Context, dp: Float,
         entry: ClipboardDatabase.Entry,
@@ -2580,7 +2848,32 @@ class KeyboardHook : IXposedHookLoadPackage {
             val clipMgr = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
             clipMgr.addPrimaryClipChangedListener {
                 try {
-                    val text = clipMgr.primaryClip?.getItemAt(0)?.coerceToText(ctx)?.toString()
+                    val clip = clipMgr.primaryClip
+                    val item = clip?.getItemAt(0)
+                    val desc = clip?.description
+                    val imageUri = item?.uri?.takeIf { desc != null && descHasImage(desc) }
+
+                    if (imageUri != null) {
+                        // A mixed clip (text + image) saves BOTH, as two entries. Using
+                        // item.text rather than coerceToText matters here: coerceToText on
+                        // an image item yields the URI string, which would put a
+                        // "content://..." row in the text vault.
+                        val itemText = item.text?.toString()
+                        if (!itemText.isNullOrEmpty()) {
+                            dbExecutor.submit { clipboardDb?.insert(itemText) }
+                        }
+                        if (cachedClipImages &&
+                            android.os.SystemClock.elapsedRealtime() >= selfClipUntilMs
+                        ) {
+                            // The URI grant dies when the source app releases the clip, so
+                            // this is queued immediately — but never on the host's main
+                            // thread, where a 25 MB read would ANR Gboard.
+                            imgExecutor.submit { captureImage(ctx, imageUri) }
+                        }
+                        return@addPrimaryClipChangedListener
+                    }
+
+                    val text = item?.coerceToText(ctx)?.toString()
                     if (!text.isNullOrEmpty()) {
                         dbExecutor.submit {
                             clipboardDb?.insert(text)
@@ -2592,6 +2885,263 @@ class KeyboardHook : IXposedHookLoadPackage {
         } catch (t: Throwable) {
             XposedBridge.log("$TAG [KB] clipboard listener registration failed: ${t.message}")
         }
+    }
+
+    private fun descHasImage(desc: android.content.ClipDescription): Boolean = try {
+        (0 until desc.mimeTypeCount).any { desc.getMimeType(it)?.startsWith("image/") == true }
+    } catch (_: Throwable) {
+        false
+    }
+
+    /**
+     * Copy the bytes, enforce the budgets, insert the row. Runs on [imgExecutor].
+     *
+     * Every failure is silent by design: an unreadable URI (the grant was already revoked),
+     * undecodable bytes, an oversize source or a full disk all end with no entry and no
+     * orphan file, and the text vault is completely untouched.
+     */
+    private fun captureImage(ctx: Context, uri: Uri) {
+        val store = imageStore ?: return
+        val db = clipboardDb ?: return
+        try {
+            val saved = store.saveFromUri(ctx, uri) ?: run {
+                XposedBridge.log("$TAG [KB] image capture skipped (unreadable/oversize/undecodable)")
+                return
+            }
+
+            val existing = db.imageEntriesOldestFirst().map {
+                ClipboardImagePolicy.Candidate(it.id, it.imageHash, it.imgBytes, it.isPinned, it.timestamp)
+            }
+            val plan = ClipboardImagePolicy.planEviction(
+                existing, saved.hash, saved.bytes, cachedImgMaxEntries, cachedImgMaxBytes
+            )
+
+            if (plan.blocked) {
+                // Only pinned entries remain and the budget is still exceeded. Refuse the
+                // save rather than evict a pin, and drop the bytes we just wrote if nothing
+                // else references them.
+                imgBudgetHint = "Vault full — unpin an image to save new ones"
+                if (db.hashRefCount(saved.hash) == 0) store.deleteHash(saved.hash)
+                XposedBridge.log("$TAG [KB] image refused: budget met only by pinned entries")
+                return
+            }
+
+            for (id in plan.evict) {
+                db.delete(id)?.let { store.deleteHash(it) }
+            }
+
+            val rowId = db.insertImage(
+                saved.hash, saved.thumbPath, saved.fullPath,
+                saved.width, saved.height, saved.bytes, saved.animated
+            )
+            if (rowId <= 0L && db.hashRefCount(saved.hash) == 0) {
+                // Rejected as a duplicate of the most recent entry and nothing else points
+                // at these bytes — don't leave them behind.
+                store.deleteHash(saved.hash)
+            }
+            imgBudgetHint = null
+            XposedBridge.log(
+                "$TAG [KB] image saved ${saved.width}x${saved.height} " +
+                    "${saved.bytes}B evicted=${plan.evict.size} hash=${saved.hash.take(8)}"
+            )
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG [KB] image capture failed: ${t.message}")
+        }
+    }
+
+    /**
+     * Once per process: commit a delete whose countdown died with the previous process,
+     * then run the cheap self-healing GC pass in both directions — orphan files with no
+     * row, and rows whose file has vanished.
+     *
+     * The spec puts this on settings-app launch; it lives here instead because the store
+     * sits in Gboard's private data dir and the module's own process cannot reach it.
+     */
+    private fun repairImageStore() {
+        if (imageStoreRepaired) return
+        imageStoreRepaired = true
+        dbExecutor.submit {
+            try {
+                val db = clipboardDb ?: return@submit
+                val store = imageStore ?: return@submit
+
+                // A pending batch is COMMITTED, never resurrected: the user asked for the
+                // delete and the undo affordance that could have taken it back is gone.
+                val released = db.resolveStalePending()
+                released.forEach { store.deleteHash(it) }
+
+                val gc = store.gc(db.allReferencedHashes())
+
+                var droppedRows = 0
+                for (e in db.imageEntriesOldestFirst()) {
+                    val h = e.imageHash
+                    if (h == null || !store.hasBytes(h)) {
+                        db.delete(e.id); droppedRows++
+                    }
+                }
+                if (released.isNotEmpty() || gc.orphanFilesDeleted > 0 ||
+                    gc.tempFilesDeleted > 0 || droppedRows > 0
+                ) {
+                    XposedBridge.log(
+                        "$TAG [KB] image store repaired: committed=${released.size} " +
+                            "orphans=${gc.orphanFilesDeleted} temps=${gc.tempFilesDeleted} " +
+                            "droppedRows=$droppedRows"
+                    )
+                }
+            } catch (t: Throwable) {
+                XposedBridge.log("$TAG [KB] image store repair failed: ${t.message}")
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────
+    // Image paste-back
+    // ─────────────────────────────────────────────────────
+
+    /**
+     * Hand a stored image to the host editor.
+     *
+     * The module's own FileProvider is useless here: a URI grant can only be issued by the
+     * process that owns the provider, and we are running inside Gboard. So we borrow
+     * **Gboard's own** FileProvider — the one it already uses to send GIFs and stickers —
+     * by discovering its authority and declared roots at runtime, copying the image under
+     * one of those roots, and building the URI against that authority.
+     *
+     * `commitContent` is the good path (it inserts inline). Editors that don't accept the
+     * MIME type fall back to the system clipboard, so the user can long-press → Paste.
+     *
+     * See [icUnwrap]: the framework identifies the grant's caller by reference, so our
+     * InputConnection wrapper has to step aside for the duration of the call or the grant
+     * is silently skipped and the receiving app gets a URI it cannot open.
+     */
+    private fun pasteImage(ctx: Context, ims: InputMethodService, entry: ClipboardDatabase.Entry): Boolean {
+        val path = entry.fullPath ?: return false
+        val src = File(path)
+        if (!src.isFile) return false
+        try {
+            val exposed = exposeViaHostProvider(ctx, src) ?: run {
+                XposedBridge.log("$TAG [KB] no host FileProvider root found for paste")
+                return false
+            }
+            val (uri, _) = exposed
+            val mime = "image/webp"
+
+            val editorInfo = ims.currentInputEditorInfo
+            val accepts = editorInfo?.contentMimeTypes?.any {
+                it == "image/*" || it == mime || it == "*/*"
+            } == true
+
+            if (accepts) {
+                val info = InputContentInfo(uri, android.content.ClipDescription("image", arrayOf(mime)))
+                val ic = ims.currentInputConnection
+                if (ic != null) {
+                    val prev = icUnwrap.get() == true
+                    icUnwrap.set(true)
+                    try {
+                        val flags = InputConnection.INPUT_CONTENT_GRANT_READ_URI_PERMISSION
+                        if (ic.commitContent(info, flags, null)) {
+                            XposedBridge.log("$TAG [KB] image committed via commitContent")
+                            return true
+                        }
+                    } finally {
+                        icUnwrap.set(prev)
+                    }
+                }
+            }
+
+            // Fallback: put it on the clipboard and tell the user to paste.
+            val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            if (cm != null) {
+                // Arm the guard BEFORE the write, or the listener races us and re-captures.
+                selfClipUntilMs = android.os.SystemClock.elapsedRealtime() + 2500L
+                cm.setPrimaryClip(ClipData.newUri(ctx.contentResolver, "image", uri))
+                XposedBridge.log("$TAG [KB] image placed on clipboard (editor rejects $mime)")
+                return true
+            }
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG [KB] image paste failed: ${t.message}")
+        }
+        return false
+    }
+
+    /** Cached so the provider XML is parsed once per process, not once per paste. */
+    @Volatile private var hostProviderRoot: Pair<String, File>? = null
+
+    /**
+     * Find a FileProvider in the **host** package and a directory it actually serves, then
+     * copy [src] there and build a grantable URI.
+     *
+     * Discovery is by metadata rather than a hardcoded authority so this keeps working
+     * across Gboard versions (and on any other IME the module is ever scoped to).
+     */
+    private fun exposeViaHostProvider(ctx: Context, src: File): Pair<Uri, String>? {
+        val (authority, dir) = hostProviderRoot ?: findHostProviderRoot(ctx)?.also {
+            hostProviderRoot = it
+        } ?: return null
+        return try {
+            if (!dir.isDirectory && !dir.mkdirs()) return null
+            val dest = File(dir, "ae_clip_${src.nameWithoutExtension}.webp")
+            if (!dest.isFile || dest.length() != src.length()) {
+                src.inputStream().use { i -> dest.outputStream().use { o -> i.copyTo(o) } }
+            }
+            val uri = androidx.core.content.FileProvider.getUriForFile(ctx, authority, dest)
+            uri to authority
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG [KB] host provider expose failed: ${t.message}")
+            null
+        }
+    }
+
+    private fun findHostProviderRoot(ctx: Context): Pair<String, File>? {
+        try {
+            val pm = ctx.packageManager
+            val info = pm.getPackageInfo(
+                ctx.packageName,
+                PackageManager.GET_PROVIDERS or PackageManager.GET_META_DATA
+            )
+            for (p in info.providers ?: emptyArray()) {
+                val authority = p.authority ?: continue
+                val resId = p.metaData?.getInt("android.support.FILE_PROVIDER_PATHS", 0) ?: 0
+                if (resId == 0) continue
+                val dir = firstServedDir(ctx, resId) ?: continue
+                XposedBridge.log("$TAG [KB] host FileProvider: $authority -> $dir")
+                return authority to dir
+            }
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG [KB] host provider discovery failed: ${t.message}")
+        }
+        return null
+    }
+
+    /** Parse a `file_paths` XML and return the first root we can write into. */
+    private fun firstServedDir(ctx: Context, resId: Int): File? {
+        try {
+            val xml = ctx.resources.getXml(resId)
+            var event = xml.eventType
+            while (event != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+                if (event == org.xmlpull.v1.XmlPullParser.START_TAG) {
+                    val path = xml.getAttributeValue(
+                        "http://schemas.android.com/apk/res/android", "path"
+                    ) ?: xml.getAttributeValue(null, "path")
+                    val base: File? = when (xml.name) {
+                        "files-path" -> ctx.filesDir
+                        "cache-path" -> ctx.cacheDir
+                        "external-files-path" -> ctx.getExternalFilesDir(null)
+                        "external-cache-path" -> ctx.externalCacheDir
+                        else -> null    // root-path/external-path are too broad to borrow
+                    }
+                    if (base != null) {
+                        val dir = if (path.isNullOrBlank()) base else File(base, path)
+                        val target = File(dir, "aeclip")
+                        if (target.isDirectory || target.mkdirs()) return target
+                    }
+                }
+                event = xml.next()
+            }
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG [KB] file_paths parse failed: ${t.message}")
+        }
+        return null
     }
 
     // ─────────────────────────────────────────────────────
