@@ -2945,6 +2945,7 @@ class KeyboardHook : IXposedHookLoadPackage {
     // ─────────────────────────────────────────────────────
 
     @Volatile private var clipboardListenerRegistered = false
+    @Volatile private var lastShotState = ""
 
     /**
      * Open the vault once per process and bring the screenshot watcher up with it.
@@ -2976,6 +2977,9 @@ class KeyboardHook : IXposedHookLoadPackage {
         try { android.util.Log.d(ClipboardScreenshotWatcher.TAG, msg) } catch (_: Throwable) {}
     }
 
+    /** Mirror the watcher's own lines onto the module channel too, for the same reason. */
+    private val shotMirror = { msg: String -> XposedBridge.log("$TAG [KB] shot: $msg") }
+
     /**
      * Bring the watcher in line with the toggle. Called from [refreshPrefs], so flipping the
      * setting takes effect within the 2 s pref-cache window with no keyboard restart.
@@ -2985,6 +2989,15 @@ class KeyboardHook : IXposedHookLoadPackage {
      */
     private fun reconcileShotWatcher(ctx: Context) {
         try {
+            // One line per state change, on the module's own channel as well as the feature
+            // tag: if the watcher never attaches, this says which precondition was missing
+            // instead of leaving silence to interpret.
+            val state = "enabled=$cachedShotCapture db=${clipboardDb != null} watcher=${shotWatcher != null}"
+            if (state != lastShotState) {
+                lastShotState = state
+                XposedBridge.log("$TAG [KB] shot watcher reconcile: $state")
+                shotLog("reconcile: $state")
+            }
             if (!cachedShotCapture) {
                 shotWatcher?.let { it.stop(); shotWatcher = null }
                 return
@@ -2995,6 +3008,7 @@ class KeyboardHook : IXposedHookLoadPackage {
             var w = shotWatcher
             if (w == null) {
                 w = ClipboardScreenshotWatcher(ctx, shotSink(ctx))
+                w.mirror = shotMirror
                 w.bindWatermark({ db.screenshotWatermark() }, { db.setScreenshotWatermark(it) })
                 w.verbose = cachedShotVerbose
                 if (!w.start()) return          // start() already logged why

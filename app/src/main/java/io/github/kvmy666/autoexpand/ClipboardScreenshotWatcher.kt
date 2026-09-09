@@ -75,6 +75,12 @@ class ClipboardScreenshotWatcher(
         /** Recently ingested file identities, so two attached routes cannot double-insert. */
         private const val SEEN_CAP = 64
 
+        /**
+         * Slack on the file route's "is this new?" test, covering a screenshot already being
+         * written when the watcher attached and any clock skew between the file and us.
+         */
+        private const val STALE_GRACE_MS = 10_000L
+
         private val PROJECTION = arrayOf(
             MediaStore.Images.Media._ID,
             MediaStore.Images.Media.DATA,
@@ -119,6 +125,7 @@ class ClipboardScreenshotWatcher(
     @Volatile var verbose = false
 
     private val attached = linkedSetOf<Route>()
+    @Volatile private var attachedAtMs = Long.MAX_VALUE
     private var thread: HandlerThread? = null
     private var handler: Handler? = null
     private var observer: ContentObserver? = null
@@ -129,8 +136,18 @@ class ClipboardScreenshotWatcher(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>?) = size > SEEN_CAP
     }
 
-    private fun d(msg: String) = try { Log.d(TAG, msg) } catch (_: Throwable) {}
-    private fun v(msg: String) { if (verbose) try { Log.d(TAG, msg) } catch (_: Throwable) {} }
+    /**
+     * Optional second sink for the same lines. Some builds filter app-level debug output,
+     * and the evidence trail is worth more than the tidiness of a single channel; the hook
+     * points this at the module's own log.
+     */
+    @Volatile var mirror: ((String) -> Unit)? = null
+
+    private fun d(msg: String) {
+        try { Log.d(TAG, msg) } catch (_: Throwable) {}
+        try { mirror?.invoke(msg) } catch (_: Throwable) {}
+    }
+    private fun v(msg: String) { if (verbose) d(msg) }
 
     val attachedRoutes: Set<Route> get() = attached
 
@@ -173,6 +190,7 @@ class ClipboardScreenshotWatcher(
             return false
         }
 
+        attachedAtMs = System.currentTimeMillis()
         attachMediaStore()
         attachFileObserver()
 
@@ -204,6 +222,7 @@ class ClipboardScreenshotWatcher(
         handler = null
         if (attached.isNotEmpty()) d("routes detached")
         attached.clear()
+        attachedAtMs = Long.MAX_VALUE
         synchronized(seen) { seen.clear() }
     }
 
@@ -328,15 +347,28 @@ class ClipboardScreenshotWatcher(
         }
     }
 
-    /** Fallback-route entry point: a raw file with no MediaStore row to lean on. */
+    /**
+     * Fallback-route entry point: a raw file with no MediaStore row to lean on.
+     *
+     * The MediaStore route has a persisted `_id` watermark; this one has nothing equivalent,
+     * so it needs its own guard against old files. `CLOSE_WRITE` and `MOVED_TO` fire on
+     * existing screenshots too — a media rescan, a gallery edit, a backup agent touching the
+     * directory — and without this an unrelated rescan would import screenshots from weeks
+     * ago. Anything last modified before the watcher attached is not a new screenshot.
+     */
     private fun offerFile(f: File) {
         if (!sink.screenshotCaptureEnabled()) return
         try {
             if (!f.isFile || f.length() <= 0L) return
+            val modified = f.lastModified()
+            if (modified in 1 until (attachedAtMs - STALE_GRACE_MS)) {
+                v("skipped ${f.name}: written before the watcher attached (rescan, not a new screenshot)")
+                return
+            }
             offer(
                 uri = Uri.fromFile(f),
                 identity = f.absolutePath,
-                capturedAtMs = f.lastModified().takeIf { it > 0L } ?: System.currentTimeMillis(),
+                capturedAtMs = modified.takeIf { it > 0L } ?: System.currentTimeMillis(),
                 label = f.name,
                 mediaId = -1L
             )
