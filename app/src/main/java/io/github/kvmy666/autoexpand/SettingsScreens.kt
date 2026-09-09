@@ -83,7 +83,7 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     var selectedFeature by remember { mutableStateOf<String?>(null) }
 
     // ── What's New dialog ─────────────────────────────────────────────────────
-    var showWhatsNew by remember { mutableStateOf(!prefs.getBoolean("whats_new_seen_3_3_0", false)) }
+    var showWhatsNew by remember { mutableStateOf(!prefs.getBoolean("whats_new_seen_3_3_5", false)) }
     var whatsNewDontShow by remember { mutableStateOf(false) }
 
     // ── Notifications state ───────────────────────────────────────────────────
@@ -152,6 +152,11 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     var btnSelectMode       by remember { mutableStateOf(prefs.getBoolean("btn_selectmode_enabled", true)) }
     var vibStrength         by remember { mutableIntStateOf(prefs.getString("vibration_strength", "100")?.toIntOrNull() ?: 100) }
     var clipFullText        by remember { mutableStateOf(prefs.getBoolean("clip_full_text_enabled", true)) }    // A1
+    var clipImages          by remember { mutableStateOf(prefs.getBoolean("clip_images_enabled", false)) }
+    var clipImgMaxEntries   by remember { mutableStateOf(prefs.getString("clip_img_max_entries", "50") ?: "50") }
+    var clipImgMaxMb        by remember { mutableStateOf(prefs.getString("clip_img_max_mb", "100") ?: "100") }
+    var shotCapture         by remember { mutableStateOf(prefs.getBoolean("shot_capture_enabled", false)) }
+    var shotToClipboard     by remember { mutableStateOf(prefs.getBoolean("shot_to_clipboard_enabled", false)) }
     var btnShortcutEnabled  by remember { mutableStateOf(prefs.getBoolean("btn_shortcut_enabled", true)) }
     // ── Undo (B2/B3/B4) ──
     val hasAccelerometer = remember {
@@ -213,22 +218,24 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     if (showWhatsNew) {
         AlertDialog(
             onDismissRequest = {
-                if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_3_0", true).apply()
+                if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_3_5", true).apply()
                 showWhatsNew = false
             },
-            title = { Text("What's New in v3.3.0") },
+            title = { Text("What's New in v3.3.5") },
             text = {
                 Column(
                     modifier = Modifier.verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text("New", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
-                    Text("• Select mode (🖍️) — a new toggle next to the trackpad stick. Switch it on and dragging the stick highlights text instead of moving the cursor, in either direction, across lines as well")
-                    Text("• Lift your finger and the Cut / Copy / Paste bar opens on what you selected, so copying a phrase is one gesture")
-                    Text("• The toggle stays on until you tap it again, and lights up while it is active")
+                    Text("• Copied images are saved to the clipboard vault. Copy a picture anywhere and it waits in the vault next to your text, ready to paste back")
+                    Text("• Off by default — switch it on under Keyboard › Save copied images")
+                    Text("• Tap an image to paste it, long-press to pin it. Pinned images are never removed to make room")
+                    Text("• Choose how many images to keep and how much space they may use. When a limit is reached the oldest unpinned image goes first, and the vault shows what it is using")
+                    Text("• \"Delete all\" is now two buttons — texts and images — each of which leaves the other kind alone, with 15 seconds to undo")
                     Spacer(Modifier.height(4.dp))
-                    Text("Changes", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
-                    Text("• The undo button (↩️) is now hidden by default to make room on the toolbar — shake the phone to undo instead. Bring it back any time under Keyboard › Undo button")
+                    Text("Private by design", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+                    Text("• Images are stored inside the keyboard's own private data. Nothing is uploaded, no new permission is asked for, and no other app on the phone can read them")
                     Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = whatsNewDontShow, onCheckedChange = { whatsNewDontShow = it })
@@ -238,7 +245,7 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
             },
             confirmButton = {
                 TextButton(onClick = {
-                    if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_3_0", true).apply()
+                    if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_3_5", true).apply()
                     showWhatsNew = false
                 }) { Text("Got it") }
             }
@@ -498,6 +505,76 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
                                 checked = clipFullText,
                                 onCheckedChange = { clipFullText = it; onToggle("clip_full_text_enabled", it) }
                             )
+                            ToggleRow(
+                                title = "Save copied images",
+                                description = "Copied images are kept in the vault alongside text. " +
+                                    "Stored inside Gboard's own private data — nothing leaves the device.",
+                                checked = clipImages,
+                                onCheckedChange = { clipImages = it; onToggle("clip_images_enabled", it) }
+                            )
+                            AnimatedVisibility(visible = clipImages) {
+                                Column {
+                                    ChoiceRow(
+                                        title = "Max images kept",
+                                        options = listOf("20", "50", "100"),
+                                        selected = clipImgMaxEntries,
+                                        onSelect = {
+                                            clipImgMaxEntries = it
+                                            onStringPref("clip_img_max_entries", it)
+                                        }
+                                    )
+                                    ChoiceRow(
+                                        title = "Max image storage",
+                                        options = listOf("25", "50", "100", "200"),
+                                        suffix = " MB",
+                                        selected = clipImgMaxMb,
+                                        onSelect = {
+                                            clipImgMaxMb = it
+                                            onStringPref("clip_img_max_mb", it)
+                                        }
+                                    )
+                                    Text(
+                                        "Oldest unpinned images are removed first when a limit is reached. " +
+                                            "Pinned images are never removed automatically. " +
+                                            "Counts and usage are shown in the clipboard popup on the keyboard, " +
+                                            "which is the only process that can read the store.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = AppColors.TextDim,
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                    )
+                                }
+                            }
+                            ToggleRow(
+                                title = "Save screenshots to vault",
+                                description = "Every system screenshot is added to the vault automatically — " +
+                                    "chord, power menu, tile or gesture. The screenshot still saves to your " +
+                                    "gallery exactly as before.",
+                                checked = shotCapture,
+                                onCheckedChange = { shotCapture = it; onToggle("shot_capture_enabled", it) }
+                            )
+                            AnimatedVisibility(visible = shotCapture) {
+                                Column {
+                                    ToggleRow(
+                                        title = "Also copy screenshot to clipboard",
+                                        description = "The next paste in any app is the screenshot. " +
+                                            "This replaces whatever you had copied — the replaced item is " +
+                                            "saved to the vault first.",
+                                        checked = shotToClipboard,
+                                        onCheckedChange = {
+                                            shotToClipboard = it; onToggle("shot_to_clipboard_enabled", it)
+                                        }
+                                    )
+                                    Text(
+                                        "Screenshots share the limits above. They are picked up by the " +
+                                            "keyboard, so one taken while the keyboard has not run yet appears " +
+                                            "the next time you open it. Requires Gboard's photo access, which " +
+                                            "it already has — nothing new is asked for.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = AppColors.TextDim,
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                    )
+                                }
+                            }
                             AnimatedVisibility(visible = btnClipboardEnabled) {
                                 OutlinedTextField(
                                     value = clipboardMaxEntries,

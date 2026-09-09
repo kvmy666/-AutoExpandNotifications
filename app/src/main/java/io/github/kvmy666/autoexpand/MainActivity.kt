@@ -167,6 +167,26 @@ class MainActivity : ComponentActivity() {
                 .putBoolean("btn_shortcut_enabled", true)
                 .apply()
         }
+        // 3.4.0 — clipboard images. Seeded separately from the keyboard block above so
+        // existing installs (which already have keyboard_enhancer_enabled) get the budget
+        // defaults too. The feature itself stays OFF until the user opts in.
+        if (!prefs.contains("clip_images_enabled")) {
+            prefs.edit()
+                .putBoolean("clip_images_enabled", false)
+                .putString("clip_img_max_entries", "50")
+                .putString("clip_img_max_mb", "100")
+                .apply()
+        }
+
+        // 3.4.0 — system screenshot auto-capture. Both halves default OFF; the second one
+        // overwrites the user's clipboard, which must never happen without them asking.
+        if (!prefs.contains("shot_capture_enabled")) {
+            prefs.edit()
+                .putBoolean("shot_capture_enabled", false)
+                .putBoolean("shot_to_clipboard_enabled", false)
+                .apply()
+        }
+
         if (!prefs.contains("snapper_enabled")) {
             prefs.edit()
                 .putBoolean("snapper_enabled", false)

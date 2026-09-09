@@ -37,3 +37,8 @@ nul
 .env
 .env.*
 *.log
+
+# Local-only scratch: personal tooling, device dumps, anything that must never
+# leave this machine. Nothing under here is ever committed.
+.local/
+*.db
