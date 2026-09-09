@@ -71,6 +71,13 @@ android {
         compose = true
         buildConfig = true
     }
+
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {
@@ -83,4 +90,10 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation(libs.activity.compose)
     implementation("com.google.android.gms:play-services-mlkit-text-recognition:19.0.1")
+
+    // JVM unit tests. Robolectric supplies a real SQLite for ClipboardDatabase; the
+    // policy tests need none of it and run on plain JUnit.
+    testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
 }

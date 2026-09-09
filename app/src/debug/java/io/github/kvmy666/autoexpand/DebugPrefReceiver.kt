@@ -28,6 +28,7 @@ class DebugPrefReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         when (intent.action) {
+            ACTION_COPY_IMAGE  -> return copyTestImage(context, intent)
             ACTION_POST_TEST   -> return postTest(context, intent)
             ACTION_CANCEL_TEST -> return cancelTest(context)
             ACTION -> Unit
@@ -73,6 +74,57 @@ class DebugPrefReceiver : BroadcastReceiver() {
         Log.d("AutoExpand", "POST_TEST: ${kind.name} in ${delay}ms")
     }
 
+    /**
+     * Put a generated image on the system clipboard, so the Gboard-side capture listener
+     * can be exercised from the host. There is no adb command that sets an image clip, and
+     * the alternative is driving Photos through its share sheet by coordinate, which breaks
+     * on every UI change.
+     *
+     *   adb shell am broadcast -a io.github.kvmy666.autoexpand.COPY_IMAGE \
+     *       -n io.github.kvmy666.autoexpand/.DebugPrefReceiver --es size 1200x800
+     */
+    private fun copyTestImage(context: Context, intent: Intent) {
+        try {
+            val spec = intent.getStringExtra("size") ?: "1200x800"
+            val w = spec.substringBefore('x').toIntOrNull() ?: 1200
+            val h = spec.substringAfter('x').toIntOrNull() ?: 800
+            val seed = intent.getStringExtra("seed") ?: System.currentTimeMillis().toString()
+
+            val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+            val canvas = android.graphics.Canvas(bmp)
+            // Deterministic-per-seed content, so "copy the same image twice" is testable.
+            val rnd = java.util.Random(seed.hashCode().toLong())
+            canvas.drawColor(android.graphics.Color.rgb(rnd.nextInt(256), rnd.nextInt(256), rnd.nextInt(256)))
+            val paint = android.graphics.Paint().apply { isAntiAlias = true }
+            repeat(24) {
+                paint.color = android.graphics.Color.argb(
+                    200, rnd.nextInt(256), rnd.nextInt(256), rnd.nextInt(256)
+                )
+                canvas.drawCircle(
+                    rnd.nextInt(w).toFloat(), rnd.nextInt(h).toFloat(),
+                    (20 + rnd.nextInt(120)).toFloat(), paint
+                )
+            }
+
+            val dir = java.io.File(context.cacheDir, "snaps").apply { mkdirs() }
+            val file = java.io.File(dir, "clip_test_$seed.png")
+            java.io.FileOutputStream(file).use {
+                bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+            }
+            bmp.recycle()
+
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                context, "io.github.kvmy666.autoexpand.fileprovider", file
+            )
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            val clip = android.content.ClipData.newUri(context.contentResolver, "image", uri)
+            cm.setPrimaryClip(clip)
+            Log.d("AutoExpand", "COPY_IMAGE: ${w}x${h} seed=$seed uri=$uri size=${file.length()}")
+        } catch (t: Throwable) {
+            Log.e("AutoExpand", "COPY_IMAGE failed: $t")
+        }
+    }
+
     private fun cancelTest(context: Context) {
         TestNotifier.cancelAll(context)
         Log.d("AutoExpand", "CANCEL_TEST: cleared")
@@ -82,5 +134,6 @@ class DebugPrefReceiver : BroadcastReceiver() {
         const val ACTION = "io.github.kvmy666.autoexpand.SET_PREF"
         const val ACTION_POST_TEST = "io.github.kvmy666.autoexpand.POST_TEST"
         const val ACTION_CANCEL_TEST = "io.github.kvmy666.autoexpand.CANCEL_TEST"
+        const val ACTION_COPY_IMAGE = "io.github.kvmy666.autoexpand.COPY_IMAGE"
     }
 }
