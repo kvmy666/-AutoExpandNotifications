@@ -100,6 +100,14 @@ class KeyboardHook : IXposedHookLoadPackage {
     @Volatile private var cachedClipImages = false
     @Volatile private var cachedImgMaxEntries = ClipboardImagePolicy.DEFAULT_MAX_ENTRIES
     @Volatile private var cachedImgMaxBytes = ClipboardImagePolicy.DEFAULT_MAX_BYTES
+    // Auto-capture system screenshots. Independent of [cachedClipImages]: a user may want
+    // screenshots in the vault without every copied image, or the reverse. Default OFF.
+    @Volatile private var cachedShotCapture = false
+    // Additionally push each captured screenshot onto the real system clipboard. Default
+    // OFF, and deliberately so: it overwrites whatever the user had copied.
+    @Volatile private var cachedShotToClipboard = false
+    // Per-event chatter on the AutoExpandShot tag. Lifecycle lines are logged regardless.
+    @Volatile private var cachedShotVerbose = false
     // Sensitivity: >1 = faster (smaller effective step). Tunable via pref "trackpad_sensitivity".
     @Volatile private var cachedTrackpadSensitivity = 1.0f
     // When true, deliver DPAD via privileged `input keyevent` (root) instead of the
@@ -152,6 +160,10 @@ class KeyboardHook : IXposedHookLoadPackage {
     @Volatile private var imageStore: ClipboardImageStore? = null
     // One-shot per process: commit any delete that a process death interrupted, and GC.
     @Volatile private var imageStoreRepaired = false
+    @Volatile private var shotWatcher: ClipboardScreenshotWatcher? = null
+    /** Set while the vault popup is on screen, so a new screenshot can appear in place. */
+    @Volatile private var vaultLiveRefresh: (() -> Unit)? = null
+    @Volatile private var pendingScrollRestoreY = -1
     // Thumbnails are decoded off the main thread and cached by hash. Bounded so a long
     // scroll through a 100-image vault cannot grow Gboard's heap without limit.
     private val thumbCache = object : LinkedHashMap<String, Bitmap>(16, 0.75f, true) {
@@ -320,6 +332,9 @@ class KeyboardHook : IXposedHookLoadPackage {
             cachedImgMaxEntries = cache["clip_img_max_entries"]?.toIntOrNull() ?: cachedImgMaxEntries
             cachedImgMaxBytes  = cache["clip_img_max_mb"]?.toLongOrNull()?.times(1024 * 1024)
                 ?: cachedImgMaxBytes
+            cachedShotCapture     = cache["shot_capture_enabled"]?.let { it == "1" } ?: cachedShotCapture
+            cachedShotToClipboard = cache["shot_to_clipboard_enabled"]?.let { it == "1" } ?: cachedShotToClipboard
+            cachedShotVerbose     = cache["shot_log_verbose"]?.let { it == "1" } ?: cachedShotVerbose
             cachedUndoEnabled  = cache["undo_enabled"]?.let { it == "1" } ?: cachedUndoEnabled
             cachedUndoButton   = cache["undo_button_enabled"]?.let { it == "1" } ?: cachedUndoButton
             cachedShakeUndo    = cache["shake_undo_enabled"]?.let { it == "1" } ?: cachedShakeUndo
@@ -328,6 +343,7 @@ class KeyboardHook : IXposedHookLoadPackage {
             cachedTrackpadSensitivity = cache["trackpad_sensitivity"]?.toFloatOrNull() ?: cachedTrackpadSensitivity
             cachedTrackpadRoot = cache["trackpad_root_injection_enabled"]?.let { it == "1" } ?: cachedTrackpadRoot
         }
+        reconcileShotWatcher(ctx)
     }
 
     // ─────────────────────────────────────────────────────
@@ -415,6 +431,11 @@ class KeyboardHook : IXposedHookLoadPackage {
                         // inputType == 0 → input restarted on something that holds no text.
                         if ((param.args[0] as? EditorInfo)?.inputType == 0) inputRestartedNonEditable = true
                         try { refreshPrefs(ims.applicationContext); registerShake(ims.applicationContext) } catch (_: Throwable) {}
+                        // Screenshot capture must not depend on the toolbar being injected:
+                        // the toolbar needs a real editor, and Gboard is also brought up over
+                        // targets that hold no text at all. Opening the vault here costs one
+                        // SQLiteOpenHelper the process would open moments later anyway.
+                        try { ensureVault(ims.applicationContext) } catch (_: Throwable) {}
                     }
                 }
             )
@@ -795,11 +816,10 @@ class KeyboardHook : IXposedHookLoadPackage {
                             }
 
                             activeImsRef = ims
-                            if (clipboardDb == null) {
-                                clipboardDb = ClipboardDatabase(ctx, cachedMaxEntries)
-                                imageStore = ClipboardImageStore(ctx)
+                            ensureVault(ctx)
+                            if (!clipboardListenerRegistered) {
+                                clipboardListenerRegistered = true
                                 registerClipboardListener(ctx, ims)
-                                repairImageStore()
                             }
 
                             // ─────────────────────────────────────────────
@@ -2371,8 +2391,22 @@ class KeyboardHook : IXposedHookLoadPackage {
                             })
                         }
                     }
+                    // A rebuild triggered by something other than the user (a screenshot
+                    // landing while the vault is open) must not throw away where they were
+                    // reading. User-initiated reloads leave this at -1 and scroll to top as
+                    // before.
+                    val restore = pendingScrollRestoreY
+                    if (restore >= 0) {
+                        pendingScrollRestoreY = -1
+                        scrollView.post { try { scrollView.scrollTo(0, restore) } catch (_: Throwable) {} }
+                    }
                 }
             }
+        }
+
+        vaultLiveRefresh = {
+            pendingScrollRestoreY = try { scrollView.scrollY } catch (_: Throwable) { -1 }
+            reloadList()
         }
 
         closeBtn.setOnClickListener { popup.dismiss() }
@@ -2574,6 +2608,8 @@ class KeyboardHook : IXposedHookLoadPackage {
             clipSearchActive = false
             clipSearchOnEdit = null
             clipSearchIC = null
+            vaultLiveRefresh = null
+            pendingScrollRestoreY = -1
         }
 
         updateTabs()
@@ -2727,7 +2763,7 @@ class KeyboardHook : IXposedHookLoadPackage {
         val textView = TextView(ctx).apply {
             text = when {
                 entry.isImage -> ClipboardImagePolicy.rowLabel(
-                    entry.imgW, entry.imgH, entry.imgBytes, entry.isAnimated
+                    entry.imgW, entry.imgH, entry.imgBytes, entry.isAnimated, entry.isScreenshot
                 )
                 matchRanges.isEmpty() -> entry.text
                 else -> highlight(entry.text, matchRanges)
@@ -2901,12 +2937,161 @@ class KeyboardHook : IXposedHookLoadPackage {
      * orphan file, and the text vault is completely untouched.
      */
     private fun captureImage(ctx: Context, uri: Uri) {
-        val store = imageStore ?: return
-        val db = clipboardDb ?: return
+        ingestImage(ctx, uri, ClipboardDatabase.SRC_CLIPBOARD, System.currentTimeMillis(), true)
+    }
+
+    // ─────────────────────────────────────────────────────
+    // System screenshot auto-capture
+    // ─────────────────────────────────────────────────────
+
+    @Volatile private var clipboardListenerRegistered = false
+
+    /**
+     * Open the vault once per process and bring the screenshot watcher up with it.
+     *
+     * Called from both the input-view hook and the toolbar injection, because those fire in
+     * either order depending on the editor Gboard was raised over.
+     */
+    private fun ensureVault(ctx: Context) {
+        if (clipboardDb == null) {
+            clipboardDb = ClipboardDatabase(ctx, cachedMaxEntries)
+            imageStore = ClipboardImageStore(ctx)
+            repairImageStore()
+        }
+        // The watcher needs the vault for its watermark, so it can only attach once the
+        // vault exists; refreshPrefs would otherwise not retry for another 2 s.
+        reconcileShotWatcher(ctx)
+    }
+
+    /**
+     * Structured logging on a tag of its own, so `adb logcat -s AutoExpandShot:D` shows the
+     * whole feature and nothing else. [XposedBridge.log] is not used here: it lands under
+     * the LSPosed framework tag, which cannot be filtered this way.
+     *
+     * Lifecycle lines (attach / no route / skip / save) are always emitted — there are only
+     * a handful per screenshot, and they are the evidence trail. Per-event chatter is behind
+     * the `shot_log_verbose` pref and stays off.
+     */
+    private fun shotLog(msg: String) {
+        try { android.util.Log.d(ClipboardScreenshotWatcher.TAG, msg) } catch (_: Throwable) {}
+    }
+
+    /**
+     * Bring the watcher in line with the toggle. Called from [refreshPrefs], so flipping the
+     * setting takes effect within the 2 s pref-cache window with no keyboard restart.
+     *
+     * Turning the feature off tears every route down: with it off, not one line of the
+     * capture path runs and no observer is registered against MediaStore.
+     */
+    private fun reconcileShotWatcher(ctx: Context) {
+        try {
+            if (!cachedShotCapture) {
+                shotWatcher?.let { it.stop(); shotWatcher = null }
+                return
+            }
+            // The vault has to exist first — the watermark lives in it.
+            val db = clipboardDb ?: return
+
+            var w = shotWatcher
+            if (w == null) {
+                w = ClipboardScreenshotWatcher(ctx, shotSink(ctx))
+                w.bindWatermark({ db.screenshotWatermark() }, { db.setScreenshotWatermark(it) })
+                w.verbose = cachedShotVerbose
+                if (!w.start()) return          // start() already logged why
+                shotWatcher = w
+                w.catchUp()                     // anything taken while we were not running
+            } else {
+                w.verbose = cachedShotVerbose
+            }
+        } catch (t: Throwable) {
+            shotLog("watcher reconcile failed: ${t.javaClass.simpleName}: ${t.message}")
+        }
+    }
+
+    private fun shotSink(ctx: Context) = object : ClipboardScreenshotWatcher.Sink {
+        override fun screenshotCaptureEnabled() = cachedShotCapture
+
+        override fun onScreenshot(uri: Uri, identity: String, capturedAtMs: Long) {
+            // Onto the image executor, never the watcher's thread: WebP encoding is slow and
+            // the watcher thread has to stay free to notice the next screenshot.
+            imgExecutor.submit {
+                if (!cachedShotCapture) return@submit
+                val id = ingestImage(
+                    ctx, uri,
+                    ClipboardDatabase.SRC_SCREENSHOT,
+                    capturedAtMs,
+                    // Two screenshots of a motionless screen are byte-identical but are
+                    // genuinely two screenshots; the watcher's file-identity guard has
+                    // already ruled out a true duplicate.
+                    skipIfSameAsLast = false
+                )
+                if (id > 0L) vaultLiveRefresh?.let { refresh -> try { refresh() } catch (_: Throwable) {} }
+            }
+        }
+    }
+
+    /**
+     * Optional second half: put the screenshot on the real system clipboard too.
+     *
+     * Overwriting the primary clip is destructive, so before it happens the clip that is
+     * about to be lost is saved into the vault — the task's condition for this toggle. That
+     * normally already happened via the clipboard listener, and [ClipboardDatabase.insert]
+     * collapses the repeat; this covers the case where the clip was set while Gboard's
+     * process was not running.
+     */
+    private fun pushScreenshotToClipboard(ctx: Context, full: java.io.File) {
+        try {
+            if (!full.isFile) return
+            val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: run {
+                shotLog("clipboard copy skipped: no ClipboardManager")
+                return
+            }
+
+            // 1. Rescue whatever is on the clipboard right now.
+            try {
+                val existing = cm.primaryClip?.getItemAt(0)?.text?.toString()
+                if (!existing.isNullOrEmpty()) clipboardDb?.insert(existing)
+            } catch (t: Throwable) {
+                shotLog("clipboard copy aborted: could not preserve the current clip (${t.message})")
+                return
+            }
+
+            // 2. Only then overwrite it.
+            val exposed = exposeViaHostProvider(ctx, full) ?: run {
+                shotLog("clipboard copy skipped: no host FileProvider root")
+                return
+            }
+            // Arm the self-clip guard BEFORE the write, or our own listener re-captures it.
+            selfClipUntilMs = android.os.SystemClock.elapsedRealtime() + 2500L
+            cm.setPrimaryClip(ClipData.newUri(ctx.contentResolver, "screenshot", exposed.first))
+            shotLog("copied to system clipboard as ${exposed.first}")
+        } catch (t: Throwable) {
+            shotLog("clipboard copy failed: ${t.javaClass.simpleName}: ${t.message}")
+        }
+    }
+
+    /**
+     * The one ingest path. Both the clipboard listener and the screenshot watcher come
+     * through here, so budgets, eviction, refcounting and self-healing are defined exactly
+     * once — the task's "no second storage path" requirement is structural, not a promise.
+     *
+     * @return the new row id, or -1 if nothing was inserted.
+     */
+    private fun ingestImage(
+        ctx: Context,
+        uri: Uri,
+        source: Int,
+        timestampMs: Long,
+        skipIfSameAsLast: Boolean
+    ): Long {
+        val store = imageStore ?: return -1L
+        val db = clipboardDb ?: return -1L
+        val isShot = source == ClipboardDatabase.SRC_SCREENSHOT
         try {
             val saved = store.saveFromUri(ctx, uri) ?: run {
                 XposedBridge.log("$TAG [KB] image capture skipped (unreadable/oversize/undecodable)")
-                return
+                if (isShot) shotLog("skipped $uri: unreadable, oversize or undecodable")
+                return -1L
             }
 
             val existing = db.imageEntriesOldestFirst().map {
@@ -2923,7 +3108,8 @@ class KeyboardHook : IXposedHookLoadPackage {
                 imgBudgetHint = "Vault full — unpin an image to save new ones"
                 if (db.hashRefCount(saved.hash) == 0) store.deleteHash(saved.hash)
                 XposedBridge.log("$TAG [KB] image refused: budget met only by pinned entries")
-                return
+                if (isShot) shotLog("skipped: budget met only by pinned entries")
+                return -1L
             }
 
             for (id in plan.evict) {
@@ -2932,7 +3118,8 @@ class KeyboardHook : IXposedHookLoadPackage {
 
             val rowId = db.insertImage(
                 saved.hash, saved.thumbPath, saved.fullPath,
-                saved.width, saved.height, saved.bytes, saved.animated
+                saved.width, saved.height, saved.bytes, saved.animated,
+                source, timestampMs, skipIfSameAsLast
             )
             if (rowId <= 0L && db.hashRefCount(saved.hash) == 0) {
                 // Rejected as a duplicate of the most recent entry and nothing else points
@@ -2944,8 +3131,20 @@ class KeyboardHook : IXposedHookLoadPackage {
                 "$TAG [KB] image saved ${saved.width}x${saved.height} " +
                     "${saved.bytes}B evicted=${plan.evict.size} hash=${saved.hash.take(8)}"
             )
+            if (isShot) {
+                shotLog(
+                    "saved as entry id=$rowId ${saved.width}x${saved.height} " +
+                        "${saved.bytes}B evicted=${plan.evict.size} hash=${saved.hash.take(8)}"
+                )
+                if (rowId > 0L && cachedShotToClipboard) {
+                    pushScreenshotToClipboard(ctx, store.fullFile(saved.hash))
+                }
+            }
+            return rowId
         } catch (t: Throwable) {
             XposedBridge.log("$TAG [KB] image capture failed: ${t.message}")
+            if (isShot) shotLog("ingest failed: ${t.javaClass.simpleName}: ${t.message}")
+            return -1L
         }
     }
 
