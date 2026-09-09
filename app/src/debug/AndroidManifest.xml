@@ -14,6 +14,7 @@
                 <action android:name="io.github.kvmy666.autoexpand.POST_TEST" />
                 <action android:name="io.github.kvmy666.autoexpand.CANCEL_TEST" />
                 <action android:name="io.github.kvmy666.autoexpand.COPY_IMAGE" />
+                <action android:name="io.github.kvmy666.autoexpand.RUN_AUDIT" />
             </intent-filter>
         </receiver>
     </application>

@@ -371,4 +371,116 @@ class ClipboardDatabaseTest {
         assertEquals("unknown field must not be dropped on rewrite", "keepme", kept)
         assertEquals(2, d.getAll().size)
     }
+
+
+    // ── A19: screenshot source tag + watermark ──────────────────────────
+
+    @Test
+    fun `the src column is added to a populated legacy table without touching rows`() {
+        seedLegacyDataset(listOf(Triple("legacy one", 1_000L, 1 to 0)))
+        val d = open()
+
+        val cols = mutableListOf<String>()
+        d.readableDatabase.rawQuery("PRAGMA table_info(clipboard_entries)", null).use { c ->
+            while (c.moveToNext()) cols.add(c.getString(1))
+        }
+        assertTrue("src must exist after migration", cols.contains("src"))
+
+        val row = d.getAll().single()
+        assertEquals("legacy one", row.text)
+        assertTrue("the legacy pin must survive", row.isPinned)
+        // A text row written before this feature existed reads back as a clipboard entry,
+        // which is exactly what it was.
+        assertEquals(ClipboardDatabase.SRC_CLIPBOARD, row.source)
+        assertFalse(row.isScreenshot)
+    }
+
+    @Test
+    fun `a screenshot entry round-trips its source and its capture time`() {
+        val d = open()
+        val captured = 1_700_000_000_000L
+        val id = d.insertImage(
+            "hash-shot", "/t/a.webp", "/f/a.webp", 1272, 2772, 4_096L, false,
+            ClipboardDatabase.SRC_SCREENSHOT, captured, false
+        )
+        assertTrue(id > 0)
+
+        val row = d.getAll().single()
+        assertTrue(row.isImage)
+        assertTrue(row.isScreenshot)
+        assertEquals(ClipboardDatabase.SRC_SCREENSHOT, row.source)
+        assertEquals("the capture time, not the ingest time, must be stored", captured, row.timestamp)
+    }
+
+    @Test
+    fun `a clipboard image still defaults to the clipboard source`() {
+        val d = open()
+        d.insertImage("hash-clip", "/t/b.webp", "/f/b.webp", 100, 100, 512L, false)
+        val row = d.getAll().single()
+        assertEquals(ClipboardDatabase.SRC_CLIPBOARD, row.source)
+        assertFalse(row.isScreenshot)
+    }
+
+    @Test
+    fun `two byte-identical screenshots both become entries`() {
+        // The static-screen case: same bytes, genuinely two screenshots. The watcher has
+        // already ruled out a real duplicate by file identity, so the row guard must not
+        // collapse them.
+        val d = open()
+        val a = d.insertImage(
+            "same", "/t/s.webp", "/f/s.webp", 10, 10, 64L, false,
+            ClipboardDatabase.SRC_SCREENSHOT, 2_000L, false
+        )
+        val b = d.insertImage(
+            "same", "/t/s.webp", "/f/s.webp", 10, 10, 64L, false,
+            ClipboardDatabase.SRC_SCREENSHOT, 3_000L, false
+        )
+        assertTrue(a > 0)
+        assertTrue(b > 0)
+        assertEquals(2, d.countLive(ClipboardDatabase.KIND_IMAGE))
+        // ...but they share one file, so they are charged once.
+        assertEquals(64L, d.liveImageBytes())
+        assertEquals(2, d.hashRefCount("same"))
+    }
+
+    @Test
+    fun `a re-copied clipboard image is still collapsed`() {
+        // The guard the screenshot path opts out of must stay on for the clipboard path.
+        val d = open()
+        assertTrue(d.insertImage("dup", "/t/d.webp", "/f/d.webp", 10, 10, 64L, false) > 0)
+        assertEquals(-1L, d.insertImage("dup", "/t/d.webp", "/f/d.webp", 10, 10, 64L, false))
+        assertEquals(1, d.countLive(ClipboardDatabase.KIND_IMAGE))
+    }
+
+    @Test
+    fun `the screenshot watermark starts unarmed and persists`() {
+        val d = open()
+        assertEquals("0 means never armed — the watcher must not back-fill", 0L, d.screenshotWatermark())
+        d.setScreenshotWatermark(63275L)
+        assertEquals(63275L, d.screenshotWatermark())
+
+        d.close()
+        val reopened = ClipboardDatabase(ctx).also { db = it }
+        assertEquals("must survive a process restart", 63275L, reopened.screenshotWatermark())
+    }
+
+    @Test
+    fun `deleting all images removes screenshots too and leaves texts alone`() {
+        // The highest-risk regression, re-checked now that images have two sources.
+        val d = open()
+        d.insert("a card number")
+        d.insertImage("clip", "/t/c.webp", "/f/c.webp", 10, 10, 64L, false)
+        d.insertImage(
+            "shot", "/t/h.webp", "/f/h.webp", 10, 10, 64L, false,
+            ClipboardDatabase.SRC_SCREENSHOT, 5_000L, false
+        )
+        assertEquals(2, d.countLive(ClipboardDatabase.KIND_IMAGE))
+
+        d.softDeleteAll(ClipboardDatabase.KIND_IMAGE, System.currentTimeMillis() + 15_000L)
+        d.commitPendingDelete()
+
+        assertEquals(0, d.countLive(ClipboardDatabase.KIND_IMAGE))
+        assertEquals(1, d.countLive(ClipboardDatabase.KIND_TEXT))
+        assertEquals("a card number", d.getAll().single().text)
+    }
 }

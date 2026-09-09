@@ -28,6 +28,7 @@ class DebugPrefReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         when (intent.action) {
+            ACTION_RUN_AUDIT   -> return runAudit(context)
             ACTION_COPY_IMAGE  -> return copyTestImage(context, intent)
             ACTION_POST_TEST   -> return postTest(context, intent)
             ACTION_CANCEL_TEST -> return cancelTest(context)
@@ -51,6 +52,30 @@ class DebugPrefReceiver : BroadcastReceiver() {
             Log.d("AutoExpand", "DebugPrefReceiver: $key = $value ($type) — republished")
         } catch (t: Throwable) {
             Log.e("AutoExpand", "DebugPrefReceiver failed: $t")
+        }
+    }
+
+    /**
+     * Run the vault audit script as root and leave its report where adb can read it.
+     *
+     * The app already holds root (that is how prefs are published), but `su` is not reachable
+     * from the adb shell uid under KernelSU Next, and the vault lives inside Gboard's private
+     * data directory — so proving "nothing was deleted or altered" needs a root reader that is
+     * not the adb shell. This is it.
+     *
+     * The command is a fixed literal, not anything taken from the intent: a debug build must
+     * not ship a receiver that runs arbitrary root commands for any app that can broadcast.
+     * The script itself prints counts and metadata only, never clip text.
+     *
+     *   adb shell am broadcast -a io.github.kvmy666.autoexpand.RUN_AUDIT      *       -n io.github.kvmy666.autoexpand/.DebugPrefReceiver
+     */
+    private fun runAudit(context: Context) {
+        try {
+            val proc = Runtime.getRuntime().exec(arrayOf("su", "-M", "-c", "sh $AUDIT_SCRIPT"))
+            val ok = proc.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)
+            Log.d("AutoExpand", "RUN_AUDIT: finished=$ok exit=${if (ok) proc.exitValue() else -1}")
+        } catch (t: Throwable) {
+            Log.e("AutoExpand", "RUN_AUDIT failed: $t")
         }
     }
 
@@ -135,5 +160,9 @@ class DebugPrefReceiver : BroadcastReceiver() {
         const val ACTION_POST_TEST = "io.github.kvmy666.autoexpand.POST_TEST"
         const val ACTION_CANCEL_TEST = "io.github.kvmy666.autoexpand.CANCEL_TEST"
         const val ACTION_COPY_IMAGE = "io.github.kvmy666.autoexpand.COPY_IMAGE"
+        const val ACTION_RUN_AUDIT = "io.github.kvmy666.autoexpand.RUN_AUDIT"
+
+        /** Fixed path. Never built from intent data — see [runAudit]. */
+        private const val AUDIT_SCRIPT = "/data/local/tmp/ae_audit.sh"
     }
 }
