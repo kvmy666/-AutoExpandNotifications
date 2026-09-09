@@ -83,7 +83,7 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     var selectedFeature by remember { mutableStateOf<String?>(null) }
 
     // ── What's New dialog ─────────────────────────────────────────────────────
-    var showWhatsNew by remember { mutableStateOf(!prefs.getBoolean("whats_new_seen_3_3_0", false)) }
+    var showWhatsNew by remember { mutableStateOf(!prefs.getBoolean("whats_new_seen_3_3_5", false)) }
     var whatsNewDontShow by remember { mutableStateOf(false) }
 
     // ── Notifications state ───────────────────────────────────────────────────
@@ -218,22 +218,24 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     if (showWhatsNew) {
         AlertDialog(
             onDismissRequest = {
-                if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_3_0", true).apply()
+                if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_3_5", true).apply()
                 showWhatsNew = false
             },
-            title = { Text("What's New in v3.3.0") },
+            title = { Text("What's New in v3.3.5") },
             text = {
                 Column(
                     modifier = Modifier.verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text("New", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
-                    Text("• Select mode (🖍️) — a new toggle next to the trackpad stick. Switch it on and dragging the stick highlights text instead of moving the cursor, in either direction, across lines as well")
-                    Text("• Lift your finger and the Cut / Copy / Paste bar opens on what you selected, so copying a phrase is one gesture")
-                    Text("• The toggle stays on until you tap it again, and lights up while it is active")
+                    Text("• Copied images are saved to the clipboard vault. Copy a picture anywhere and it waits in the vault next to your text, ready to paste back")
+                    Text("• Off by default — switch it on under Keyboard › Save copied images")
+                    Text("• Tap an image to paste it, long-press to pin it. Pinned images are never removed to make room")
+                    Text("• Choose how many images to keep and how much space they may use. When a limit is reached the oldest unpinned image goes first, and the vault shows what it is using")
+                    Text("• \"Delete all\" is now two buttons — texts and images — each of which leaves the other kind alone, with 15 seconds to undo")
                     Spacer(Modifier.height(4.dp))
-                    Text("Changes", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
-                    Text("• The undo button (↩️) is now hidden by default to make room on the toolbar — shake the phone to undo instead. Bring it back any time under Keyboard › Undo button")
+                    Text("Private by design", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary)
+                    Text("• Images are stored inside the keyboard's own private data. Nothing is uploaded, no new permission is asked for, and no other app on the phone can read them")
                     Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = whatsNewDontShow, onCheckedChange = { whatsNewDontShow = it })
@@ -243,7 +245,7 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
             },
             confirmButton = {
                 TextButton(onClick = {
-                    if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_3_0", true).apply()
+                    if (whatsNewDontShow) prefs.edit().putBoolean("whats_new_seen_3_3_5", true).apply()
                     showWhatsNew = false
                 }) { Text("Got it") }
             }
