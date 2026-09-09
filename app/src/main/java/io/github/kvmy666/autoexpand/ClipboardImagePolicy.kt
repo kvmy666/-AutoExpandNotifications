@@ -122,10 +122,26 @@ object ClipboardImagePolicy {
         else -> "$b B"
     }
 
-    /** `Image · 1080×1920 · 240 KB`, with a GIF marker when only a first frame was kept. */
-    fun rowLabel(width: Int, height: Int, bytes: Long, animated: Boolean): String {
+    /**
+     * `Image · 1080×1920 · 240 KB`, with a GIF marker when only a first frame was kept.
+     *
+     * @param screenshot badge only — a screenshot is stored, evicted and pasted exactly like
+     *                   any other image; the word is there so the user can tell at a glance
+     *                   where a row came from.
+     */
+    fun rowLabel(
+        width: Int,
+        height: Int,
+        bytes: Long,
+        animated: Boolean,
+        screenshot: Boolean = false
+    ): String {
         val dims = if (width > 0 && height > 0) " · ${width}×${height}" else ""
-        val kind = if (animated) "GIF" else "Image"
+        val kind = when {
+            animated   -> "GIF"
+            screenshot -> "Screenshot"
+            else       -> "Image"
+        }
         return "$kind$dims · ${formatBytes(bytes)}"
     }
 }

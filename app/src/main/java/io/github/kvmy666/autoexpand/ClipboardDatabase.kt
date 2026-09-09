@@ -44,14 +44,24 @@ class ClipboardDatabase(
         val imgW: Int = 0,
         val imgH: Int = 0,
         val imgBytes: Long = 0L,
-        val isAnimated: Boolean = false
+        val isAnimated: Boolean = false,
+        val source: Int = SRC_CLIPBOARD
     ) {
         val isImage: Boolean get() = kind == KIND_IMAGE
+        val isScreenshot: Boolean get() = kind == KIND_IMAGE && source == SRC_SCREENSHOT
     }
 
     companion object {
         const val KIND_TEXT = 0
         const val KIND_IMAGE = 1
+
+        /**
+         * Where an image entry came from. Additive and defaulted, so every row written by
+         * 3.3.x or by the first image release reads back as [SRC_CLIPBOARD] — which is what
+         * it was.
+         */
+        const val SRC_CLIPBOARD = 0
+        const val SRC_SCREENSHOT = 1
 
         private const val TABLE = "clipboard_entries"
         private const val META = "ae_meta"
@@ -74,8 +84,12 @@ class ClipboardDatabase(
         private const val COL_ANIM = "is_animated"
         private const val COL_DELETED = "deleted_at"
 
+        // Added in 3.4.0 alongside screenshot auto-capture. Same additive contract.
+        private const val COL_SRC = "src"
+
         const val META_PENDING_DEADLINE = "pending_delete_deadline"
         const val META_PENDING_KIND = "pending_delete_kind"
+        const val META_SHOT_WATERMARK = "screenshot_watermark"
 
         /** column name → DDL fragment, applied additively by [ensureColumns]. */
         private val ADDED_COLUMNS = linkedMapOf(
@@ -87,12 +101,13 @@ class ClipboardDatabase(
             COL_H to "INTEGER NOT NULL DEFAULT 0",
             COL_BYTES to "INTEGER NOT NULL DEFAULT 0",
             COL_ANIM to "INTEGER NOT NULL DEFAULT 0",
-            COL_DELETED to "INTEGER NOT NULL DEFAULT 0"
+            COL_DELETED to "INTEGER NOT NULL DEFAULT 0",
+            COL_SRC to "INTEGER NOT NULL DEFAULT $SRC_CLIPBOARD"
         )
 
         private const val SELECT_COLS =
             "$COL_ID, $COL_TEXT, $COL_TS, $COL_PINNED, $COL_FAV, " +
-            "$COL_KIND, $COL_HASH, $COL_THUMB, $COL_FULL, $COL_W, $COL_H, $COL_BYTES, $COL_ANIM"
+            "$COL_KIND, $COL_HASH, $COL_THUMB, $COL_FULL, $COL_W, $COL_H, $COL_BYTES, $COL_ANIM, $COL_SRC"
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -196,6 +211,19 @@ class ClipboardDatabase(
      * pointing at the same *files*, so the row count reflects what the user did while the
      * bytes are stored once. [hashRefCount] is what decides when bytes may go.
      */
+    /**
+     * @param source        [SRC_CLIPBOARD] or [SRC_SCREENSHOT]; purely a badge, never a filter
+     *                      for eviction or deletion.
+     * @param timestampMs   when the image came into existence. The clipboard path passes now;
+     *                      the screenshot path passes the capture time off MediaStore so a
+     *                      batch caught up after the process restarts still sorts honestly.
+     * @param skipIfSameAsLast
+     *                      guards the clipboard path, where one copy can fire the listener
+     *                      twice. The screenshot path passes false: it is already
+     *                      de-duplicated by a monotonic MediaStore watermark, and two
+     *                      screenshots of a motionless screen are byte-identical yet are
+     *                      genuinely two screenshots.
+     */
     fun insertImage(
         hash: String,
         thumbPath: String,
@@ -203,19 +231,24 @@ class ClipboardDatabase(
         width: Int,
         height: Int,
         bytes: Long,
-        animated: Boolean
+        animated: Boolean,
+        source: Int = SRC_CLIPBOARD,
+        timestampMs: Long = System.currentTimeMillis(),
+        skipIfSameAsLast: Boolean = true
     ): Long {
         val db = writableDatabase
         // Skip only if the most recent live entry is the very same image — mirrors the
         // text path, and stops a single copy that fires the listener twice from doubling.
-        db.rawQuery(
-            "SELECT $COL_HASH FROM $TABLE WHERE $COL_DELETED = 0 ORDER BY $COL_TS DESC LIMIT 1",
-            null
-        ).use { c -> if (c.moveToFirst() && c.getString(0) == hash) return -1L }
+        if (skipIfSameAsLast) {
+            db.rawQuery(
+                "SELECT $COL_HASH FROM $TABLE WHERE $COL_DELETED = 0 ORDER BY $COL_TS DESC LIMIT 1",
+                null
+            ).use { c -> if (c.moveToFirst() && c.getString(0) == hash) return -1L }
+        }
 
         val values = ContentValues().apply {
             put(COL_TEXT, "")               // NOT NULL in the 3.2.x schema
-            put(COL_TS, System.currentTimeMillis())
+            put(COL_TS, timestampMs)
             put(COL_PINNED, 0)
             put(COL_FAV, 0)
             put(COL_KIND, KIND_IMAGE)
@@ -226,6 +259,7 @@ class ClipboardDatabase(
             put(COL_H, height)
             put(COL_BYTES, bytes)
             put(COL_ANIM, if (animated) 1 else 0)
+            put(COL_SRC, source)
         }
         return db.insert(TABLE, null, values)
     }
@@ -266,7 +300,8 @@ class ClipboardDatabase(
                             imgW = c.getInt(9),
                             imgH = c.getInt(10),
                             imgBytes = c.getLong(11),
-                            isAnimated = c.getInt(12) == 1
+                            isAnimated = c.getInt(12) == 1,
+                            source = c.getInt(13)
                         )
                     )
                 }
@@ -468,6 +503,25 @@ class ClipboardDatabase(
 
     private fun putMeta(db: SQLiteDatabase, k: String, v: String) {
         db.execSQL("INSERT OR REPLACE INTO $META (k, v) VALUES (?, ?)", arrayOf(k, v))
+    }
+
+    /**
+     * High-water mark of the newest screenshot already ingested, as a MediaStore `_id`.
+     *
+     * It lives in the database rather than in prefs on purpose: it has to stay in lockstep
+     * with the rows it describes, so restoring or clearing the vault cannot leave a stale
+     * mark that silently swallows the next screenshots.
+     *
+     * 0 means "never armed" — the watcher then arms it at the current maximum instead of
+     * back-filling the user's entire screenshot history on first enable.
+     */
+    fun screenshotWatermark(): Long = getMeta(META_SHOT_WATERMARK)?.toLongOrNull() ?: 0L
+
+    fun setScreenshotWatermark(id: Long) {
+        try {
+            putMeta(writableDatabase, META_SHOT_WATERMARK, id.toString())
+        } catch (_: Throwable) {
+        }
     }
 
     private fun clearMeta(db: SQLiteDatabase) {
