@@ -10,6 +10,25 @@ class App : Application() {
         super.onCreate()
         DynamicColors.applyToActivitiesIfAvailable(this)
         createNotificationChannels()
+        reapplyCouiAccentFix()
+    }
+
+    /**
+     * OxygenOS "Custom colour" fix. Runs here rather than in the hooks because it needs `su`,
+     * which only the app process reliably has — see [CouiAccentFix]. Off the main thread: it
+     * spawns several `su` shells and re-fabricates resource overlays.
+     */
+    private fun reapplyCouiAccentFix() {
+        Thread {
+            try {
+                CouiAccentFix.apply(this)
+            } catch (t: Throwable) {
+                android.util.Log.d("Snapper", "DIAG: CouiAccent startup apply failed: $t")
+            }
+        }.apply {
+            isDaemon = true
+            name = "coui-accent-fix"
+        }.start()
     }
 
     private fun createNotificationChannels() {

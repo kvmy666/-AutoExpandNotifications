@@ -32,6 +32,10 @@
     <string name="ungroup_notifications_title">Ungroup notifications</string>
     <string name="ungroup_notifications_desc">Show each notification as a separate card instead of grouped by app</string>
 
+    <!-- System color fix (OxygenOS custom colors) -->
+    <string name="system_color_fix_title">Fix custom color in system apps</string>
+    <string name="system_color_fix_desc">Stops toggles, the connected Wi-Fi icon and other system accents from turning white when you pick a Custom (wallpaper) color. Featured colors are left untouched.</string>
+
     <!-- Excluded apps -->
     <string name="excluded_apps_title">Excluded apps</string>
     <string name="excluded_apps_desc_none">No apps excluded</string>

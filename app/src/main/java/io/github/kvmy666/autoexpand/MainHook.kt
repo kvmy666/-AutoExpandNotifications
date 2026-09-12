@@ -11,6 +11,7 @@ import io.github.kvmy666.autoexpand.hook.NotifProbe
 import io.github.kvmy666.autoexpand.hook.NotificationExpander
 import io.github.kvmy666.autoexpand.hook.notif.NotifEngineV2
 import io.github.kvmy666.autoexpand.hook.PrefsBridge
+import io.github.kvmy666.autoexpand.hook.SystemColorHook
 import io.github.kvmy666.autoexpand.hook.ZonesHook
 
 class MainHook : IXposedHookLoadPackage {
@@ -26,6 +27,9 @@ class MainHook : IXposedHookLoadPackage {
 
     /** Keep-screen-on overlay + its live PREF_CHANGED receiver, in SystemUI. */
     private val keepScreenOn = KeepScreenOnController(prefs)
+
+    /** OxygenOS "Custom color" fix — mirrors the custom palette into the OEM type accent. */
+    private val systemColor = SystemColorHook(prefs)
 
     /** All notification expand/collapse behavior + the SystemUI notification hooks. */
     private val notif = NotificationExpander(prefs)
@@ -92,6 +96,10 @@ class MainHook : IXposedHookLoadPackage {
                             keepScreenOn.registerPrefReceiver(app)
                             // Apply keep-screen-on from the persisted pref (default OFF).
                             keepScreenOn.apply(prefs.isOptInEnabled("keep_screen_on_enabled"))
+                            // OxygenOS "Custom color" fix (opt-in, default OFF).
+                            try { systemColor.install(app) } catch (t: Throwable) {
+                                Log.e("AutoExpand", "system color fix init failed: $t")
+                            }
                             // Legacy: write Settings.Global marker for OnePlus backward compat
                             try {
                                 android.provider.Settings.Global.putString(

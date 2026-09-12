@@ -97,6 +97,7 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
 
     // ── System Behavior state ─────────────────────────────────────────────────
     var keepScreenOnEnabled by remember { mutableStateOf(prefs.getBoolean("keep_screen_on_enabled", false)) }
+    var systemColorFixEnabled by remember { mutableStateOf(prefs.getBoolean("system_color_fix_enabled", false)) }
     var globalSearchEnterEnabled by remember { mutableStateOf(prefs.getBoolean("global_search_enter_launch_enabled", false)) }
     var headsupPopupEnabled by remember { mutableStateOf(prefs.getBoolean("disable_headsup_popup_enabled", true)) }
     var ungroupEnabled     by remember { mutableStateOf(prefs.getBoolean("ungroup_notifications_enabled", true)) }
@@ -435,6 +436,17 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
                                 style = MaterialTheme.typography.bodySmall,
                                 color = AppColors.Warning,
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                            )
+                        }
+
+                        // ── Colors (OxygenOS custom color fix) ──
+                        SettingsCard {
+                            SectionLabel("Colors")
+                            ToggleRow(
+                                title = stringResource(R.string.system_color_fix_title),
+                                description = stringResource(R.string.system_color_fix_desc),
+                                checked = systemColorFixEnabled,
+                                onCheckedChange = { systemColorFixEnabled = it; onToggle("system_color_fix_enabled", it) }
                             )
                         }
 
