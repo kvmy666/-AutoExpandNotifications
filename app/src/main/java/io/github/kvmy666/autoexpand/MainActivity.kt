@@ -93,6 +93,14 @@ class MainActivity : ComponentActivity() {
                         .putExtra("key", key)
                         .putExtra("value", value)
                 )
+                // A copy for our own process: the Coui colour fix lives in the app, not in
+                // SystemUI, and needs the same live signal (e.g. the fix toggle).
+                context.sendBroadcast(
+                    Intent("io.github.kvmy666.autoexpand.PREF_CHANGED")
+                        .setPackage(context.packageName)
+                        .putExtra("key", key)
+                        .putExtra("value", value)
+                )
             } catch (_: Throwable) {}
             writePrefsFile(context)
         }

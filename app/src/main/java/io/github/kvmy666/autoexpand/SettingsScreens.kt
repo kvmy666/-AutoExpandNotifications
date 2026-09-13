@@ -97,7 +97,9 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
 
     // ── System Behavior state ─────────────────────────────────────────────────
     var keepScreenOnEnabled by remember { mutableStateOf(prefs.getBoolean("keep_screen_on_enabled", false)) }
-    var systemColorFixEnabled by remember { mutableStateOf(prefs.getBoolean("system_color_fix_enabled", false)) }
+    // Default ON: the fix treats an absent pref as enabled (it repairs a broken OEM path),
+    // so the switch has to show that state rather than a misleading "off".
+    var systemColorFixEnabled by remember { mutableStateOf(prefs.getBoolean("system_color_fix_enabled", true)) }
     var globalSearchEnterEnabled by remember { mutableStateOf(prefs.getBoolean("global_search_enter_launch_enabled", false)) }
     var headsupPopupEnabled by remember { mutableStateOf(prefs.getBoolean("disable_headsup_popup_enabled", true)) }
     var ungroupEnabled     by remember { mutableStateOf(prefs.getBoolean("ungroup_notifications_enabled", true)) }

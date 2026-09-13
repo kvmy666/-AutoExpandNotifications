@@ -10,6 +10,9 @@ class App : Application() {
         super.onCreate()
         DynamicColors.applyToActivitiesIfAvailable(this)
         createNotificationChannels()
+        // Live triggers (theme-settings observer + toggle receiver) before the first apply,
+        // so a colour picked while this process is alive is picked up within a second.
+        CouiAccentFix.install(this)
         reapplyCouiAccentFix()
     }
 

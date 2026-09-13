@@ -1,6 +1,9 @@
 # OxygenOS "Custom colour" — system apps render the accent as WHITE
 
-Device of record: **OnePlus CPH2747, OxygenOS 16**. Status: **fixed & verified on screen**.
+Device of record: **OnePlus CPH2747, OxygenOS 16**. Status: **fixed & verified on screen** —
+`#F13871` renders as pink on Calculator's `=` key *and* its `deg` label, the Wi-Fi ON toggle,
+"Refresh", "Add network" and the connected-network icon, with **no resource overlays in play at
+all** (`cmd overlay list` shows every `aeCoui_*` entry as `[ ]`).
 
 ## Symptom
 
@@ -8,129 +11,187 @@ Settings → Wallpapers & style → Colors → **Custom** (colour picked from th
 
 | Surface | Featured preset | **Custom (wallpaper)** |
 |---|---|---|
-| Calculator `=` key | tinted | **white** |
-| Settings ON toggles | tinted | **white** |
-| Connected-Wi-Fi icon / toggle | tinted | **white** |
+| Calculator `=` key / `deg` label | tinted | **white** |
+| Settings · Wi-Fi ON toggles | tinted | **white** |
+| Connected-Wi-Fi icon, "Refresh", "Add network" | tinted | **white** |
 | My Files accent | tinted | **white** |
 | Third-party apps | correct | **correct** |
 
 ## Root cause
 
-There are **two independent accent channels** on OxygenOS, and only one of them is broken.
+OxygenOS paints accents through **two independent channels**; only one of them is broken.
 
-1. **Material You** — the `android` target palette. Under Custom this *is* written correctly
-   (the wallpaper-derived `.frro` overlays really do carry the chosen pink). This is why
-   **third-party apps tint correctly.**
-2. **Oplus *Coui*** — the channel every Oplus system app actually tints from. Its resources
-   resolve through theme attributes such as **`?attr/couiColorPrimary`**. The Featured-preset
-   path paints those attributes; the **Custom path never writes them**, so they fall through to
-   the white placeholder compiled into the app.
+1. **Material You** — the `android` palette. Under Custom this *is* written correctly (the
+   wallpaper-derived palettes carry the chosen colour), which is exactly why third-party apps
+   tint correctly.
+2. **Oplus *Coui*** — the channel every Oplus system app actually tints from: colour resources
+   whose value is a theme attribute such as `?attr/couiColorPrimary`. The **Featured** path
+   paints that channel; the **Custom** path never does, so those slots keep the white
+   placeholder compiled into the APK.
 
-The apps are not "ignoring" the Custom colour — they read a channel the OEM forgot to paint.
-Confirmed in the shipped APKs: all four system apps carry
-`color/coui_theme_primary_color = #ffffffff`, and their accent slots resolve to white while the
-Material palette is pink.
+### The Coui channel is a FILE, not an RRO
 
-### How a broken surface actually renders white (traced, Calculator)
+`/data/oplus/uxres/uxcolor/` — the OEM's device-global Coui colour store, written by the
+**`com.oplus.uxdesign`** system app (that is the uid that owns it: `u0_a309`, appId `10309`):
 
 ```
-layout/pad_numeric_land_all
-└─ COUIButton id/eq (the '=' key)
-   └─ android:background = @drawable/fold_button_equals_img_gradient_bg   (res/lr.xml)
-      └─ layer-list → shape → solid android:color = @color/fold_button_equals_bg_color
-         ↑  color/fold_button_equals_bg_color  ==  ?attr/couiColorPrimary
-                                                    └─ never painted on the Custom path → #ffffffff
+-rwxrwxrwx u0_a309 coui_theme_color_wallpaper.xml        6093 B   Featured path, 5 hue families
+-rwxrwxrwx u0_a309 coui_theme_color_wallpaper_night.xml  6093 B
+-rw-r--r-- root    ux_custom_color.xml                    805 B   Custom path ← the white stub
+-rw-r--r-- root    ux_custom_color_night.xml              805 B
 ```
 
-`COUIButton` reads its paint colours from the `COUIButton` styleable — index 9 is
-`COUIButton_drawableColor`, index 20 `strokeColor`. For the `=` key the visible circle comes
-from the **background drawable** above, whose `solid` is an *accent slot*: a **colour resource
-whose value is a theme attribute**.
+`ux_custom_color.xml` **is** the white bug: the whole `Single` family is a placeholder that the
+Custom path never fills in.
 
-### What is NOT the cause (each disproven on device)
+```xml
+<color name="couiSingleFirstNormal">#FFFFFFFF</color>          <!-- the accent itself -->
+<color name="couiSingleFirstPressed">#FF4D4D4D</color>
+<color name="couiSingleFirstLightNormal">#4CFFFFFF</color>     <!-- 30 % alpha -->
+<color name="couiSingleFirstLightPressed">#4C4D4D4D</color>
+<color name="couiSingleFirstTextHighLight">#26FFFFFF</color>   <!-- 15 % alpha -->
+<color name="couiSingleFirstBarDisabledColor">#26FFFFFF</color>
+<!-- every slot duplicated verbatim with an NXcolor prefix: NXcolorSingleFirstNormal, … -->
+```
 
-* ✗ `Settings.Secure.sysui_type_accent_color` — read by **SystemUI only**; `Settings.apk` has
-  zero references to it. Writing it turns the QS tiles pink and nothing else.
-* ✗ Per-app resource overlays created by the OEM on the Featured path — `/data/resource-cache`
-  diffs show the OEM creates none.
-* ✗ `com.oplus.appplatform` AppFeature / `THEME_RES_ID_KEY`, `persist.sys.theme`.
-* ✗ `color/coui_theme_primary_color` — overriding it alone changes nothing visible; it is not
-  the resource the broken widgets use.
+Every `?attr/couiColorPrimary` consumer resolves through that family — one file, every app.
+That is the whole reason this beats enumerating broken widgets one by one: Calculator, Settings,
+WirelessSettings, My Files and apps nobody has inspected yet all read the same six slots.
+
+The **Featured** path fills the sibling file instead: `coui_theme_color_wallpaper.xml` carries
+five hue families (`Green/Red/Yellow/Blue/Orange`) × 14 slots
+(`couiXxxTintControlNormal/Pressed`, `…TintLightNormal/Pressed`, `couiTextXxxHighlight`,
+`switchCheckedXxxBarDisabledColor`, `switchCheckedXxxInnerCircleDisabledColor`, + `NX…` twins),
+e.g. `couiBlueTintControlNormal #FF848DC8` → `…TintControlPressed #FF5662B3`. **That file is the
+OEM's and is left untouched** — it is not broken.
 
 ## The fix
 
-For every broken surface, replace the **accent-slot colour resource** with the user's accent via
-a *fabricated runtime resource overlay*. This works precisely because the slot is a colour
-resource; the theme attribute itself lives in a style bag and cannot be rewritten this way.
+Rewrite the accent family of the Custom store with the user's accent. Nothing else — no RROs,
+no per-slot enumeration, no APK-patching.
 
-Implemented in `app/src/main/java/io/github/kvmy666/autoexpand/CouiAccentFix.kt`, run from the
-**app process** (`App.onCreate`), because:
+### 1. Derive the palette — `CouiPalette.kt`
 
-* it needs `su`, which only the app process reliably has;
-* `OverlayManagerService.commit()` enforces root-or-shell, otherwise it throws
-  `SecurityException: commit failed`.
+| slot | value |
+|---|---|
+| `…SingleFirstNormal` | the accent, opaque |
+| `…SingleFirstPressed` | accent ×0.78 (day) / ×0.88 (night) |
+| `…SingleFirstLightNormal` | accent at alpha `0x4C` (day) / `0x66` (night) |
+| `…SingleFirstLightPressed` | pressed at alpha `0x4C` |
+| `…SingleFirstTextHighLight` | accent at alpha `0x26` |
+| `…SingleFirstBarDisabledColor` | accent at alpha `0x26` |
 
-Slots currently covered:
+…each duplicated with an `NXcolor` prefix, written in the OEM's exact XML shape
+(`<?xml … standalone="yes" ?>`, `<resources>`, `#AARRGGBB` uppercase, **no trailing newline**).
+The alphas are taken from the OEM's own stub; the pressed step mirrors the Featured palette's
+`#FF848DC8 → #FF5662B3`. `Locale.US` in the formatter is load-bearing: under an Arabic locale the
+default formatter emits Arabic-Indic digits and the framework would parse garbage.
+
+Pure and Android-free, so it is unit-tested on the JVM (`CouiPaletteTest`, 8 tests).
+
+### 2. Publish it — `CouiAccentFix.kt`
+
+1. Read the accent from `Settings.Secure.theme_customization_overlay_packages`
+   (`android.theme.customization.accent_color` / `system_palette`, read through `su`).
+   Only fires when `color_source` ∈ `home_wallpaper | lock_wallpaper | photo | custom_image` —
+   **Featured presets are never touched**.
+2. Back the stock stubs up **once** to `/data/local/tmp/ae_uxcolor_stock` (marker file
+   `.ae_stock_v1` guards against ever backing up our own output).
+3. Write both stores: XML generated into the app cache dir, copied into place by a root shell,
+   then **verified against a locally computed MD5** — a silent half-write would be worse than a
+   failure. Permissions are restored to `root:root 644`.
+4. **Restart the running consumers.** A process keeps the palette it read at start, so nothing
+   re-tints in a live UI. Every package in `RESTART_PACKAGES` that is actually running
+   (`pidof` guard) is force-stopped; SystemUI is bounced with `pkill -TERM` so init brings it
+   back. On a cold device this step is a no-op — the palette simply applies as each app starts.
+5. Sweep the legacy `com.android.shell:aeCoui_*` overlays from the previous implementation
+   (disabled on sight), so upgrading leaves nothing behind.
+
+Running from the **app process** (`App.onCreate`) is deliberate: it needs `su`, and
+`OverlayManagerService.commit()` only accepts root/shell. A `ContentObserver` on the theme
+settings plus the app's own `PREF_CHANGED` broadcast re-apply within a second when the user
+picks a colour or flips the toggle — no reboot, no app relaunch.
+
+**Live trigger, verified on device**: writing `theme_customization_overlay_packages` while the
+app was running produced
 
 ```
-com.oneplus.calculator:color/fold_button_equals_bg_color
-com.oneplus.calculator:color/event_down_fold_button_img_equals
-com.oneplus.calculator:color/dialog_cancel
-com.android.settings:color/switch_outer_circle_color
-com.oplus.wirelesssettings:color/switch_outer_circle_color
-com.oneplus.filemanager:color/switch_outer_circle_color
+DIAG: CouiAccent re-apply (theme setting)
+DIAG: CouiAccent write day=true night=true (d43e87acdf997a8d44eee24719e580fc …)
+DIAG: CouiAccent re-applied #fff13871 (palette already current)
 ```
 
-The accent comes from `Settings.Secure.theme_customization_overlay_packages` →
-`android.theme.customization.accent_color` (read through `su`), and the fix only fires when
-`color_source` is a wallpaper-derived value — so **Featured presets are never touched**. When the
-user leaves the Custom path, previously created overlays are disabled automatically
-(self-healing), and overlays from an older accent are swept too.
+Note the third line: the write carried the value that was current by the time it arrived (the
+settings provider coalesces rapid writes, so a notification can be a few seconds late). That is
+harmless by construction — the apply is idempotent and always publishes the *newest* accent, and
+a value that has not actually changed skips the consumer restarts.
 
-Opt-out: prefs key `system_color_fix_enabled` (`"0"` disables). Absent = enabled — this is a
-fix, and an overlay is trivially reversible.
+### 3. Reversibility
 
-### 😱 The gotcha that cost the most time
+* Leaving the Custom path (or switching the fix off) restores the OEM stubs **verbatim** from
+  the backup, so the device can never be stranded on our values.
+* Opt-out: prefs key `system_color_fix_enabled` (`"0"` disables). Absent = enabled — this is a
+  fix, and it is trivially reversible.
+* `…_night.xml` is written too, so light/dark switching stays consistent.
 
-**`cmd overlay fabricate` must NOT have its stdout redirected to a file.**
+## Evidence trail (on device)
+
+1. **The channel is real.** With the app's fix *disabled* and every overlay off (`funTest` +
+   all six `aeCoui_*` = `[ ]`), rewriting `couiSingleFirstNormal` to `#FF00FFFF` turned
+   Calculator's `=` **cyan** — no overlay anywhere in the picture.
+2. **It generalises.** Same store, still no overlays: the Wi-Fi screen (hosted by
+   **`com.oplus.wirelesssettings`** — not `com.android.settings`) turned cyan on its ON toggle,
+   "Refresh" and "Add network". With the *real* accent written by this implementation, all of
+   those plus the connected-SSID icon and Calculator's `deg` label read **#F13871 pink**.
+3. **It is read at process start.** Changing the file under an open Wi-Fi screen changed
+   nothing until the process was force-stopped; after the restart it always picked the new
+   value up. Hence the restart step in the fix.
+4. **It survives.** Hours later the store still held our MD5 — the OEM's `com.oplus.uxdesign`
+   does not fight the write. (It does own the file, so a future OEM theme change can overwrite
+   it; the observer + the apply-on-start cover that.)
+5. **The end state carries no overlays**: `aeCoui_*` all `[ ]` — the new code sweeps them.
+
+## How to re-verify
 
 ```sh
-cmd overlay fabricate --target pkg --name n pkg:color/x 0x1c 0xffeeeeee >> log 2>&1   # FAILS
-cmd overlay fabricate --target pkg --name n pkg:color/x 0x1c 0xffeeeeee                # works
+# the store (root only: adb shell cannot even stat /data/oplus/uxres/…)
+su -c 'cat /data/oplus/uxres/uxcolor/ux_custom_color.xml'
+# the live log lines
+adb logcat -d -s Snapper:D | findstr /i couiaccent
+# overlays must all read [ ]
+adb shell cmd overlay list | findstr /i aecoui
 ```
 
-With a redirected stdout every call fails with
-`cmd: Failure calling service overlay: Failed transaction (2147483646)` — while
-`cmd overlay list`/`dump` keep working from the very same shell. The command ships the overlay
-through a file descriptor, so a redirected stdout breaks the binder call. `enable`/`lookup` fail
-the same way. Pipes are fine — hence `RootShell` capturing output via pipes works.
+Then open Calculator and Settings → Wi-Fi: `=`, `deg`, the ON toggle, "Refresh" and
+"Add network" should all match the picked colour.
 
-Other traps:
+## What was tried first and disproven (do not repeat)
 
-* Fabricated overlays are owned by the **caller** (`com.android.shell`), so the real name is
-  `com.android.shell:<name>`, never `<target>:<name>`.
-* `0x1c` is the resource type id for `ARGB8`; the value must be `0xAARRGGBB`.
-* A non-root caller gets `SecurityException: commit failed` — check the shell's uid first.
+| Lead | Result |
+|---|---|
+| Fabricated overlay on `com.oneplus.calculator:color/coui_color_primary_blue` | the overlay value **was** live per `cmd overlay lookup`, yet the `=` key stayed white — apps do not resolve `?attr/couiColorPrimary` through the palette colour |
+| OEM per-app theme RROs | **none exist** — the overlay dump has only display/navbar/fingerprint entries |
+| `Settings.Secure.sysui_type_accent_color` | SystemUI-only; it tints QS tiles and nothing else (kept as `SystemColorHook`) |
+| `/data/oplus/uxicons/<pkg>` | launcher *icon* theming (day/mat/monochrome PNGs), not accents |
+| Per-slot overlays (previous build `b26b8ce`) | worked, but whack-a-mole: one slot per broken widget (`fold_button_equals_bg_color`, `switch_outer_circle_color`, …) and it silently missed surfaces such as `deg` |
 
-## Verification (on device)
+### Test-harness trap worth remembering
 
-1. `cmd overlay lookup com.oneplus.calculator com.oneplus.calculator:color/fold_button_equals_bg_color`
-   → `#ffffffff` before, `#fff33586` after.
-2. Calculator `=` key: white → **pink**.
-3. `…settings:color/switch_outer_circle_color` → `#fff33586`; Wi-Fi ON toggle: white → **pink**.
-4. Logcat: `DIAG: CouiAccent applied 6/6 slots for #fff33586`, overlays
-   `com.android.shell:aeCoui_*` enabled.
+`RUN_AUDIT` **starts the app**, and `App.onCreate` applies the fix — so a root-script-driven
+colour test re-fabricates and re-enables the old overlays *while you are disabling them*. Always
+set `system_color_fix_enabled = 0` first and confirm every `aeCoui_*` reads `[ ]` before drawing
+conclusions. This cost a full cycle: a cyan `=` briefly looked like a discovery while it was
+really the previous RRO being switched back on by the app.
 
-## Extending to another app
+## Files
 
-1. Pull the APK and find its accent slots — colour resources whose value is
-   `?attr/couiColorPrimary`: `aapt2 dump resources app.apk`, then look for a `color/` resource
-   whose first value line is `?attr/couiColorPrimary`.
-2. If there are none, the app paints the attribute inline in a drawable/selector; trace from the
-   widget's layout (`aapt2 dump xmltree --file res/XX.xml app.apk`) down to the
-   `android:background` / `?attr` leaf and find the colour resource it lands on.
-3. Add `"<pkg>:color/<name>"` to `CouiAccentFix.SLOTS`.
+| File | Role |
+|---|---|
+| `CouiPalette.kt` | pure accent → 6-slot family + the OEM XML shape (unit-tested) |
+| `CouiAccentFix.kt` | root publish: backup, write, MD5 verify, restart consumers, legacy sweep |
+| `App.kt` | `install()` (observer + toggle receiver) then apply on process start |
+| `MainActivity.kt` | self-targeted `PREF_CHANGED` so the fix toggle applies live |
+| `hook/SystemColorHook.kt` | SystemUI-only `sysui_type_accent_color` companion |
+| `app/src/test/…/CouiPaletteTest.kt` | 8 JVM tests locking the palette + XML contract |
 
-Do **not** override on-accent *foreground* colours (e.g. `coui_btn_check_inner_color_on_normal`,
-`status_icon_chip_checked_text_color`) — those are drawn on top of the accent and must stay
-white.
+
