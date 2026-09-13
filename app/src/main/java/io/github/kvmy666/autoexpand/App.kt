@@ -19,7 +19,7 @@ class App : Application() {
     /**
      * OxygenOS "Custom colour" fix. Runs here rather than in the hooks because it needs `su`,
      * which only the app process reliably has — see [CouiAccentFix]. Off the main thread: it
-     * spawns several `su` shells and re-fabricates resource overlays.
+     * spawns several `su` shells and restarts the OEM apps that were already running.
      */
     private fun reapplyCouiAccentFix() {
         Thread {

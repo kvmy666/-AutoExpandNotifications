@@ -26,20 +26,18 @@ import java.util.Locale
  * the white placeholder baked into the APK. Calculator's `=` key, Settings' ON toggles, the
  * connected-Wi-Fi icon and My Files all render **white** while third-party apps tint fine.
  *
- * ## The channel (what the previous implementation got wrong)
- * The channel is not an RRO: this device has **no** OEM overlays for those apps at all, and
- * a fabricated overlay on the palette resource behind `couiColorPrimary` is ignored
- * (refuted on device). The channel is a plain, device-global **uxres colour store**:
+ * ## The channel
+ * It is **not** an overlay: there are no OEM RROs for those apps, and a fabricated overlay on
+ * the resource behind `couiColorPrimary` is ignored — both refuted on device, see
+ * `docs/system-color-fix.md`. It is a plain, device-global **uxres colour store**:
  *
  * ```
- * /data/oplus/uxres/uxcolor/ux_custom_color.xml        day   — written by com.oplus.uxdesign
- * /data/oplus/uxres/uxcolor/ux_custom_color_night.xml  night
+ * /data/oplus/uxres/uxcolor/ux_custom_color{,_night}.xml   (written by com.oplus.uxdesign)
  * ```
  *
  * `<color name="couiSingleFirstNormal">#FFFFFFFF</color>` is the white signature: the Custom
  * path leaves the whole `Single` family white. Rewriting that family with the user's accent
- * makes **every** app that consumes `couiColorPrimary` correct — no per-slot whack-a-mole,
- * nothing to enumerate, no overlay, and it covers apps we never heard of.
+ * fixes **every** `couiColorPrimary` consumer at once — nothing to enumerate, no overlay.
  *
  * ## The fix
  * On a Custom-path palette: derive the 6-slot `Single` family (see [CouiPalette]) and write
@@ -53,7 +51,7 @@ import java.util.Locale
  *    user is on a Featured preset or turns the fix off — the device can never get stuck with
  *    our values.
  *  * Overlays fabricated by the pre-uxres implementation (`com.android.shell:aeCoui_*`) are
- *    disabled on sight, so upgrading does not leave stale ones behind.
+ *    disabled once, so upgrading does not leave stale ones next to the palette.
  *  * Everything is wrapped: a failure is logged and stock behaviour is preserved.
  */
 object CouiAccentFix {
@@ -70,6 +68,9 @@ object CouiAccentFix {
     private const val PREF_GLOBAL_KEY = "ae_prefs_json"
     private const val PREF_LAST_ACCENT = "coui_accent_applied"
 
+    /** Set once the `aeCoui_*` migration sweep has run — after that it has nothing left to find. */
+    private const val PREF_LEGACY_SWEPT = "legacy_overlays_swept"
+
     /** The OEM's device-global Coui colour store. */
     private const val STORE_DIR = "/data/oplus/uxres/uxcolor"
     private const val DAY_FILE = "ux_custom_color.xml"
@@ -85,11 +86,8 @@ object CouiAccentFix {
     private const val ROOT_TIMEOUT_S = 25L
     private const val QUICK_TIMEOUT_S = 10L
 
-    /** `color_source` values meaning "derived from the user's own wallpaper" = the Custom path. */
-    private val CUSTOM_SOURCES = setOf("home_wallpaper", "lock_wallpaper", "photo", "custom_image")
-
-    /** Values that mean "the OEM never painted this accent". */
-    private val BLANK = setOf("ffffffff", "ffffff", "00000000")
+    // Which `color_source` values mean "Custom", and which accents are blank stubs, live in
+    // [CouiPalette.customAccent] — one implementation for both readers of the theme JSON.
 
     /**
      * Apps restarted after a palette change. Only the ones **actually running** are touched
@@ -187,7 +185,7 @@ object CouiAccentFix {
         }
 
     private fun applyInternal(ctx: Context, force: Boolean): String {
-        clearLegacyOverlays()
+        clearLegacyOverlays(ctx)
         if (!isEnabled(ctx)) {
             restoreStock(ctx)
             return "disabled — stock restored"
@@ -236,10 +234,15 @@ object CouiAccentFix {
 
     /**
      * Disables any `com.android.shell:aeCoui_*` overlay left behind by the pre-uxres
-     * implementation, so upgrading to this build removes the old per-slot patches instead of
-     * leaving them enabled next to the palette. Idempotent and cheap.
+     * implementation (commit `b26b8ce`), so upgrading removes the old per-slot patches instead
+     * of leaving them enabled next to the palette.
+     *
+     * Runs **once**, then the result is remembered: this build never fabricates such an overlay,
+     * so after the first sweep there is nothing left to find and a root `cmd overlay list` on
+     * every start would be pure cost.
      */
-    private fun clearLegacyOverlays() {
+    private fun clearLegacyOverlays(ctx: Context) {
+        if (state(ctx).getBoolean(PREF_LEGACY_SWEPT, false)) return
         try {
             val listed = RootShell.exec("cmd overlay list --user 0", QUICK_TIMEOUT_S)
             if (!listed.ok) return
@@ -248,12 +251,13 @@ object CouiAccentFix {
                 .filter { it.contains(LEGACY_OVERLAY_MARK) }
                 .map { it.substringAfter("com.android.shell:").trim() }
                 .filter { it.isNotEmpty() }
-                .forEach {
+                .forEach { name ->
                     RootShell.exec(
-                        "cmd overlay disable --user 0 com.android.shell:$it", QUICK_TIMEOUT_S
+                        "cmd overlay disable --user 0 com.android.shell:$name", QUICK_TIMEOUT_S
                     )
-                    Log.d(TAG, "DIAG: CouiAccent disabled legacy overlay $it")
+                    Log.d(TAG, "DIAG: CouiAccent disabled legacy overlay $name")
                 }
+            state(ctx).edit().putBoolean(PREF_LEGACY_SWEPT, true).apply()
         } catch (t: Throwable) {
             Log.d(TAG, "DIAG: CouiAccent legacy overlay sweep failed: $t")
         }
@@ -350,10 +354,10 @@ object CouiAccentFix {
     private const val ACCENT_STORE = "coui_accent"
 
     /**
-     * The Custom-path accent as `#aarrggbb`, or `null` when the active colour is not a
+     * The Custom-path accent as `#rrggbb`/`#aarrggbb`, or `null` when the active colour is not a
      * wallpaper-derived custom colour (i.e. the user picked a Featured preset). Read through
      * `su` so it works regardless of whether an app process may read this secure setting
-     * directly. Never throws.
+     * directly. The rules live in [CouiPalette.customAccent]. Never throws.
      */
     private fun customAccent(): String? {
         return try {
@@ -362,19 +366,11 @@ object CouiAccentFix {
             val raw = res.output.trim()
             if (raw.isEmpty() || raw == "null") return null
             val json = JSONObject(raw)
-            val source = json.optString("android.theme.customization.color_source", "")
-            if (source !in CUSTOM_SOURCES) {
-                Log.d(TAG, "DIAG: CouiAccent not a custom source (color_source=$source)")
-                return null
-            }
-            val hex = json.optString("android.theme.customization.accent_color", "")
-                .ifEmpty { json.optString("android.theme.customization.system_palette", "") }
-                .removePrefix("#")
-                .lowercase(Locale.US)
-            if (hex.length != 6 && hex.length != 8) return null
-            if (!hex.all { it.isDigit() || it in 'a'..'f' }) return null
-            if (hex in BLANK) return null
-            "#$hex"
+            CouiPalette.customAccent(
+                source = json.optString("android.theme.customization.color_source", ""),
+                accentColor = json.optString("android.theme.customization.accent_color", ""),
+                systemPalette = json.optString("android.theme.customization.system_palette", "")
+            )
         } catch (t: Throwable) {
             Log.d(TAG, "DIAG: CouiAccent palette read failed: $t")
             null
@@ -404,18 +400,21 @@ object CouiAccentFix {
         }
     }
 
-    private fun lastAccent(ctx: Context): String? =
+    /** The small state store this fix owns: last published accent + migration markers. */
+    private fun state(ctx: Context) =
         ctx.getSharedPreferences(ACCENT_STORE, Context.MODE_PRIVATE)
-            .getString(PREF_LAST_ACCENT, null)
+
+    private fun lastAccent(ctx: Context): String? =
+        state(ctx).getString(PREF_LAST_ACCENT, null)
 
     private fun rememberAccent(ctx: Context, accent: String) {
-        ctx.getSharedPreferences(ACCENT_STORE, Context.MODE_PRIVATE).edit()
+        state(ctx).edit()
             .putString(PREF_LAST_ACCENT, accent.lowercase(Locale.US))
             .apply()
     }
 
     private fun forgetAccent(ctx: Context) {
-        ctx.getSharedPreferences(ACCENT_STORE, Context.MODE_PRIVATE).edit()
+        state(ctx).edit()
             .remove(PREF_LAST_ACCENT)
             .apply()
     }

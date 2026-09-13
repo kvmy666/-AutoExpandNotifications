@@ -249,13 +249,36 @@ and `"wallpaperColorInfo":{"wallpaperColorDark":…,"wallpaperColorLight":…,"w
 * The device sleeps/drops often; reconnect with `adb connect 192.168.100.229:6666`.
 * `adb shell` has **no `su`**; root is reachable only through the app's RUN_AUDIT receiver.
 
+## 🧹 Cleanup pass (after the fix, 2026-09-13)
+
+The fix landed first; then the code that only made sense under the *old* theories was removed.
+
+* **The legacy overlay sweep is now one-shot** (`PREF_LEGACY_SWEPT`, in the fix's own small prefs
+  file). It used to run a root `cmd overlay list --user 0` on **every** apply — i.e. on every app
+  start — looking for `aeCoui_*` overlays that only the unreleased `b26b8ce` build ever created.
+* **One implementation of the theme rules.** `CouiPalette.customAccent(source, accentColor,
+  systemPalette)` and `CouiPalette.isBlankAccent(value)` replaced the hand-copied parsing and the two
+  separate "blank accent" sets in `CouiAccentFix` and `hook/SystemColorHook`. Behaviour is identical;
+  the SystemUI copy quietly gains the locale-safe lowercase and the `null` guard the app side had.
+* **Two stale comments corrected** — `App.kt` still claimed the fix "re-fabricates resource overlays",
+  and `SystemColorHook`'s header still asserted the disproven "the type accent is the whole
+  difference" theory.
+* **Tests: 8 → 10**, all green (`customAccent` rules + `isBlankAccent`). One of the two new tests
+  failed on its first run because the *expectation* was wrong, not the code: the accent keeps the 6- or
+  8-digit shape it was given, and `parseArgb` reads either.
+* **≈250 MB of device dumps deleted** from `.local/syscolor/` (the pulled `Settings.apk` and
+  `Calculator2.apk` copies plus two screenshots). The text evidence — `calc-res.txt`,
+  `overlays.txt` — is kept; nothing in the repo references any of it, and the dumps are re-pullable.
+* **New doc:** `docs/how-the-color-fix-works.html`, the beginner-friendly waterfall write-up.
+
+Deliberately **not** changed: `SystemColorHook`'s default. The app-side fix treats "pref absent" as
+enabled, the SystemUI companion stays quiet until the pref says otherwise; the header now states that
+difference instead of pretending there is none.
+
+Not part of this pass (pre-existing, unrelated to colours): the heartbeat `EACCES` log spam.
+
 ## 📋 Remaining work
 
-- [ ] Run the root probe → find the OEM resource list / disabled overlay.
-- [ ] Test whether a funnel-colour override (`coui_theme_primary_color`) cascades at all.
-- [ ] Implement the **one function**: one universal slot-name set (shared across the COUI library)
-      applied to every Oplus package, with **role → system palette** mapping (primary / container /
-      secondary / tertiary / neutral). Never one flat pink.
-- [ ] Force-stop strategy so changes appear without a reboot.
-- [ ] In-app toggle UI for `system_color_fix_enabled`; heartbeat `EACCES` spam; rewrite
-      `docs/system-color-fix.md`; commit.
+None for the colour fix. Everything this list used to hold is done and verified on device: the
+force-stop strategy (`restartConsumers`, `pidof`-guarded), the in-app toggle
+(`SettingsScreens` → `system_color_fix_enabled`, default on) and the rewritten docs.

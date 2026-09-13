@@ -6,30 +6,30 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
+import io.github.kvmy666.autoexpand.CouiPalette
 import org.json.JSONObject
 
 /**
- * OxygenOS / ColorOS "Custom color" fix — turns the white accents that system apps show
- * back into the colour the user actually picked. Opt-in (`system_color_fix_enabled`, OFF).
+ * OxygenOS / ColorOS "Custom color" fix — the **SystemUI half**.
  *
- * THE BUG (OxygenOS 16, CPH2747 / OOS 16.x)
- * Settings → Wallpapers & style → Colors has two paths:
- *   • Featured / preset colours → the OEM writes `Settings.Secure.sysui_type_accent_color`
- *     to a real colour (e.g. `#ff247cff`) and every surface tints correctly.
- *   • Custom (from wallpaper)  → the framework Monet palette IS written correctly (that is
- *     why third-party apps tint fine), but `sysui_type_accent_color` is left at `#ffffffff`.
- * The "type accent" is what system surfaces tint from — Settings' ON toggles and the
- * connected-Wi-Fi icon, My Files, Calculator, and SystemUI's own accent — so they all render
- * white. Featured writes it, Custom never does: that is the whole difference.
+ * The bug and its real mechanism belong to [io.github.kvmy666.autoexpand.CouiAccentFix]: on the
+ * Custom (from wallpaper) path the OEM never paints the device-global **uxres colour store**, so
+ * every `?attr/couiColorPrimary` consumer renders white. That store is what makes system apps
+ * tint. This hook is the SystemUI-side companion: it mirrors the same palette into SystemUI's
+ * *type accent*, `Settings.Secure.sysui_type_accent_color`, which the Custom path also leaves at
+ * `#ffffffff` (Featured presets write a real value there). It tints QS tiles and little else — a
+ * companion to the fix, not the fix. See `docs/system-color-fix.md`.
  *
- * THE FIX
- * While enabled: if a wallpaper-derived ("Custom") palette is active and the stored
- * `sysui_type_accent_color` is missing/white, mirror the palette colour
- * (`theme_customization_overlay_packages.accent_color`) into it. Preset/Featured colours are
- * never touched — we only fire on the exact broken signature.
+ * While enabled, if a wallpaper-derived palette is active and the stored value is still the
+ * blank signature, the palette colour is mirrored into it. Featured presets are never touched —
+ * we only fire on the exact broken signature.
  *
- * Runs inside the already-scoped `com.android.systemui` process: no new LSPosed scope, no
- * `su`. Everything is wrapped — a failure is silent and stock behaviour is preserved.
+ * Runs inside the already-scoped `com.android.systemui` process: no new LSPosed scope, no `su`.
+ * Everything is wrapped — a failure is silent and stock behaviour is preserved.
+ *
+ * The default differs from the app-side publisher on purpose: that one treats "pref absent" as
+ * enabled (it repairs a broken OEM path), while this hook stays quiet until the pref says
+ * otherwise, so a stock install never writes a system setting it did not have to.
  */
 class SystemColorHook(private val prefs: PrefsBridge) {
 
@@ -39,12 +39,6 @@ class SystemColorHook(private val prefs: PrefsBridge) {
         const val KEY_TYPE_ACCENT = "sysui_type_accent_color"
         const val KEY_THEME_OVERLAY = "theme_customization_overlay_packages"
         const val KEY_COLOR_THEME_SETTING = "color_theme_setting"
-
-        /** `color_source` values meaning "derived from the user's own wallpaper" = the Custom path. */
-        val CUSTOM_SOURCES = setOf("home_wallpaper", "lock_wallpaper", "photo", "custom_image")
-
-        /** Values that mean "the OEM never wrote a real accent" (the bug signature). */
-        val BLANK_ACCENTS = setOf("#ffffffff", "#ffffff", "ffffffff", "ffffff", "#00000000")
     }
 
     private val handler by lazy { Handler(Looper.getMainLooper()) }
@@ -76,7 +70,7 @@ class SystemColorHook(private val prefs: PrefsBridge) {
             // No wallpaper-derived palette → Featured/preset is active: never touch it.
             if (desired == null) return
             // The OEM already wrote a real colour — nothing to repair.
-            if (!isBlankAccent(current)) return
+            if (!CouiPalette.isBlankAccent(current)) return
             Settings.Secure.putString(cr, KEY_TYPE_ACCENT, desired)
             Log.d(TAG, "DIAG: SystemColor FIXED $KEY_TYPE_ACCENT -> $desired (was $current)")
         } catch (t: Throwable) {
@@ -87,35 +81,23 @@ class SystemColorHook(private val prefs: PrefsBridge) {
     // ── Palette reading ───────────────────────────────────────────────────────────
 
     /**
-     * The Custom-path accent as `#aarrggbb`, or null when the active colour is not a
-     * wallpaper-derived custom colour. Never throws.
+     * The Custom-path accent as `#rrggbb`/`#aarrggbb`, or null when the active colour is not a
+     * wallpaper-derived custom colour. Rules live in [CouiPalette.customAccent], shared with the
+     * app-side publisher. Never throws.
      */
     private fun customAccent(cr: android.content.ContentResolver): String? {
         return try {
             val raw = Settings.Secure.getString(cr, KEY_THEME_OVERLAY) ?: return null
             val json = JSONObject(raw)
-            val source = json.optString("android.theme.customization.color_source", "")
-            if (source !in CUSTOM_SOURCES) {
-                Log.d(TAG, "DIAG: SystemColor not a custom source (color_source=$source)")
-                return null
-            }
-            val hex = json.optString("android.theme.customization.accent_color", "")
-                .ifEmpty { json.optString("android.theme.customization.system_palette", "") }
-            val rgb = hex.removePrefix("#")
-            // Only accept a plain 6- or 8-digit hex colour.
-            if (rgb.length != 6 && rgb.length != 8) return null
-            if (!rgb.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) return null
-            if (isBlankAccent("#$rgb")) return null
-            "#" + rgb.lowercase()
+            CouiPalette.customAccent(
+                source = json.optString("android.theme.customization.color_source", ""),
+                accentColor = json.optString("android.theme.customization.accent_color", ""),
+                systemPalette = json.optString("android.theme.customization.system_palette", "")
+            )
         } catch (t: Throwable) {
             Log.d(TAG, "DIAG: SystemColor palette read failed: $t")
             null
         }
-    }
-
-    private fun isBlankAccent(value: String?): Boolean {
-        if (value.isNullOrBlank()) return true
-        return value.trim().lowercase() in BLANK_ACCENTS
     }
 
     // ── Live updates ──────────────────────────────────────────────────────────────

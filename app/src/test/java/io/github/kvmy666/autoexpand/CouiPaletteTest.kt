@@ -101,4 +101,33 @@ class CouiPaletteTest {
         assertEquals("#FF212DAF", CouiPalette.format(0xFF212DAF.toInt()))
         assertEquals("#26F13871", CouiPalette.format(CouiPalette.withAlpha(pink, 0x26)))
     }
+
+    @Test
+    fun `custom accent only accepts the Custom path, never a blank stub`() {
+        // The accent keeps the shape it was given: 8-digit stays 8-digit (`parseArgb` reads both).
+        assertEquals("#fff13871", CouiPalette.customAccent("home_wallpaper", "FFF13871", ""))
+        assertEquals("#f13871", CouiPalette.customAccent("lock_wallpaper", "#F13871", "FF000000"))
+        // accent_color empty ⇒ fall back to system_palette (the case that cost a debug cycle).
+        assertEquals("#ff212daf", CouiPalette.customAccent("photo", "", "FF212DAF"))
+
+        // Featured/preset colours are none of our business.
+        assertNull(CouiPalette.customAccent("featured", "FFF13871", ""))
+        assertNull(CouiPalette.customAccent("", "FFF13871", ""))
+        // Blank stubs are the bug, not a colour.
+        assertNull(CouiPalette.customAccent("home_wallpaper", "FFFFFFFF", ""))
+        assertNull(CouiPalette.customAccent("home_wallpaper", "00000000", ""))
+        assertNull(CouiPalette.customAccent("home_wallpaper", "", ""))
+        assertNull(CouiPalette.customAccent("home_wallpaper", "not-a-colour", ""))
+    }
+
+    @Test
+    fun `blank accent covers missing, white and transparent placeholders`() {
+        assertTrue(CouiPalette.isBlankAccent(null))
+        assertTrue(CouiPalette.isBlankAccent(""))
+        assertTrue(CouiPalette.isBlankAccent("#ffffffff"))
+        assertTrue(CouiPalette.isBlankAccent("  #FFFFFFFF  "))
+        assertTrue(CouiPalette.isBlankAccent("00000000"))
+        assertTrue(!CouiPalette.isBlankAccent("#f13871"))
+        assertTrue(!CouiPalette.isBlankAccent("FFF13871"))
+    }
 }

@@ -77,6 +77,42 @@ object CouiPalette {
         "couiSingleFirstBarDisabledColor"
     )
 
+    /** `color_source` values meaning "derived from the user's own wallpaper" = the Custom path. */
+    val CUSTOM_SOURCES = setOf("home_wallpaper", "lock_wallpaper", "photo", "custom_image")
+
+    /** Accent values that mean "the OEM never painted this slot" — the white signature. */
+    private val BLANK_ACCENTS = setOf("ffffffff", "ffffff", "00000000")
+
+    /**
+     * `true` when [value] is missing or is one of the placeholders the OEM's Custom path leaves
+     * behind (`#ffffffff`). Covers both the accent in the theme JSON and the accent stored in a
+     * system setting, so "blank" means the same thing everywhere in this fix.
+     */
+    fun isBlankAccent(value: String?): Boolean {
+        val hex = value?.trim()?.removePrefix("#")?.lowercase(Locale.US) ?: return true
+        return hex.isEmpty() || hex in BLANK_ACCENTS
+    }
+
+    /**
+     * Reads the accent out of the two `theme_customization_overlay_packages` fields that can
+     * carry it, and returns it as `#rrggbb`/`#aarrggbb` (lowercase) — or `null` when the active
+     * colour is a Featured preset, a blank stub, or not a colour at all.
+     *
+     * Both readers of that JSON go through here — [CouiAccentFix] in the app process and the
+     * SystemUI companion (`hook/SystemColorHook`) — so the two can never drift apart. Pure
+     * strings: no `org.json`, no Android; the callers extract the fields.
+     */
+    fun customAccent(source: String, accentColor: String, systemPalette: String): String? {
+        if (source !in CUSTOM_SOURCES) return null
+        val hex = accentColor.ifEmpty { systemPalette }
+            .removePrefix("#")
+            .lowercase(Locale.US)
+        if (hex.length != 6 && hex.length != 8) return null
+        if (!hex.all { it.isDigit() || it in 'a'..'f' }) return null
+        if (isBlankAccent(hex)) return null
+        return "#$hex"
+    }
+
     /**
      * Parses `#rrggbb`, `rrggbb`, `#aarrggbb` or `aarrggbb` (any case) into ARGB, or returns
      * `null` when the string is not a colour. A 6-digit colour is taken as opaque, which is

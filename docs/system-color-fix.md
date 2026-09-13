@@ -5,6 +5,10 @@ Device of record: **OnePlus CPH2747, OxygenOS 16**. Status: **fixed & verified o
 "Refresh", "Add network" and the connected-network icon, with **no resource overlays in play at
 all** (`cmd overlay list` shows every `aeCoui_*` entry as `[ ]`).
 
+**New to this bug?** Read `docs/how-the-color-fix-works.html` first — the same story told as a
+waterfall (requirements → analysis → design → implementation → testing → deployment →
+maintenance), written for someone who has never seen the code.
+
 ## Symptom
 
 Settings → Wallpapers & style → Colors → **Custom** (colour picked from the wallpaper):
@@ -187,11 +191,12 @@ really the previous RRO being switched back on by the app.
 
 | File | Role |
 |---|---|
-| `CouiPalette.kt` | pure accent → 6-slot family + the OEM XML shape (unit-tested) |
-| `CouiAccentFix.kt` | root publish: backup, write, MD5 verify, restart consumers, legacy sweep |
+| `CouiPalette.kt` | pure palette maths + the shared Custom-path rules (`customAccent`, `isBlankAccent`) and the OEM XML shape (unit-tested) |
+| `CouiAccentFix.kt` | root publish: backup, write, MD5 verify, restart consumers, one-shot legacy sweep, live triggers |
 | `App.kt` | `install()` (observer + toggle receiver) then apply on process start |
 | `MainActivity.kt` | self-targeted `PREF_CHANGED` so the fix toggle applies live |
-| `hook/SystemColorHook.kt` | SystemUI-only `sysui_type_accent_color` companion |
-| `app/src/test/…/CouiPaletteTest.kt` | 8 JVM tests locking the palette + XML contract |
+| `hook/SystemColorHook.kt` | SystemUI-only `sysui_type_accent_color` companion (shares `CouiPalette.customAccent`) |
+| `app/src/test/…/CouiPaletteTest.kt` | 10 JVM tests locking the palette, the theme rules and the XML contract |
+| `docs/how-the-color-fix-works.html` | beginner-friendly waterfall walkthrough of the whole investigation |
 
 

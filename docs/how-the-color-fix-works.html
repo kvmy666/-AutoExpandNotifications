@@ -1,0 +1,1038 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How the OxygenOS "Custom color" fix works — a waterfall walkthrough</title>
+<style>
+  :root{
+    --accent:#F13871;          /* the accent this whole document is about */
+    --accent-soft:#fde6ee;
+    --ink:#17141c; --muted:#605a6b; --bg:#f7f5f9; --card:#fff; --line:#e5e0ea;
+    --code-bg:#1d1a24; --code-ink:#eae7f1;
+    --ok:#0d8a4f; --ok-soft:#e6f6ed;
+    --warn:#a4620a; --warn-soft:#fdf3e2;
+    --bad:#b3241f; --bad-soft:#fdeceb;
+    --info:#2b5fb0; --info-soft:#eaf1fb;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1000px;margin:0 auto;padding:0 20px 72px}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code,kbd,pre{font-family:"Cascadia Mono",Consolas,"SF Mono",Menlo,monospace}
+  :not(pre)>code{
+    background:#f0ecf3;border:1px solid var(--line);border-radius:4px;
+    padding:.08em .34em;font-size:.88em;white-space:nowrap;
+  }
+  header.hero{
+    background:
+      radial-gradient(1100px 420px at 8% -30%, #ffe3ec 0%, rgba(255,255,255,0) 62%),
+      linear-gradient(180deg,#fff 0%, #fdfbfd 100%);
+    border-bottom:1px solid var(--line);
+    padding:56px 0 40px;
+  }
+  header.hero .wrap{padding-bottom:0}
+  .eyebrow{
+    display:inline-block;font-size:.74rem;letter-spacing:.14em;text-transform:uppercase;
+    font-weight:700;color:var(--accent);background:var(--accent-soft);
+    border-radius:999px;padding:6px 13px;margin-bottom:18px;
+  }
+  h1{font-size:clamp(1.75rem,4.4vw,2.6rem);line-height:1.16;margin:0 0 14px;letter-spacing:-.02em}
+  .lede{font-size:1.06rem;color:var(--muted);max-width:70ch;margin:0}
+  .meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:22px}
+  .chip{
+    font-size:.78rem;background:#fff;border:1px solid var(--line);border-radius:999px;
+    padding:5px 12px;color:var(--muted)
+  }
+  .chip b{color:var(--ink)}
+  section{margin-top:46px}
+  h2{font-size:1.38rem;letter-spacing:-.01em;margin:0 0 6px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  h2 .num{
+    flex:0 0 auto;width:34px;height:34px;border-radius:10px;background:var(--accent);color:#fff;
+    font-size:.95rem;font-weight:700;display:grid;place-items:center
+  }
+  h3{font-size:1.06rem;margin:28px 0 8px}
+  h4{font-size:.95rem;margin:20px 0 6px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+  .sub{color:var(--muted);margin:0 0 16px}
+  .card{
+    background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px 24px;
+    margin:16px 0;box-shadow:0 1px 2px rgba(23,20,28,.03)
+  }
+  .card.phase{border-left:4px solid var(--accent)}
+  .iog{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin:14px 0 4px}
+  .iog div{background:#faf8fb;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:.88rem}
+  .iog b{display:block;font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+  .callout{border-radius:12px;padding:14px 16px;margin:16px 0;font-size:.94rem;border:1px solid}
+  .callout p{margin:.4em 0}
+  .note{background:var(--info-soft);border-color:#cfe0f7}
+  .warn{background:var(--warn-soft);border-color:#f2ddb8}
+  .bug{background:var(--bad-soft);border-color:#f5cdcb}
+  .win{background:var(--ok-soft);border-color:#c8e9d6}
+  .backflow{background:#f3eefb;border-color:#ded1f2}
+  pre{
+    background:var(--code-bg);color:var(--code-ink);border-radius:12px;padding:16px 18px;
+    overflow-x:auto;font-size:.85rem;line-height:1.55;margin:14px 0
+  }
+  pre .c{color:#8b8398}
+  pre .k{color:#ff9ec4}
+  pre .s{color:#a8e6a3}
+  pre .v{color:#ffd479}
+  pre .cmd{color:#8fd3ff}
+  .filetag{
+    display:inline-block;font-size:.74rem;letter-spacing:.05em;text-transform:uppercase;
+    background:#f0ecf3;border:1px solid var(--line);border-bottom:none;
+    border-radius:8px 8px 0 0;padding:5px 11px;color:var(--muted);margin-bottom:-1px
+  }
+  .filetag+pre{border-radius:0 12px 12px 12px;margin-top:0}
+  .waterfall{list-style:none;padding:0;margin:22px 0}
+  .waterfall li{position:relative;padding:0 0 24px 34px}
+  .waterfall li:before{content:"";position:absolute;left:11px;top:8px;bottom:-4px;width:2px;background:var(--line)}
+  .waterfall li:last-child:before{display:none}
+  .waterfall li .dot{
+    position:absolute;left:2px;top:4px;width:20px;height:20px;border-radius:50%;
+    background:#fff;border:2px solid var(--accent);color:var(--accent);
+    font-size:.7rem;font-weight:700;display:grid;place-items:center
+  }
+  .waterfall b{display:block}
+  .waterfall span{color:var(--muted);font-size:.92rem}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.9rem}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#faf8fb;font-size:.74rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+  tbody tr:hover{background:#fdfbfd}
+  .shots{display:grid;gap:18px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));margin:18px 0}
+  figure{margin:0;background:#fff;border:1px solid var(--line);border-radius:12px;padding:10px}
+  figure img{width:100%;height:auto;display:block;border-radius:8px;background:#000}
+  figcaption{font-size:.82rem;color:var(--muted);margin-top:8px}
+  details.deep{background:#faf8fb;border:1px dashed var(--line);border-radius:10px;padding:10px 14px;margin:14px 0;font-size:.93rem}
+  details.deep summary{cursor:pointer;font-weight:600;color:var(--info)}
+  details.deep[open] summary{margin-bottom:8px}
+  dl.glossary{margin:16px 0;display:grid;gap:12px}
+  dl.glossary div{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  dl.glossary dt{font-weight:700}
+  dl.glossary dd{margin:4px 0 0;color:var(--muted);font-size:.92rem}
+  .toc{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(235px,1fr));margin:18px 0}
+  .toc a{background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:.9rem;display:flex;gap:8px;align-items:baseline}
+  .toc a b{color:var(--accent);font-size:.8rem;flex:0 0 auto}
+  hr{border:none;border-top:1px solid var(--line);margin:38px 0}
+  footer{color:var(--muted);font-size:.85rem;margin-top:44px;text-align:center}
+  @media print{
+    body{background:#fff}
+    .card,figure,details.deep{break-inside:avoid}
+    header.hero{background:#fff}
+  }
+</style>
+</head>
+<body>
+<h2 id="toc" style="margin-top:34px">What is in this document</h2>
+<p class="sub">Read it top to bottom the first time: each phase feeds the next. Everything here is also
+checkable — the last section has the exact commands to reproduce it.</p>
+<div class="toc">
+  <a href="#bug60"><b>0</b> The bug in sixty seconds</a>
+  <a href="#waterfall"><b>0.5</b> The waterfall at a glance</a>
+  <a href="#p1"><b>1</b> Requirements — what “fixed” has to mean</a>
+  <a href="#p2"><b>2</b> Analysis — how a colour gets to a button</a>
+  <a href="#p2b"><b>2b</b> The two theories that died</a>
+  <a href="#p3"><b>3</b> Design — one file, twelve slots, reversible</a>
+  <a href="#p4"><b>4</b> Implementation — read, generate, write, restart</a>
+  <a href="#p5"><b>5</b> Testing — unit tests, then a real phone</a>
+  <a href="#p6"><b>6</b> Deployment — ship it, roll it back</a>
+  <a href="#p7"><b>7</b> Maintenance — night mode and OEM updates</a>
+  <a href="#glossary"><b>G</b> Glossary for beginners</a>
+  <a href="#verify"><b>✓</b> Verify it yourself</a>
+</div>
+
+<section id="bug60">
+  <h2>The bug in sixty seconds</h2>
+  <p class="sub">If you remember one thing from this page, make it this one.</p>
+  <div class="card">
+    <p>Apps do not hard-code their colours. A key that should be “the accent colour” is written as a
+    <strong>reference</strong> — something like <code>?attr/couiColorPrimary</code>. In plain English that reference says:</p>
+    <blockquote style="margin:14px 0;padding:10px 16px;border-left:3px solid var(--accent);color:var(--muted)">
+      “Paint me in whatever the <em>accent colour</em> is at the moment. I do not know what it is.”
+    </blockquote>
+    <p>Something in the system has to answer that question. OxygenOS has two ways of filling in the answer:</p>
+    <table>
+      <thead><tr><th>You pick…</th><th>What the OEM writes</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>a <strong>Featured</strong> colour (a preset from the list)</td>
+          <td>a complete, real palette</td>
+          <td>everything tints correctly</td>
+        </tr>
+        <tr>
+          <td>a <strong>Custom</strong> colour (built from your wallpaper)</td>
+          <td>a stub whose accent slot is literally <code>#FFFFFFFF</code> — pure white</td>
+          <td>white <code>=</code> key, white toggles, white Wi‑Fi icon</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>The phone is not <em>failing</em> to tint. It is tinting white <em>because that is the answer it
+    was given</em>. So the fix is to correct the answer, not to repaint widgets one by one.</p>
+  </div>
+
+  <div class="shots">
+    <figure>
+      <img src="../screenshots/color-fix-calculator.png" alt="Calculator with a pink equals key and a pink deg label">
+      <figcaption>Calculator after the fix — the <code>=</code> key <em>and</em> the little <code>deg</code> label use the pink accent.</figcaption>
+    </figure>
+    <figure>
+      <img src="../screenshots/color-fix-wifi-toggle.png" alt="Wi-Fi row with a pink toggle">
+      <figcaption>The Wi‑Fi switch: a <em>control</em> painted from the same reference.</figcaption>
+    </figure>
+    <figure>
+      <img src="../screenshots/color-fix-wifi-link.png" alt="The Add network link, drawn in pink">
+      <figcaption>…and a plain <em>text link</em>, which a widget-by-widget fix reliably misses.</figcaption>
+    </figure>
+  </div>
+
+  <div class="callout win">
+    <p><b>The one-sentence version.</strong></p>
+    <p>Three system files hold the answer sheet the OEM forgot to fill in; the fix writes the user's
+    colour into them, once, as root — and it can put the originals back at any time.</p>
+  </div>
+</section>
+<section id="waterfall">
+  <h2>The waterfall at a glance</h2>
+  <p class="sub">Seven phases. Each one takes the previous phase's output, produces something new, and
+  must pass a <em>gate</em> before the next phase may start. This is why the method is called a waterfall:
+  the work flows downwards and, in the classic version, never back up.</p>
+  <div class="card">
+    <ol class="waterfall">
+      <li><span class="dot">1</span><b>Requirements</b><span>What “fixed” must mean, in terms a phone can be checked against.</span></li>
+      <li><span class="dot">2</span><b>Analysis</b><span>Find the real mechanism. Measure, do not guess: two theories died here.</span></li>
+      <li><span class="dot">3</span><b>Design</b><span>Decide the shape of the change: one file, twelve slots, fully reversible.</span></li>
+      <li><span class="dot">4</span><b>Implementation</b><span>Write the code: read the colour, generate XML, write as root, restart consumers.</span></li>
+      <li><span class="dot">5</span><b>Testing</b><span>Unit tests on the maths, then evidence from the actual phone.</span></li>
+      <li><span class="dot">6</span><b>Deployment</b><span>Ship it with an off switch and a documented way back to stock.</span></li>
+      <li><span class="dot">7</span><b>Maintenance</b><span>Night mode, OEM updates, and the list of ideas already proven wrong.</span></li>
+    </ol>
+    <div class="callout backflow">
+      <p><b>The honest footnote about waterfall.</b></p>
+      <p>Real debugging is never a clean cascade: this fix went 2&nbsp;→&nbsp;4&nbsp;→&nbsp;back&nbsp;to&nbsp;2 twice
+      before it worked. The chapters below still follow the waterfall order, because that is the easiest way to
+      explain <em>why</em> each step exists — but every “backflow” box marks a place where the theory had to be
+      revised. Those boxes are the most educational part of the document.</p>
+    </div>
+  </div>
+</section>
+
+<section id="p1">
+  <h2><span class="num">1</span> Requirements — what “fixed” must mean</h2>
+  <p class="sub">Phase output: a checklist. Not “make the accent work”, which cannot be tested, but six
+  statements a stranger could verify on the phone in five minutes.</p>
+  <div class="card phase">
+    <div class="iog">
+      <div><b>Input</b>A user complaint: “with a Custom colour, system apps show white accents.”</div>
+      <div><b>Output</b>Six acceptance criteria (below) + the two things that are explicitly out of scope.</div>
+      <div><b>Gate</b>Every criterion must be observable by a human looking at the screen, or by one shell command.</div>
+    </div>
+
+    <h3>The six criteria</h3>
+    <table>
+      <thead><tr><th>#</th><th>Requirement</th><th>How it is checked</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>The chosen Custom accent appears on <strong>every</strong> surface that uses the accent reference — not just the obvious one.</td><td>Calculator's <code>=</code>, its <code>deg</code> label, Wi‑Fi's toggle, its “Add network” link, its connected‑network icon, and Settings' ON toggles all show the accent.</td></tr>
+        <tr><td>2</td><td><strong>Featured</strong> presets are never touched. The OEM's own path keeps ownership of it.</td><td>Pick a preset ⇒ the OEM value is back, byte for byte.</td></tr>
+        <tr><td>3</td><td><strong>Fully reversible.</strong> No state that only a factory reset can undo.</td><td>The original files are copied aside first and restored on demand.</td></tr>
+        <tr><td>4</td><td><strong>No new overlays.</strong> The previous attempt needed one per broken widget — unbounded work.</td><td><code>cmd overlay list</code> shows nothing of ours in play.</td></tr>
+        <tr><td>5</td><td><strong>No special app scope.</strong> Whatever runs must not need a new LSPosed scope or a per‑app hook.</td><td>The work happens in one process (the app itself) with <code>su</code>.</td></tr>
+        <tr><td>6</td><td><strong>Survives normal use</strong> — light/dark switching, reboots, picking a new colour.</td><td>Night file written too; the fix re‑applies when the colour changes.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Explicitly out of scope</h3>
+    <ul>
+      <li><strong>Third‑party apps.</strong> They already tint correctly — they use the standard Material‑You
+      palette, which the Custom path does fill in. Only the OEM's own “Coui” channel is broken.</li>
+      <li><strong>Making the OEM’s Settings app show our fix.</strong> The accent is read when an app process
+      starts, so an already‑running app keeps its old colour until it is restarted. We accept that, and hide it
+      by restarting the affected apps for the user.</li>
+    </ul>
+
+    <div class="callout note">
+      <p><b>Why writing requirements first actually mattered here.</b></p>
+      <p>Criterion&nbsp;2 (never touch Featured) and criterion&nbsp;3 (reversible) are the reason the final
+      implementation keeps a <em>backup of the OEM's original files</em>. Without them on paper, the tempting
+      shortcut — “just write our colour and be done” — would have left a phone that could never return to stock.</p>
+    </div>
+  </div>
+</section>
+<section id="p2">
+  <h2><span class="num">2</span> Analysis — how a colour gets to a button</h2>
+  <p class="sub">Phase output: the <em>actual</em> mechanism, proven by measurement. Here guesses are cheap and
+  truth is expensive, so the rule is: one theory at a time, each falsifiable by a single command.</p>
+
+  <div class="card phase">
+    <div class="iog">
+      <div><b>Input</b>“System apps show white accents on the Custom path.”</div>
+      <div><b>Output</b>The file that holds the answer, plus proof that writing it changes the screen.</div>
+      <div><b>Gate</b>Predict the result of a test <em>before</em> running it, then confirm it. A theory that
+      “sort of works” is not accepted.</div>
+    </div>
+
+    <h3>Background: four words you need</h3>
+    <p>None of this is OxygenOS-specific; it is how Android resources have worked for years.</p>
+    <table>
+      <thead><tr><th>Word</th><th>What it means</th><th>Analogy</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Resource</strong></td>
+          <td>Colours, strings, sizes and images are compiled into the APK under a name, e.g.
+          <code>color/coui_color_primary_blue</code>. The app asks for the name, never for a number.</td>
+          <td>A labelled drawer in a kitchen.</td>
+        </tr>
+        <tr>
+          <td><strong>Theme attribute</strong> (<code>?attr/…</code>)</td>
+          <td>A value meaning “ask the current theme”. <code>?attr/couiColorPrimary</code> is not a colour, it is
+          a question. Any number of drawers may hold the answer “whatever the theme says”.</td>
+          <td>A note on the drawer: <em>“use today's house colour”</em>.</td>
+        </tr>
+        <tr>
+          <td><strong>Overlay / RRO</strong></td>
+          <td>A Runtime Resource Overlay replaces resource values of another app without touching its APK.
+          Android ships them itself, e.g. for SystemUI's accent.</td>
+          <td>A sticker pasted over one drawer's contents.</td>
+        </tr>
+        <tr>
+          <td><strong>uxres store</strong></td>
+          <td>The Oplus-specific piece: a plain XML file on the device, written by the OEM's theme engine and read
+          by its apps for the “Coui” colour family.</td>
+          <td>The house's own palette sheet, pinned to the wall.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout note">
+      <p><b>The distinction that decides the whole design.</b></p>
+      <p>An overlay <em>replaces a drawer's contents</em>. The uxres store <em>is the sheet the answers are copied
+      from</em>. Repainting widgets means editing hundreds of drawers; editing the sheet changes every copy at
+      once.</p>
+    </div>
+
+    <h3>Step 1 — describe the two paths precisely</h3>
+    <p>The state lives in one secure setting, <code>theme_customization_overlay_packages</code>, a small JSON
+    blob. This is the user's real value on the Custom path:</p>
+    <pre><span class="dim">$</span> <span class="cmd">adb shell settings get secure theme_customization_overlay_packages</span>
+{<span class="s">"_applied_timestamp"</span>:1789205191660,<span class="s">"android.theme.customization.theme_style"</span>:<span class="s">"VIBRANT"</span>,
+ <span class="s">"android.theme.customization.color_source"</span>:<span class="s">"home_wallpaper"</span>, <span class="s">"material_you_overlay_enable"</span>:1,
+ <span class="s">"android.theme.customization.color_index"</span>:0,
+ <span class="s">"android.theme.customization.system_palette"</span>:<span class="v">"FFF13871"</span>,
+ <span class="s">"android.theme.customization.accent_color"</span>:<span class="v">"FFF13871"</span>}</pre>
+    <p>Two fields carry the rest of the story:</p>
+    <ul>
+      <li><code>color_source</code> — <strong>where the colour came from</strong>. <code>home_wallpaper</code>,
+      <code>lock_wallpaper</code>, <code>photo</code> and <code>custom_image</code> mean “Custom”. Anything else
+      means the user picked a Featured preset. This single field is the fork between the two code paths.</li>
+      <li><code>accent_color</code> (falling back to <code>system_palette</code>) — the colour itself, here
+      <code>FFF13871</code>, the pink used throughout this document.</li>
+    </ul>
+  </div>
+</section>
+<section id="p2-2">
+  <h2><span class="num">2</span> Analysis, continued — where the answer is copied from</h2>
+  <p class="sub">Still phase 2. The theme engine keeps its working files in one directory; listing it as root
+  was the turning point.</p>
+  <div class="card phase">
+    <div class="iog">
+      <div><b>Input</b>The white accents, plus the knowledge that no overlay of ours is in play.</div>
+      <div><b>Output</b>The file that holds the answer, plus proof that writing it changes the screen.</div>
+      <div><b>Gate</b>A prediction that can fail: “write this file ⇒ that pixel changes colour”.</div>
+    </div>
+
+    <h3>Step 2 — look where the theme engine writes</h3>
+    <pre><span class="dim">#</span> <span class="cmd">ls -la /data/oplus/uxres/uxcolor</span>
+-rw-r--r-- 1 root root <span class="v">6093</span> coui_theme_color_wallpaper.xml      <span class="c">← Featured: a full palette</span>
+-rw-r--r-- 1 root root <span class="v">6093</span> coui_theme_color_wallpaper_night.xml
+-rw-r--r-- 1 root root  <span class="v">805</span> ux_custom_color.xml                  <span class="c">← Custom: the stub</span>
+-rw-r--r-- 1 root root  <span class="v">805</span> ux_custom_color_night.xml</pre>
+    <p>That size difference <em>is</em> the bug: the 6&nbsp;KB file holds a real palette, the 805-byte one holds
+    placeholders. Inside the small file:</p>
+    <pre><span class="dim">#</span> <span class="cmd">cat /data/oplus/uxres/uxcolor/ux_custom_color.xml</span>
+&lt;?xml version=<span class="s">"1.0"</span> encoding=<span class="s">"UTF-8"</span> standalone=<span class="s">"yes"</span> ?&gt;
+&lt;resources&gt;
+&lt;color name=<span class="s">"couiSingleFirstNormal"</span>&gt;<span class="v">#FFFFFFFF</span>&lt;/color&gt;   <span class="c">← the accent slot: white</span>
+&lt;color name=<span class="s">"couiSingleFirstPressed"</span>&gt;#FFBB2B58&lt;/color&gt;
+<span class="dim">… ten more lines …</span>
+&lt;/resources&gt;</pre>
+    <div class="callout win">
+      <p><b>Why this is the right theory.</b></p>
+      <p><code>couiSingleFirstNormal</code> is white <em>and</em> the visible surfaces are white. Changing that one
+      value must move every surface at once. Unlike the earlier theories, this one makes a cheap, falsifiable
+      prediction: <em>write one file, restart one app, look at the screen</em>.</p>
+    </div>
+    <p>The prediction was tested with the raw <code>=</code> key of Calculator: a cyan accent written into the
+    slot came back as a cyan <code>=</code> with <strong>zero overlays enabled</strong>. Then the user's real pink
+    was written and Calculator's <code>=</code> <em>and</em> its <code>deg</code> label, the Wi‑Fi toggle, the
+    “Add network” link and the connected‑network icon all became pink.</p>
+  </div>
+</section>
+
+<section id="p2b">
+  <h2><span class="num">2</span> Analysis, the graveyard — two theories that died</h2>
+  <p class="sub">These are kept in the document on purpose. Knowing what has already been disproved is worth
+  more than knowing what worked.</p>
+  <div class="card">
+    <div class="callout backflow">
+      <p><b>Theory 1 — “override the palette colour behind the accent reference”.</b> <em>Rejected.</em></p>
+      <p>The reference <code>?attr/couiColorPrimary</code> resolves through a colour resource such as
+      <code>coui_color_primary_blue</code>. So: fabricate an overlay on that resource and the key must tint.</p>
+      <pre><span class="dim">#</span> <span class="cmd">cmd overlay fabricate --target com.oneplus.calculator --name funTest \
+    com.oneplus.calculator:color/coui_color_primary_blue 0x1c 0xffff00ff</span>
+<span class="dim">#</span> <span class="cmd">cmd overlay lookup com.oneplus.calculator com.oneplus.calculator:color/coui_color_primary_blue</span>
+<span class="v">#ffff00ff</span>   <span class="c">← the overlay really is live…</span></pre>
+      <p>…and the <code>=</code> key stayed <strong>white</strong>. The app never reads that colour; it asks for
+      the <em>attribute</em>, and the attribute is answered elsewhere. Theory dead.</p>
+    </div>
+    <div class="callout backflow">
+      <p><b>Theory 2 — “patch each broken widget”.</b> <em>Rejected after it shipped once.</em></p>
+      <p>The previous attempt (commit <code>b26b8ce</code>) fabricated one overlay per broken surface:
+      <code>fold_button_equals_bg_color</code>, <code>switch_outer_circle_color</code>, and so on. It worked for
+      the surfaces that were known — and silently missed the <code>deg</code> label and anything else nobody had
+      photographed yet. That is whack‑a‑mole: the work is unbounded because the list of surfaces is unknowable
+      without opening every screen of every app. It was replaced by the palette fix and the old overlays are now
+      switched off.</p>
+    </div>
+    <div class="callout note">
+      <p><b>A near miss worth naming: <code>sysui_type_accent_color</code>.</b></p>
+      <p>The Custom path also leaves this SystemUI setting white, and writing it does tint SystemUI's own accent
+      (QS tiles). It is real, but it is only SystemUI — the toggles and the Calculator key never moved for it. It
+      is kept as a small companion hook, explicitly <em>not</em> the fix.</p>
+    </div>
+  </div>
+</section>
+<section id="p3">
+  <h2><span class="num">3</span> Design — one file, twelve slots, reversible</h2>
+  <p class="sub">Phase output: a decision that is boring on purpose. The clever part of this fix is how
+  <em>little</em> it does: it writes one family of values and keeps a photocopy of what was there before.</p>
+  <div class="card phase">
+    <div class="iog">
+      <div><b>Input</b>One file holds the answer; the visible bug is one white placeholder in it.</div>
+      <div><b>Output</b>A layout of the change: which slots to write, how to derive them, and the invariants
+      that must hold whatever happens.</div>
+      <div><b>Gate</b>Every requirement from phase 1 maps to something in the design — and nothing in the design
+      does more than the requirements ask.</div>
+    </div>
+
+    <h3>Decision 1 — write the store, not the widgets</h3>
+    <p>The store is device-global and the apps read it at start-up. Writing it once fixes every consumer of the
+    accent reference — including apps nobody has thought of. This is requirement&nbsp;1 and requirement&nbsp;4
+    satisfied by a single choice.</p>
+
+    <h3>Decision 2 — map roles, never invent colours</h3>
+    <p>The file does not hold “a colour”, it holds a small family of <em>roles</em>: the accent, its pressed
+    state, a faint version for highlights, and so on. Every OEM stub keeps that shape, so the fix derives the
+    whole family from the one colour the user picked, using the OEM's own relationships.</p>
+    <table>
+      <thead><tr><th>Slot</th><th>Role</th><th>Derived from the user's accent</th></tr></thead>
+      <tbody>
+        <tr><td><code>couiSingleFirstNormal</code></td><td>the accent itself</td><td>exactly the picked colour</td></tr>
+        <tr><td><code>couiSingleFirstPressed</code></td><td>accent while pressed / darker</td><td>the accent scaled down (see maths below)</td></tr>
+        <tr><td><code>couiSingleFirstLightNormal</code></td><td>faint accent (fills, subtle chips)</td><td>accent at 30&nbsp;% alpha by day, 40&nbsp;% at night</td></tr>
+        <tr><td><code>couiSingleFirstLightPressed</code></td><td>faint pressed accent</td><td>pressed accent at 30&nbsp;% alpha</td></tr>
+        <tr><td><code>couiSingleFirstTextHighLight</code></td><td>text highlight</td><td>accent at 15&nbsp;% alpha</td></tr>
+        <tr><td><code>couiSingleFirstBarDisabledColor</code></td><td>disabled track/bar</td><td>accent at 15&nbsp;% alpha</td></tr>
+      </tbody>
+    </table>
+    <p>Each of those six is written twice: once as itself and once with the OEM's <code>NXcolor</code> prefix,
+    exactly as the OEM's own files do it. Twelve <code>&lt;color&gt;</code> lines per file, two files
+    (day and night).</p>
+
+    <div class="callout note">
+      <p><b>Why “same shape as the OEM” is a design rule and not a detail.</b></p>
+      <p>The file is parsed by a resource loader we do not control. If the shape changes — an extra attribute, a
+      missing slot, a trailing newline, different permissions — the loader may ignore the file or fail silently.
+      So the design copies the OEM's shape exactly, and a <em>unit test</em> locks it in (phase 5).</p>
+    </div>
+  </div>
+</section>
+<section id="p3-2">
+  <h2><span class="num">3</span> Design, continued — the maths, the safety net, the triggers</h2>
+  <p class="sub">Still phase 3. Three details decide whether the fix feels native or feels broken, and whether
+  the phone can always be put back.</p>
+  <div class="card phase">
+
+    <h3>Decision 3 — derive the pressed shade the way the OEM does</h3>
+    <p>A pressed state is not a hard-coded second colour; it is the accent darkened a little. Comparing the OEM's
+    own Featured palette — <code>#FF848DC8</code> normal and <code>#FF5662B3</code> pressed — gives the ratio
+    (≈&nbsp;0.80). The implementation uses a slightly gentler pair, and the difference between day and night is
+    deliberate, because a night‑mode surface is already dark:</p>
+    <pre><span class="k">fun</span> <span class="cmd">shade</span>(argb: Int, factor: Double): Int {
+    <span class="c">// scale R, G and B toward black, keep the alpha channel untouched</span>
+    <span class="k">val</span> a = (argb <span class="k">ushr</span> 24) <span class="k">and</span> 0xFF
+    <span class="k">fun</span> channel(shift: Int) = (((argb <span class="k">ushr</span> shift) <span class="k">and</span> 0xFF) * factor)
+        .toInt().coerceIn(0, 255)
+    <span class="k">return</span> (a <span class="k">shl</span> 24) <span class="k">or</span> (channel(16) <span class="k">shl</span> 16) <span class="k">or</span>
+           (channel(8) <span class="k">shl</span> 8) <span class="k">or</span> channel(0)
+}
+
+<span class="c">// the two factors, and the four alphas the OEM's own stub uses</span>
+<span class="k">const val</span> DAY_PRESSED_FACTOR   = <span class="v">0.78</span>
+<span class="k">const val</span> NIGHT_PRESSED_FACTOR = <span class="v">0.88</span>
+<span class="k">const val</span> DAY_LIGHT_NORMAL_ALPHA  = <span class="v">0x4C</span>   <span class="c">// 30 % — `#4CFFFFFF` in the stub</span>
+<span class="k">const val</span> NIGHT_LIGHT_NORMAL_ALPHA = <span class="v">0x66</span>  <span class="c">// 40 % — `#66FFFFFF`</span>
+<span class="k">const val</span> LIGHT_PRESSED_ALPHA      = <span class="v">0x4C</span>
+<span class="k">const val</span> HIGHLIGHT_ALPHA          = <span class="v">0x26</span>   <span class="c">// 15 % — TextHighLight + BarDisabled</span></pre>
+    <div class="callout note">
+      <p><b>Why the OEM's stub is the spec.</b></p>
+      <p>The white placeholder file is still a <em>complete example</em>: it tells you how many slots exist, in
+      what order, and which alpha each one uses. Reading the stub as documentation is what keeps the output
+      plausible in every app instead of merely visible in one.</p>
+    </div>
+
+    <h3>Decision 4 — a safety net that cannot fail halfway</h3>
+    <table>
+      <thead><tr><th>Invariant</th><th>How the design guarantees it</th></tr></thead>
+      <tbody>
+        <tr><td>Featured presets keep working</td><td>The Custom path is detected from <code>color_source</code>.
+        Anything else ⇒ the fix does nothing but put the OEM files back.</td></tr>
+        <tr><td>The originals can always be restored</td><td>First write copies both files aside
+        (<code>/data/local/tmp/ae_uxcolor_stock</code>) and drops a marker so a later run can never overwrite the
+        backup with our own output.</td></tr>
+        <tr><td>No half-written file</td><td>The XML is generated in the app's cache, copied into place as root,
+        then the file's MD5 is compared with the locally computed one. A mismatch is reported, not ignored.</td></tr>
+        <tr><td>Same shape and ownership as stock</td><td><code>root:root</code>, mode <code>644</code>,
+        805 bytes for a 6‑slot family, no trailing newline.</td></tr>
+        <tr><td>Nothing happens twice by accident</td><td>Every step is idempotent: the last published accent is
+        remembered, so re-applying the same colour skips the app restarts entirely.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Decision 5 — make it feel instant</h3>
+    <p>Resources are read when a process starts. A running app therefore keeps the colour it read at launch, so
+    the fix has to do two things when the palette changes:</p>
+    <ol>
+      <li><strong>Notice the change.</strong> A content observer watches the theme settings, and the app's own
+      toggle sends a broadcast. Both funnel into one debounced re-apply (one user action can fire several
+      callbacks in a row).</li>
+      <li><strong>Restart only what is running.</strong> Each candidate app is checked with <code>pidof</code>
+      first, so on a cold phone this costs nothing. SystemUI is restarted rather than killed, and init brings it
+      straight back.</li>
+    </ol>
+  </div>
+</section>
+<section id="p4">
+  <h2><span class="num">4</span> Implementation — read, generate, write, restart</h2>
+  <p class="sub">Phase output: code that turns the design into six steps, each one individually verifiable.</p>
+  <div class="card phase">
+    <div class="iog">
+      <div><b>Input</b>The design: write the twelve-slot family, keep a backup, stay reversible.</div>
+      <div><b>Output</b>Two small files: pure palette maths, and the root plumbing around it.</div>
+      <div><b>Gate</b>Each step must be testable on its own — the maths on a laptop, the writes on the phone.</div>
+    </div>
+
+    <h3>The pipeline</h3>
+    <ol class="waterfall">
+      <li><span class="dot">1</span><b>Read the accent</b><span>Parse the theme JSON, accept only the Custom path, reject the white stub.</span></li>
+      <li><span class="dot">2</span><b>Derive the family</b><span>Twelve slot values from that one colour, per store (day / night).</span></li>
+      <li><span class="dot">3</span><b>Generate the XML</b><span>Byte-shaped exactly like the OEM's stub, into the app's cache dir.</span></li>
+      <li><span class="dot">4</span><b>Back up the originals, once</b><span>Both files copied aside behind a marker file.</span></li>
+      <li><span class="dot">5</span><b>Write as root and verify</b><span>Copy into place, then compare MD5s — a silent half-write is worse than a failure.</span></li>
+      <li><span class="dot">6</span><b>Restart what is running</b><span>The palette is read at process start, so live apps are bounced — only if they are actually running.</span></li>
+    </ol>
+
+    <h3>Two files, one job each</h3>
+    <table>
+      <thead><tr><th>File</th><th>Responsibility</th><th>Why separated</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>CouiPalette.kt</code></td>
+          <td>The maths: colour parsing, the pressed shade, the four alphas, the twelve slot names, the XML text.</td>
+          <td>No Android, no root, no I/O — so it runs in a plain JVM unit test in milliseconds.</td>
+        </tr>
+        <tr>
+          <td><code>CouiAccentFix.kt</code></td>
+          <td>The plumbing: read the setting as root, call the palette, back up, write, verify, restart, re-apply
+          on change, restore on demand.</td>
+          <td>Everything that can fail is here, wrapped so a failure leaves stock behaviour intact.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Why this runs in the app process, not in the Xposed hook</h3>
+    <p>The file lives in a root-owned directory and the overlay manager only accepts root or shell. The app
+    process has <code>su</code> (granted once by the user through the root manager); SystemUI's process does not
+    reliably have it on the <code>PATH</code>. Running privileged work from the app is also the only way to
+    restart SystemUI without a process killing itself mid-command — exactly the same reasoning as the existing
+    <code>RootShell.restartSystemUi()</code> helper.</p>
+
+    <div class="callout warn">
+      <p><b>The uncomfortable part of the design, stated plainly.</b></p>
+      <p>This fix needs root, and it edits files that the OEM's theme engine owns. Both are real risks, which is
+      why the fix refuses to do anything without a Custom colour, refuses to run on Featured, and always keeps a
+      restore path. One preference (<code>system_color_fix_enabled</code>) turns the whole thing off again and puts
+      the OEM's files back.</p>
+    </div>
+  </div>
+</section>
+<section id="p4-2">
+  <h2><span class="num">4</span> Implementation, step by step</h2>
+  <p class="sub">Still phase 4 — the pieces of code that do the actual work, in the order they run.</p>
+
+  <div class="card">
+    <div class="filetag">Step 1 · CouiAccentFix.kt — read the accent</div>
+    <pre><span class="k">private fun</span> <span class="cmd">customAccent</span>(): String? = <span class="k">try</span> {
+    <span class="c">// read through `su`: this is a Secure setting an app may not read directly</span>
+    <span class="k">val</span> res = RootShell.exec(<span class="s">"settings get secure $KEY_THEME_OVERLAY"</span>, QUICK_TIMEOUT_S)
+    <span class="k">if</span> (!res.ok) <span class="k">return null</span>
+    <span class="k">val</span> raw = res.output.trim()
+    <span class="k">if</span> (raw.isEmpty() || raw == <span class="s">"null"</span>) <span class="k">return null</span>
+    <span class="k">val</span> json = JSONObject(raw)
+    CouiPalette.customAccent(                                  <span class="c">// ← the shared rules</span>
+        source        = json.optString(<span class="s">"android.theme.customization.color_source"</span>, <span class="s">""</span>),
+        accentColor   = json.optString(<span class="s">"android.theme.customization.accent_color"</span>, <span class="s">""</span>),
+        systemPalette = json.optString(<span class="s">"android.theme.customization.system_palette"</span>, <span class="s">""</span>)
+    )
+} <span class="k">catch</span> (t: Throwable) { <span class="k">null</span> }</pre>
+    <p>That one call is the whole “is this a Custom colour, and is it a real colour?” decision — the same code is
+    used by the SystemUI companion, so the two can never disagree. <code>null</code> means <em>hands off</em>: the
+    caller then restores the OEM's files and stops.</p>
+  </div>
+
+  <div class="card">
+    <div class="filetag">Step 2–3 · CouiPalette.kt — derive the family and render it</div>
+    <pre><span class="k">fun</span> <span class="cmd">slots</span>(night: Boolean, accent: Int): LinkedHashMap&lt;String, Int&gt; {
+    <span class="k">val</span> normal  = accent <span class="k">or</span> 0xFF000000.toInt()          <span class="c">// force opaque</span>
+    <span class="k">val</span> pressed = <span class="cmd">shade</span>(normal, <span class="k">if</span> (night) NIGHT_PRESSED_FACTOR <span class="k">else</span> DAY_PRESSED_FACTOR)
+    <span class="k">val</span> lightAlpha = <span class="k">if</span> (night) NIGHT_LIGHT_NORMAL_ALPHA <span class="k">else</span> DAY_LIGHT_NORMAL_ALPHA
+
+    <span class="k">val</span> values = LinkedHashMap&lt;String, Int&gt;()
+    <span class="k">for</span> (name <span class="k">in</span> BASE_SLOTS) values[name] = <span class="k">when</span> (name) {
+        <span class="s">"couiSingleFirstNormal"</span>        -&gt; normal
+        <span class="s">"couiSingleFirstPressed"</span>       -&gt; pressed
+        <span class="s">"couiSingleFirstLightNormal"</span>   -&gt; <span class="cmd">withAlpha</span>(normal,  lightAlpha)
+        <span class="s">"couiSingleFirstLightPressed"</span>  -&gt; <span class="cmd">withAlpha</span>(pressed, LIGHT_PRESSED_ALPHA)
+        <span class="k">else</span> -&gt; <span class="cmd">withAlpha</span>(normal, HIGHLIGHT_ALPHA)          <span class="c">// text + disabled bar</span>
+    }
+    <span class="c">// the OEM duplicates every slot with an `NXcolor` prefix — value for value</span>
+    <span class="k">for</span> ((name, value) <span class="k">in</span> values.toList()) values[<span class="cmd">nx</span>(name)] = value
+    <span class="k">return</span> values
+}</pre>
+    <p>The result, for pink <code>#FFF13871</code> in the day store — real content from the phone:</p>
+    <pre>&lt;?xml version=<span class="s">"1.0"</span> encoding=<span class="s">"UTF-8"</span> standalone=<span class="s">"yes"</span> ?&gt;
+&lt;resources&gt;
+&lt;color name=<span class="s">"couiSingleFirstNormal"</span>&gt;<span class="v">#FFF13871</span>&lt;/color&gt;
+&lt;color name=<span class="s">"couiSingleFirstPressed"</span>&gt;<span class="v">#FFBB2B58</span>&lt;/color&gt;
+&lt;color name=<span class="s">"couiSingleFirstLightNormal"</span>&gt;<span class="v">#4CF13871</span>&lt;/color&gt;
+&lt;color name=<span class="s">"couiSingleFirstLightPressed"</span>&gt;<span class="v">#4CBB2B58</span>&lt;/color&gt;
+&lt;color name=<span class="s">"couiSingleFirstTextHighLight"</span>&gt;<span class="v">#26F13871</span>&lt;/color&gt;
+&lt;color name=<span class="s">"couiSingleFirstBarDisabledColor"</span>&gt;<span class="v">#26F13871</span>&lt;/color&gt;
+<span class="dim">… the same six again, prefixed NXcolor …</span>
+&lt;/resources&gt;</pre>
+    <p>805 bytes, no trailing newline, exactly the OEM's shape. In the night store the pressed shade is lighter
+    than in the day store (<code>#FFD43163</code> instead of <code>#FFBB2B58</code>) and the faint accent is
+    stronger, because a dark surface needs more colour to read.</p>
+  </div>
+</section>
+<section id="p4-3">
+  <h2><span class="num">4</span> Implementation, the risky part</h2>
+  <p class="sub">Still phase 4. Everything above this line is arithmetic; everything below touches files that
+  belong to the OEM, so it is written defensively.</p>
+
+  <div class="card">
+    <div class="filetag">Step 4 · CouiAccentFix.kt — back the originals up, once</div>
+    <pre><span class="k">val</span> res = RootShell.exec(
+    <span class="s">"[ -f $STOCK_MARK ] || { mkdir -p $STOCK_DIR; "</span> +
+        <span class="s">"cp -f $STORE_DIR/$DAY_FILE $STOCK_DIR/; "</span> +
+        <span class="s">"cp -f $STORE_DIR/$NIGHT_FILE $STOCK_DIR/; "</span> +
+        <span class="s">"chmod 644 $STOCK_DIR/$DAY_FILE $STOCK_DIR/$NIGHT_FILE; "</span> +
+        <span class="s">"touch $STOCK_MARK; }; echo ok"</span>,
+    QUICK_TIMEOUT_S
+)</pre>
+    <p>The <code>[ -f $STOCK_MARK ] ||</code> guard is the important half: the backup runs only if the marker file
+    does not exist yet. Without it, a second run would “back up” the file we had already overwritten — and the
+    original would be gone forever.</p>
+  </div>
+
+  <div class="card">
+    <div class="filetag">Step 5 · CouiAccentFix.kt — write it, then prove you wrote it</div>
+    <pre><span class="c">// generated in the app's cache first: no shell-quoting minefield around &lt; " and #</span>
+<span class="k">val</span> res = RootShell.exec(
+    <span class="s">"cp -f ${day.absolutePath} $STORE_DIR/$DAY_FILE; "</span> +
+        <span class="s">"cp -f ${night.absolutePath} $STORE_DIR/$NIGHT_FILE; "</span> +
+        <span class="s">"chmod 644 $STORE_DIR/$DAY_FILE $STORE_DIR/$NIGHT_FILE; "</span> +
+        <span class="s">"chown root:root $STORE_DIR/$DAY_FILE $STORE_DIR/$NIGHT_FILE; "</span> +
+        <span class="s">"md5sum $STORE_DIR/$DAY_FILE $STORE_DIR/$NIGHT_FILE"</span>,
+    ROOT_TIMEOUT_S
+)
+<span class="k">val</span> out = res.output.lowercase(Locale.US)
+<span class="k">val</span> dayOk   = out.contains(<span class="cmd">md5</span>(dayXml))     <span class="c">// our own MD5 of the text we generated</span>
+<span class="k">val</span> nightOk = out.contains(<span class="cmd">md5</span>(nightXml))
+res.ok &amp;&amp; dayOk &amp;&amp; nightOk                        <span class="c">// a silent half-write counts as a failure</span></pre>
+    <p>Three separate protections: the MD5 catches a truncated write, <code>chmod</code>/<code>chown</code> keep
+    the file exactly as the OEM left it (root-owned, <code>644</code>), and doing everything in one root shell
+    means there is no window in which the file exists with the wrong owner or half the content.</p>
+  </div>
+
+  <div class="card">
+    <div class="filetag">Step 6 · CouiAccentFix.kt — restart only what is running</div>
+    <pre><span class="k">val</span> cmd = <span class="s">"for p in $list; do "</span> +
+    <span class="s">"if pidof \$p &gt;/dev/null 2&gt;&amp;1; then am force-stop \$p &amp;&amp; echo \$p; fi; done"</span>
+RootShell.exec(cmd, ROOT_TIMEOUT_S)
+RootShell.<span class="cmd">restartSystemUi</span>()   <span class="c">// SIGTERM, not -9: init brings it straight back</span></pre>
+    <p>The <code>pidof</code> guard is what keeps this cheap and quiet: on a freshly booted phone nobody is
+    running, the loop does nothing, and the palette is simply read when each app next starts. The candidate list is
+    curated (settings, Wi‑Fi, files, calculator, clock, gallery, weather, phone, Bluetooth …) rather than
+    “everything”, so a colour change never turns into a phone reboot.</p>
+  </div>
+
+  <div class="card">
+    <div class="filetag">Live trigger · CouiAccentFix.kt — notice the change, without polling</div>
+    <pre><span class="k">app</span>.contentResolver.registerContentObserver(
+    Settings.Secure.getUriFor(KEY_THEME_OVERLAY), <span class="k">false</span>, observer)
+<span class="k">app</span>.contentResolver.registerContentObserver(
+    Settings.System.getUriFor(KEY_COLOR_THEME_SETTING), <span class="k">false</span>, observer)
+
+<span class="c">// one debounce for every trigger: a single user action fires several callbacks</span>
+<span class="k">private fun</span> <span class="cmd">trigger</span>(ctx: Context, reason: String) {
+    <span class="k">val</span> now = System.currentTimeMillis()
+    <span class="k">if</span> (now - lastRunAt &lt; 1500L) <span class="k">return</span>
+    lastRunAt = now
+    Thread { <span class="cmd">apply</span>(ctx, force = reason == <span class="s">"toggle"</span>) }.start()
+}</pre>
+  </div>
+
+  <div class="card">
+    <div class="filetag">The last piece of cleanup · CouiAccentFix.kt</div>
+    <p>The build before this one left <code>aeCoui_*</code> overlays registered on the device. Disabling them is
+    still supported — but only <strong>once</strong>, remembered in a marker, because after the first sweep there
+    is nothing left to find and a root <code>cmd overlay list</code> on every app start would be pure cost:</p>
+    <pre><span class="k">private fun</span> <span class="cmd">clearLegacyOverlays</span>(ctx: Context) {
+    <span class="k">if</span> (state(ctx).getBoolean(PREF_LEGACY_SWEPT, <span class="k">false</span>)) <span class="k">return</span>
+    <span class="k">val</span> listed = RootShell.exec(<span class="s">"cmd overlay list --user 0"</span>, QUICK_TIMEOUT_S)
+    <span class="k">if</span> (!listed.ok) <span class="k">return</span>
+    <span class="c">// … disable every com.android.shell:aeCoui_* entry …</span>
+    state(ctx).edit().putBoolean(PREF_LEGACY_SWEPT, <span class="k">true</span>).apply()
+}</pre>
+  </div>
+</section>
+<section id="p5">
+  <h2><span class="num">5</span> Testing — the maths on a laptop, the truth on a phone</h2>
+  <p class="sub">Phase output: evidence. Two layers, because they fail in different ways: unit tests catch wrong
+  arithmetic instantly, and only a phone can tell you whether the OEM's resource loader agrees with you.</p>
+  <div class="card phase">
+    <div class="iog">
+      <div><b>Input</b>Working code, and the OEM's own stub file as the reference.</div>
+      <div><b>Output</b>73 green unit tests plus screenshots and log lines from the device.</div>
+      <div><b>Gate</b>A test must be able to fail. If flipping the behaviour does not turn something red, the
+      “test” is decoration.</div>
+    </div>
+
+    <h3>Layer 1 — the pure maths, in milliseconds</h3>
+    <p>The palette maths has no Android, no root and no file system in it, so it can be tested in a plain JVM unit
+    test. That matters because the generated XML is a <strong>contract with a parser we do not control</strong>:
+    if the shape drifts, the loader may ignore the file without saying a word. Ten tests pin it down:</p>
+    <table>
+      <thead><tr><th>Test</th><th>What it guarantees</th></tr></thead>
+      <tbody>
+        <tr><td>parse accepts 6- and 8-digit hex</td><td>The theme JSON is inconsistent about <code>#</code>, case and alpha — all four spellings must land on the same colour.</td></tr>
+        <tr><td>parse rejects non-colours</td><td><code>null</code>, <code>#12345</code> and <code>#gggggg</code> never become a colour, so a broken setting can never be written into the store.</td></tr>
+        <tr><td>normal slot + NX twin</td><td>Twelve slots, six of them <code>NXcolor</code>-prefixed, exactly as the OEM writes them.</td></tr>
+        <tr><td>light &amp; highlight alphas</td><td><code>4C</code> / <code>4C</code> / <code>26</code> by day, <code>66</code> at night — and the RGB stays the user's colour.</td></tr>
+        <tr><td>pressed is a darker shade</td><td>Every channel drops, the alpha stays opaque, and the day store is shaded harder than the night store.</td></tr>
+        <tr><td>XML shape</td><td>Header line, <code>&lt;resources&gt;</code>, fifteen lines, matching close tag, <strong>no trailing newline</strong>.</td></tr>
+        <tr><td>shade clamping</td><td>Brightening cannot overflow a channel, and the alpha survives.</td></tr>
+        <tr><td>format is locale-independent</td><td>On an Arabic-locale device the hex digits must still be Latin — this is why everything formats with <code>Locale.US</code>.</td></tr>
+        <tr><td>customAccent rules</td><td>Only the four wallpaper <code>color_source</code> values pass; the white stub, the transparent placeholder and garbage all come back as “hands off”.</td></tr>
+        <tr><td>isBlankAccent</td><td>“Missing”, <code>#ffffffff</code> and <code>00000000</code> all count as the broken signature, in any case and with or without padding.</td></tr>
+      </tbody>
+    </table>
+    <pre><span class="k">@Test</span>
+<span class="k">fun</span> <span class="cmd">`xml matches the OEM stub shape and has no trailing newline`</span>() {
+    <span class="k">val</span> xml = CouiPalette.xml(night = <span class="k">false</span>, accent = pink)
+    <span class="k">val</span> lines = xml.split(<span class="s">"\n"</span>)
+    assertEquals(<span class="s">"&lt;?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?&gt;"</span>, lines.first())
+    assertEquals(<span class="s">"&lt;resources&gt;"</span>, lines[<span class="v">1</span>])
+    assertEquals(<span class="s">"&lt;/resources&gt;"</span>, lines.last())
+    assertEquals(<span class="v">15</span>, lines.size)                 <span class="c">// header + open + 12 + close</span>
+    assertTrue(xml.contains(<span class="s">"&lt;color name=\"couiSingleFirstNormal\"&gt;#FFF13871&lt;/color&gt;"</span>))
+    assertTrue(!xml.endsWith(<span class="s">"\n"</span>))
+}</pre>
+    <p>Running the suite is one command and takes seconds. The fix shipped with <strong>73 passing tests</strong>
+    (the project's 63 existing ones plus the 10 above).</p>
+    <pre><span class="dim">$</span> <span class="cmd">gradlew.bat testDebugUnitTest</span>
+&gt; Task :app:testDebugUnitTest
+<span class="v">BUILD SUCCESSFUL</span></pre>
+    <div class="callout note">
+      <p><b>A test that earned its keep immediately.</b></p>
+      <p>Two of these tests were added while tidying up the code, and one of them failed on the first run: the
+      author expected the accent to be normalised to six digits, and the code correctly kept the eight-digit form
+      it was given. The <em>test</em> was wrong, the code was right — which is exactly the argument for writing the
+      expectation down before believing your own memory.</p>
+    </div>
+  </div>
+</section>
+<section id="p5-2">
+  <h2><span class="num">5</span> Testing on the device — and how to not fool yourself</h2>
+  <p class="sub">Still phase 5. Everything here is evidence a sceptic could re-check, because the most dangerous
+  moment in debugging is a “successful” test that measured the wrong thing.</p>
+
+  <div class="card">
+    <h3>Layer 2 — a real phone, with a harness built for it</h3>
+    <p>The store sits behind root-only permissions, and <code>adb shell</code> on this device is <em>not</em>
+    root. The app, however, holds root — so the harness runs the other way around: a debug-only broadcast receiver
+    (never present in release builds) executes a fixed script as root and leaves its report where <code>adb</code>
+    can read it.</p>
+    <pre><span class="c">// 1. push a script (LF line endings!) and trigger it from the host</span>
+<span class="dim">$</span> <span class="cmd">adb push ae_verify.sh /data/local/tmp/ae_audit.sh</span>
+<span class="dim">$</span> <span class="cmd">adb shell am broadcast -a io.github.kvmy666.autoexpand.RUN_AUDIT \
+      -n io.github.kvmy666.autoexpand/.DebugPrefReceiver</span>
+<span class="c">// 2. the report is world-readable, so adb can read it back</span>
+<span class="dim">$</span> <span class="cmd">adb shell cat /data/local/tmp/ae_verify.txt</span></pre>
+    <p>The script only ever reads: it lists the store directory, prints the day file, counts the enabled overlays
+    and tails the relevant log lines. Its path is a <strong>hard-coded literal</strong> — a debug receiver that ran
+    arbitrary root commands straight from an intent would be a security hole even in a debug build.</p>
+
+    <h3>The evidence that closed the case</h3>
+    <table>
+      <thead><tr><th>Check</th><th>Observed</th></tr></thead>
+      <tbody>
+        <tr><td>Store content</td><td><code>#FFF13871</code> / <code>#FFBB2B58</code> / <code>#4CF13871</code> / <code>#26F13871</code> plus the six <code>NXcolor</code> twins; night store <code>#FFD43163</code> / <code>#66F13871</code>.</td></tr>
+        <tr><td>File metadata</td><td>805 bytes, <code>root:root</code>, mode <code>644</code> — the OEM stub's exact shape.</td></tr>
+        <tr><td>Overlays in play</td><td>every <code>aeCoui_*</code> entry reads <code>[ ]</code> (disabled): the fix is the file, not an overlay.</td></tr>
+        <tr><td>Calculator</td><td><code>=</code> key pink <em>and</em> the <code>deg</code> label pink.</td></tr>
+        <tr><td>Wi‑Fi</td><td>ON toggle, “Refresh”, “Add network” and the connected‑network icon all pink.</td></tr>
+        <tr><td>The user's own colour</td><td>Restored to the exact original value after testing — the accent settings JSON was checked character for character.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>One experiment worth telling in full</h3>
+    <p>The claim “no reboot needed” was tested by changing the accent while the app was alive and watching the
+    logs. The result was <em>more interesting</em> than expected:</p>
+    <pre>DIAG: CouiAccent re-apply (theme setting)                        <span class="c">← the observer fired ✓</span>
+DIAG: CouiAccent write day=true night=true (d43e87acdf997a8d…)   <span class="c">← a real write</span>
+DIAG: CouiAccent re-applied #fff13871 (palette already current)  <span class="c">← reading the newest value</span></pre>
+    <p>Read that sequence carefully: the notification arrived <em>seconds</em> after two writes had already
+    happened, and it carried the value that was current <em>by then</em>, not the value that triggered it — the
+    settings provider coalesces rapid changes. That is harmless here for a specific design reason: the apply is
+    <strong>idempotent and always publishes whatever it reads</strong>, so a late notification can only re-publish
+    the newest state, and an unchanged state skips the app restarts. Had the code applied the value carried in the
+    intent instead, a late notification would have written a stale colour.</p>
+  </div>
+</section>
+<section id="p5-3">
+  <h2><span class="num">5</span> Testing — three traps that cost real time</h2>
+  <p class="sub">Still phase 5. Each of these produced a confident, wrong answer before it was caught, which makes
+  them the most valuable pages in this document.</p>
+  <div class="card">
+    <div class="callout bug">
+      <p><b>Trap 1 — the harness re-applied the fix while the test was running.</b></p>
+      <p>Colour tests are run by triggering the app. Starting the app runs the fix. The earlier build would
+      re-enable its overlays while the test was busy disabling them — so a screenshot taken seconds later showed
+      the <em>old</em> fix working, and it looked like a brand-new discovery. The rule that came out of it:
+      <em>switch the fix off, confirm every overlay reads <code>[ ]</code>, and only then start measuring.</em></p>
+    </div>
+    <div class="callout bug">
+      <p><b>Trap 2 — the wrong process, again and again.</b></p>
+      <p>The Wi‑Fi screen belongs to <code>com.oplus.wirelesssettings</code>, not
+      <code>com.android.settings</code>. Restart the wrong package, see no change, and you have learned nothing
+      about the fix. Most “failed” colour tests in this project were really tests of the wrong process.</p>
+    </div>
+    <div class="callout bug">
+      <p><b>Trap 3 — a script with Windows line endings that silently does nothing.</b></p>
+      <p>Pushing a <code>.sh</code> file written on Windows gives <code>sh</code> something it cannot parse: the
+      script “runs”, the output file stays at 0 bytes, and it looks like a root permission problem. Convert to LF
+      before pushing. (A cousin of this trap: overlay commands must not have their stdout redirected to a file —
+      they ship data over a file descriptor and fail with a transaction error.)</p>
+    </div>
+    <div class="callout warn">
+      <p><b>And the honest list of what was <em>not</em> verified.</b></p>
+      <ul>
+        <li>Not every screen of every OEM app was opened. The completeness argument is structural — the fix changes
+        the shared answer, not individual widgets — but it is still an argument, not a screenshot.</li>
+        <li>The night store is written and unit-tested; the dark-mode look was not photographed screen by screen.</li>
+        <li>What happens if a future OEM update changes the format of the store is unknown. The design makes that
+        <em>detectable</em> (an MD5 mismatch, or a file whose shape is wrong) rather than impossible.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="p6">
+  <h2><span class="num">6</span> Deployment — ship it, and leave a way back</h2>
+  <p class="sub">Phase output: an installed build with an off switch, and a rollback that does not depend on
+  remembering anything.</p>
+  <div class="card phase">
+    <div class="iog">
+      <div><b>Input</b>Green tests and device evidence.</div>
+      <div><b>Output</b>A signed APK, a settings toggle that works immediately, and two documented rollback paths.</div>
+      <div><b>Gate</b>Every action the fix performs must have an inverse the user can trigger without root
+      knowledge.</div>
+    </div>
+
+    <h3>What the user gets</h3>
+    <ul>
+      <li><strong>A switch in Settings → Colors</strong>, shown as <em>on</em> by default (turning it off restores
+      the OEM's files).</li>
+      <li><strong>Silence.</strong> No notification, no dialog: the work happens in a background thread when the
+      app starts, and again if the accent changes.</li>
+      <li><strong>A restart of the affected apps</strong> when the palette changes, so the new colour is visible
+      immediately rather than at some random later launch.</li>
+    </ul>
+
+    <h3>The three ways back to stock</h3>
+    <table>
+      <thead><tr><th>Path</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td>Turn the toggle off</td><td>The OEM's stub files are copied back verbatim from the backup and the remembered accent is cleared — the next enable always restarts the apps, so the change is visible.</td></tr>
+        <tr><td>Pick a Featured preset in OxygenOS Settings</td><td>The next apply sees a non-Custom <code>color_source</code>, restores the stubs and steps aside. The OEM's own path then owns the accent again.</td></tr>
+        <tr><td>Uninstall the app</td><td>The last written palette stays in place (nothing else depends on the app), and the stock files remain in <code>/data/local/tmp/ae_uxcolor_stock</code> for a manual copy back.</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout win">
+      <p><b>Why “reversible” was worth the extra code.</b></p>
+      <p>A fix that writes to an OEM-owned file is only acceptable because the original is one <code>cp</code> away.
+      The backup cost about fifteen lines of shell and one marker file; without it, the honest engineering decision
+      would have been not to ship at all.</p>
+    </div>
+  </div>
+</section>
+<section id="p7">
+  <h2><span class="num">7</span> Maintenance — what happens next time</h2>
+  <p class="sub">Phase output: a fix that can be trusted for a while, plus the list of things nobody should try
+  again.</p>
+  <div class="card phase">
+    <div class="iog">
+      <div><b>Input</b>A shipped fix on a phone that will keep receiving OS updates.</div>
+      <div><b>Output</b>Known behaviour for light/dark, reboots, OEM updates, and the graveyard of dead leads.</div>
+      <div><b>Gate</b>Every failure mode must leave stock behaviour rather than a half-fixed phone.</div>
+    </div>
+
+    <h3>Behaviour worth knowing</h3>
+    <table>
+      <thead><tr><th>Situation</th><th>What happens</th></tr></thead>
+      <tbody>
+        <tr><td>Light ↔ dark switching</td><td>Both stores are written, so the system picks the right one itself. Nothing to re-apply.</td></tr>
+        <tr><td>Reboot</td><td>The store lives in <code>/data</code>, so it survives. The app re-applies at start anyway (idempotent), and the restart step does nothing on a cold phone.</td></tr>
+        <tr><td>Picking a new Custom colour</td><td>The observer fires, the palette is rewritten, and the running consumers are restarted — no reboot, no manual relaunch.</td></tr>
+        <tr><td>Picking a Featured colour</td><td>The fix restores the OEM's stub files and stops; the OEM's own path paints the accent.</td></tr>
+        <tr><td>The OEM rewrites the store itself</td><td>Not observed for the Custom path (its engine writes the stub, not our values). If it ever does, the next apply fixes it — the trigger does not need a colour change.</td></tr>
+        <tr><td>A future OxygenOS changes the format</td><td>The write fails its own MD5 check; the code logs it and leaves stock behaviour rather than writing something it cannot verify.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>The graveyard, so nobody digs it up again</h3>
+    <table>
+      <thead><tr><th>Idea</th><th>Why it fails, or why it is not needed</th></tr></thead>
+      <tbody>
+        <tr><td>Overlay on the colour behind <code>couiColorPrimary</code></td><td>The overlay is provably live and the widget still renders white — the app asks the attribute, not that colour.</td></tr>
+        <tr><td>Reading per-app OEM theme overlays</td><td>There are none on this device; the overlay list holds only display, navbar and fingerprint entries.</td></tr>
+        <tr><td>One overlay per broken widget</td><td>Unbounded work, and it silently misses surfaces nobody photographed (the <code>deg</code> label).</td></tr>
+        <tr><td><code>sysui_type_accent_color</code> as the fix</td><td>SystemUI only. Kept as a small companion, explicitly not the mechanism.</td></tr>
+        <tr><td>Launcher icon folder <code>/data/oplus/uxicons</code></td><td>That is icon artwork (day/mono PNGs), not the accent channel.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Where the knowledge lives</h3>
+    <ul>
+      <li><code>docs/system-color-fix.md</code> — the mechanism, the evidence, and how to verify it.</li>
+      <li><code>docs/system-color-fix-PROGRESS.md</code> — the lab notebook: every hypothesis, including the
+      disproved ones, in the order they were tested.</li>
+      <li><strong>This page</strong> — the teaching version, for someone who has never seen the code.</li>
+    </ul>
+
+    <div class="callout note">
+      <p><b>The tidy-up afterwards is part of the work.</b></p>
+      <p>Once the mechanism was understood, code that only made sense under the <em>old</em> theories was removed:
+      the migration that disables the old per-slot overlays now runs exactly once instead of on every app start,
+      the duplicated “is this a Custom colour?” parsing in the app and in the SystemUI hook was replaced by one
+      shared unit-tested function, and two comments still describing the abandoned overlay approach were corrected.
+      No behaviour changed — and, as the tests proved, one of the “obvious” tidies was wrong and the tests were
+      right.</p>
+    </div>
+  </div>
+</section>
+<section id="glossary">
+  <h2>Glossary</h2>
+  <p class="sub">Every term used above, one sentence each.</p>
+  <dl class="glossary">
+    <div><dt>APK</dt><dd>The installable package of an Android app, holding its compiled code and resources.</dd></div>
+    <div><dt>Resource</dt><dd>A named value inside an app (colour, string, size, image) that the code asks for by name.</dd></div>
+    <div><dt>Theme attribute (<code>?attr/…</code>)</dt><dd>A resource meaning “ask the current theme”, which is why one reference can look different in different situations.</dd></div>
+    <div><dt>Overlay (RRO)</dt><dd>A runtime replacement for another app's resource values, without modifying its APK.</dd></div>
+    <div><dt>uxres store</dt><dd>The Oplus XML file carrying the OEM's “Coui” colour family — the file this fix writes.</dd></div>
+    <div><dt>Accent colour</dt><dd>The colour that highlights controls: toggles, links, selected tabs, the Calculator <code>=</code> key.</dd></div>
+    <div><dt>Custom vs Featured</dt><dd>The two ways to choose a colour in OxygenOS Settings — derived from your wallpaper, or a fixed preset. Only the Custom path was broken.</dd></div>
+    <div><dt><code>Settings.Secure</code></dt><dd>Android's store for system settings that need a privileged permission; the theme JSON lives there.</dd></div>
+    <div><dt>MD5</dt><dd>A short fingerprint of a file's contents, used here to prove that a write completed exactly.</dd></div>
+    <div><dt>root / <code>su</code></dt><dd>Superuser access — needed because the store lives in a root-owned directory ordinary apps cannot write to.</dd></div>
+    <div><dt>Process start</dt><dd>The moment an app launches and reads its resources — which is why a running app keeps showing the previous colours until it is restarted.</dd></div>
+    <div><dt>Idempotent</dt><dd>Doing something twice has the same result as doing it once. This is what makes the late notifications and the repeated re-applies harmless.</dd></div>
+    <div><dt>Waterfall</dt><dd>A staged process — requirements, analysis, design, implementation, testing, deployment, maintenance — in which each stage hands a finished artefact to the next.</dd></div>
+  </dl>
+</section>
+
+<section id="verify">
+  <h2>Verify it yourself</h2>
+  <p class="sub">The same checks that were used to accept the fix. Root and a Custom colour are assumed; on a
+  Featured preset the correct answer is “no changes anywhere”.</p>
+  <div class="card">
+    <div class="filetag">On the host (Windows; use grep elsewhere) — every command is read-only</div>
+    <pre><span class="c"># 1 · what colour does the theme say is active? (this is the fix's input)</span>
+<span class="dim">$</span> <span class="cmd">adb shell settings get secure theme_customization_overlay_packages</span>
+
+<span class="c"># 2 · what ended up in the store?  (root-only → ask the app's harness to read it)</span>
+<span class="dim">$</span> <span class="cmd">adb shell am broadcast -a io.github.kvmy666.autoexpand.RUN_AUDIT \</span>
+<span class="cmd">      -n io.github.kvmy666.autoexpand/.DebugPrefReceiver</span>
+<span class="dim">$</span> <span class="cmd">adb shell cat /data/local/tmp/ae_verify.txt</span>
+
+<span class="c"># 3 · is anything of ours overlaying resources?  (expect: nothing, or all [ ])</span>
+<span class="dim">$</span> <span class="cmd">adb shell cmd overlay list --user 0 | findstr /i aecoui</span>
+<span class="dim">$</span> <span class="cmd">adb shell cmd overlay list --user 0 | findstr /i funtest</span>
+
+<span class="c"># 4 · what did the fix decide, in its own words?</span>
+<span class="dim">$</span> <span class="cmd">adb logcat -d -s Snapper:D | findstr /i couiaccent</span></pre>
+    <h4>What good looks like</h4>
+    <ul>
+      <li>Step 2 shows the accent family in the store — <code>couiSingleFirstNormal</code> equal to your colour —
+      with <code>root:root</code>, mode <code>644</code> and 805 bytes.</li>
+      <li>Step 3 prints nothing (or only <code>[ ]</code> lines): the fix is a file, not an overlay.</li>
+      <li>Step 4 shows either <code>applied …; restarted N app(s)</code> after a colour change, or
+      <code>re-applied … (palette already current)</code> when nothing changed.</li>
+    </ul>
+    <div class="callout note">
+      <p><b>Reproducing the whole investigation.</b></p>
+      <p><code>docs/system-color-fix-PROGRESS.md</code> keeps the raw trail: the commands, their output and the
+      hypotheses that died along the way — including the two that each cost a debugging cycle.</p>
+    </div>
+  </div>
+</section>
+<section id="timeline">
+  <h2>Timeline of the actual work</h2>
+  <p class="sub">Waterfall on paper — this is what really happened, in order.</p>
+  <div class="card">
+    <ol class="waterfall">
+      <li><span class="dot">1</span><b>Report and reproduce</b><span>White accents on the Custom path; Featured presets fine. The requirements are written down first.</span></li>
+      <li><span class="dot">2</span><b>Two theories refuted</b><span>An overlay on the palette colour is live and ignored; per-app OEM overlays do not exist.</span></li>
+      <li><span class="dot">3</span><b>A first, incomplete fix ships</b><span>Commit <code>b26b8ce</code>: one overlay per broken widget. It works where someone looked, and misses the <code>deg</code> label.</span></li>
+      <li><span class="dot">4</span><b>The store is found</b><span><code>/data/oplus/uxres/uxcolor</code> — a 6&nbsp;KB real palette sitting next to an 805‑byte white stub.</span></li>
+      <li><span class="dot">5</span><b>Proven through the raw channel</b><span>Cyan into the slot ⇒ a cyan <code>=</code> key with no overlays enabled at all.</span></li>
+      <li><span class="dot">6</span><b>The real fix ships</b><span>Commit <code>111acb3</code>: <code>CouiPalette</code> + <code>CouiAccentFix</code>, with backup, MD5 verification, restarts and the observer.</span></li>
+      <li><span class="dot">7</span><b>Verified with the user's own colour</b><span>Pink <code>#F13871</code> on the Calculator, Wi‑Fi and Settings surfaces; the original accent restored afterwards, character for character.</span></li>
+      <li><span class="dot">8</span><b>Tidied and documented</b><span>Dead code from the old theories removed, the shared parsing extracted and unit-tested, and this page written.</span></li>
+    </ol>
+  </div>
+
+  <div class="callout win">
+    <p><b>If you take one habit away from this page.</b></p>
+    <p>The expensive part of fixing a bug is not writing the fix; it is proving which theory is true. The two
+    working hours that went into refuting the first two theories bought the fact that the third one was designed
+    correctly the first time — and the same discipline is what kept the phone recoverable at every step.</p>
+  </div>
+</section>
+
+<footer>
+  <p>Teaching companion to <code>docs/system-color-fix.md</code> for the <code>AutoExpandNotifications</code> project.<br>
+  Code: <code>app/src/main/java/io/github/kvmy666/autoexpand/CouiPalette.kt</code> and
+  <code>CouiAccentFix.kt</code> · tests: <code>CouiPaletteTest.kt</code><br>
+  Device of record: OnePlus CPH2747, OxygenOS 16.</p>
+</footer>
+
+</body>
+</html>
