@@ -21,13 +21,25 @@ class ZonesHook(private val prefs: PrefsBridge) {
     private companion object {
         /** The sibling module that draws the status-bar element; its views own their own taps. */
         const val DUO_PACKAGE = "io.github.kvmy666.duostatusbar"
+
+        /** How far a finger may drift and still count as a press, in px. */
+        const val SLOP = 24f
     }
 
     // Created lazily so the Handler is built after Looper.prepareMainLooper() runs.
     private val zoneHandler by lazy { android.os.Handler(android.os.Looper.getMainLooper()) }
     @Volatile private var activeZoneSide: String? = null
+    /**
+     * The status-bar window view, set when it is added. `dispatchTouchEvent` is inherited from
+     * ViewGroup, so the hooks on it fire for **every** ViewGroup in the process - the shade's scroll
+     * view, the lock-screen bar. Zones must only ever act for this one view, or a scroll in the shade
+     * counts as a tap (user-reported).
+     */
+    @Volatile private var statusBarView: android.view.View? = null
     @Volatile private var zoneDownY = 0f
     @Volatile private var zoneDownRawY = 0f
+    @Volatile private var zoneDownX = 0f
+    @Volatile private var zoneDownRawX = 0f
     private val leftZoneTracker  by lazy { ZoneTapTracker("left") }
     private val rightZoneTracker by lazy { ZoneTapTracker("right") }
 
@@ -131,6 +143,10 @@ class ZonesHook(private val prefs: PrefsBridge) {
 
     private fun handleZoneTouch(ev: MotionEvent, view: android.view.View, ctx: Context) {
         if (!prefs.isFeatureEnabled("zones_enabled")) return
+        // Only the status-bar window itself: `dispatchTouchEvent` is a ViewGroup method, so the hook
+        // also sees the shade's scroll view and the lock-screen bar, and a scroll there was being read
+        // as a tap. Everything that is not the bar is ignored.
+        if (view !== statusBarView) return
         val x = ev.x
         val y = ev.y
         val h = view.height.takeIf { it > 0 } ?: return
@@ -146,6 +162,8 @@ class ZonesHook(private val prefs: PrefsBridge) {
                 if (isOverDuoElement(view, x, y)) return
                 zoneDownY = y
                 zoneDownRawY = ev.rawY
+                zoneDownX = x
+                zoneDownRawX = ev.rawX
                 activeZoneSide = when {
                     x < leftW      -> "left"
                     x > rightStart -> "right"
@@ -157,8 +175,15 @@ class ZonesHook(private val prefs: PrefsBridge) {
                 }
             }
             MotionEvent.ACTION_MOVE -> {
+                // A press is a press only if it stays put. Any real movement - vertical (the shade
+                // pull) or horizontal (a swipe) - is not a tap, so the gesture is dropped rather than
+                // counted. This is what stops a scroll from firing a zone action.
                 if (activeZoneSide != null &&
-                    (y > h || kotlin.math.abs(y - zoneDownY) > 20 || kotlin.math.abs(ev.rawY - zoneDownRawY) > 20)
+                    (y > h ||
+                        kotlin.math.abs(y - zoneDownY) > SLOP ||
+                        kotlin.math.abs(ev.rawY - zoneDownRawY) > SLOP ||
+                        kotlin.math.abs(x - zoneDownX) > SLOP ||
+                        kotlin.math.abs(ev.rawX - zoneDownRawX) > SLOP)
                 ) {
                     leftZoneTracker.cancel(); rightZoneTracker.cancel(); activeZoneSide = null
                 }
@@ -193,6 +218,7 @@ class ZonesHook(private val prefs: PrefsBridge) {
                             if (lp.type != android.view.WindowManager.LayoutParams.TYPE_STATUS_BAR) return
 
                             Log.d("Zones", "STATUS_BAR view attached: ${view.javaClass.name}")
+                            statusBarView = view
                             val ctx = view.context ?: prefs.appContext ?: return
                             view.setOnTouchListener { v, ev ->
                                 try { handleZoneTouch(ev, v, ctx) } catch (t: Throwable) { Log.e("Zones", "touch: $t") }
