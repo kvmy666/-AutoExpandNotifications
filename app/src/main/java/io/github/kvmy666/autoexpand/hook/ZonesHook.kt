@@ -18,6 +18,11 @@ import io.github.kvmy666.autoexpand.ZoneAction
  */
 class ZonesHook(private val prefs: PrefsBridge) {
 
+    private companion object {
+        /** The sibling module that draws the status-bar element; its views own their own taps. */
+        const val DUO_PACKAGE = "io.github.kvmy666.duostatusbar"
+    }
+
     // Created lazily so the Handler is built after Looper.prepareMainLooper() runs.
     private val zoneHandler by lazy { android.os.Handler(android.os.Looper.getMainLooper()) }
     @Volatile private var activeZoneSide: String? = null
@@ -98,6 +103,32 @@ class ZonesHook(private val prefs: PrefsBridge) {
         ActionDispatcher.dispatch(action, ctx)
     }
 
+    /**
+     * True when the touch landed on the Duo Status Bar element.
+     *
+     * Duo draws a ring in the status bar's icon strip (the right edge) and gives it its own single /
+     * double / long-press gestures, which it hands to this module's privileged-action receiver. The
+     * element sits inside the right zone, so without this the zone fired **and** Duo fired on one tap
+     * (reported as "the actions act as Auto Expand's"). The zone now yields to the element; every
+     * other part of the bar, including the clock and notification icons, is untouched. Coordinates
+     * arrive in [parent]'s space and are carried down through each child's offset and translation.
+     */
+    private fun isOverDuoElement(parent: android.view.View, x: Float, y: Float): Boolean {
+        if (parent !is android.view.ViewGroup) return false
+        for (i in parent.childCount - 1 downTo 0) {
+            val child = parent.getChildAt(i)
+            if (child.visibility != android.view.View.VISIBLE) continue
+            val cx = x - child.left - child.translationX
+            val cy = y - child.top - child.translationY
+            if (cx < 0f || cy < 0f || cx > child.width || cy > child.height) continue
+            // Only yield when Duo actually owns the tap: with every Duo action set to "no action" its
+            // element is not clickable and does not consume touches, so the zone should still fire.
+            if (child.javaClass.name.startsWith(DUO_PACKAGE) && child.isClickable) return true
+            if (isOverDuoElement(child, cx, cy)) return true
+        }
+        return false
+    }
+
     private fun handleZoneTouch(ev: MotionEvent, view: android.view.View, ctx: Context) {
         if (!prefs.isFeatureEnabled("zones_enabled")) return
         val x = ev.x
@@ -111,6 +142,8 @@ class ZonesHook(private val prefs: PrefsBridge) {
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 if (y > h) return
+                // A tap on the Duo element belongs to Duo, not to the zone: don't start tracking it.
+                if (isOverDuoElement(view, x, y)) return
                 zoneDownY = y
                 zoneDownRawY = ev.rawY
                 activeZoneSide = when {
