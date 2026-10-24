@@ -43,6 +43,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -105,6 +106,7 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     var ungroupEnabled     by remember { mutableStateOf(prefs.getBoolean("ungroup_notifications_enabled", true)) }
     var excludedCount      by remember { mutableIntStateOf(prefs.getStringSet("excluded_apps", emptySet())?.size ?: 0) }
     var headsUpMaxLines    by remember { mutableStateOf(prefs.getString("headsup_max_lines", "5") ?: "5") }
+    var maxLinesShade      by remember { mutableStateOf(prefs.getBoolean("max_lines_shade_enabled", true)) }
 
     // ── Screen Snapper state ──────────────────────────────────────────────────
     var snapperMethod        by remember { val v = prefs.getString("snapper_activation_method", "edge_button") ?: "edge_button"; mutableStateOf(if (v == "qs_tile") "edge_button" else v) }
@@ -184,16 +186,22 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
         }
     }
 
-    // Module-active state — re-checked on resume so a working module that wasn't yet
-    // reporting at first launch (e.g. heartbeat not written yet) self-heals.
+    // Module-active state. Seeded synchronously from the heartbeat so the card paints correctly on
+    // the common path, then confirmed by a direct ping to the SystemUI hook — which also covers
+    // ROMs where the Settings.Global heartbeat cannot be written (Pixel / One UI). Re-checked on
+    // every resume so a module that wasn't reporting at first launch self-heals.
     var isActive by remember { mutableStateOf(MainActivity.isModuleActive(context)) }
+
+    LaunchedEffect(Unit) {
+        isActive = MainActivity.probeModuleActive(context)
+    }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 excludedCount = prefs.getStringSet("excluded_apps", emptySet())?.size ?: 0
-                isActive = MainActivity.isModuleActive(context)
+                scope.launch { isActive = MainActivity.probeModuleActive(context) }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -338,6 +346,12 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
                                 modifier        = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 singleLine      = true
+                            )
+                            ToggleRow(
+                                title = "Limit lines in shade & lock screen",
+                                description = "Apply the line limit above to expanded messages in the shade and on the lock screen too.",
+                                checked = maxLinesShade,
+                                onCheckedChange = { maxLinesShade = it; onToggle("max_lines_shade_enabled", it) }
                             )
                             ToggleRow(
                                 title = stringResource(R.string.expand_lockscreen_title),

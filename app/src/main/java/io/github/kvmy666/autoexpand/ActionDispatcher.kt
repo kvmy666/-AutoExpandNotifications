@@ -19,6 +19,15 @@ object ActionDispatcher {
     const val ACTION_PRIVILEGED = "io.github.kvmy666.autoexpand.ZONE_PRIVILEGED_ACTION"
     const val EXTRA_ACTION_KEY  = "zone_action_key"
 
+    /**
+     * Module-liveness ping. The app sends an ordered broadcast to `com.android.systemui`; the
+     * SystemUI hook answers with `RESULT_OK`. This is the only cross-ROM "is the module injected
+     * here" signal that needs no write permission — some system UIs (Pixel/One UI) are not allowed
+     * to write the Settings.Global heartbeat, which made the home card read "Inactive" even when
+     * the hooks were live.
+     */
+    const val ACTION_PING = "io.github.kvmy666.autoexpand.PING"
+
     // `input keyevent` codes fired via root for actions with no public API.
     private const val KEYEVENT_SCREENSHOT = 120  // KEYCODE_SYSRQ
     private const val KEYEVENT_LOCK       = 223  // KEYCODE_SLEEP

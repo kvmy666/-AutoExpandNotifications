@@ -13,6 +13,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 import android.util.Log
 import java.io.File
 import org.json.JSONObject
@@ -48,6 +51,43 @@ class MainActivity : ComponentActivity() {
                 val bootTime = System.currentTimeMillis() - SystemClock.elapsedRealtime()
                 markerTime >= bootTime - 60_000
             } catch (_: Throwable) { false }
+        }
+
+        /**
+         * Direct liveness ping to the SystemUI hook.
+         *
+         * Sends an ordered broadcast to `com.android.systemui`; the hook's exported receiver answers
+         * with `RESULT_OK`. Unlike the heartbeat this needs no Settings.Global write, so it reports
+         * correctly on system UIs that cannot write Global settings (Pixel / One UI). Returns false
+         * on timeout or when nothing answered.
+         */
+        private suspend fun pingSystemUi(context: Context): Boolean = withTimeoutOrNull(1500L) {
+            suspendCancellableCoroutine { cont ->
+                val receiver = object : android.content.BroadcastReceiver() {
+                    override fun onReceive(c: Context?, i: Intent?) {
+                        val ok = resultCode == android.app.Activity.RESULT_OK || resultData == "alive"
+                        if (cont.isActive) cont.resume(ok)
+                    }
+                }
+                try {
+                    context.sendOrderedBroadcast(
+                        Intent(ActionDispatcher.ACTION_PING).setPackage("com.android.systemui"),
+                        null, receiver, null, android.app.Activity.RESULT_CANCELED, null, null
+                    )
+                } catch (_: Throwable) {
+                    if (cont.isActive) cont.resume(false)
+                }
+            }
+        } ?: false
+
+        /**
+         * Async module-active check: ping the SystemUI hook first (permission-free), then fall back
+         * to the Settings.Global heartbeat, the /data/local/tmp heartbeat file and the legacy
+         * `autoexpand_active` marker for older installs.
+         */
+        suspend fun probeModuleActive(context: Context): Boolean {
+            if (pingSystemUi(context)) return true
+            return isModuleActive(context)
         }
 
         fun writePrefsFile(context: Context) {

@@ -5,6 +5,7 @@ import android.os.FileObserver
 import android.util.Log
 import de.robv.android.xposed.XSharedPreferences
 import de.robv.android.xposed.XposedHelpers
+import io.github.kvmy666.autoexpand.ActionDispatcher
 import io.github.kvmy666.autoexpand.PrefsJson
 import java.io.File
 
@@ -131,6 +132,33 @@ class PrefsBridge {
         t.isDaemon = true
         t.name = "tweaks-heartbeat"
         t.start()
+    }
+
+    /**
+     * Answers the app's liveness ping.
+     *
+     * Registered from the SystemUI `Application.onCreate` hook. Exported because the sender is the
+     * module app (a different UID), and registered as a *dynamic* receiver so it exists exactly
+     * while this process — and therefore our hooks — are alive. The reply travels back through the
+     * ordered-broadcast result, which needs no permission and, unlike the Settings.Global
+     * heartbeat, works on system UIs that cannot write Global settings.
+     */
+    fun registerPingReceiver(app: android.app.Application) {
+        try {
+            val filter = android.content.IntentFilter(ActionDispatcher.ACTION_PING)
+            app.registerReceiver(object : android.content.BroadcastReceiver() {
+                override fun onReceive(ctx: Context?, intent: android.content.Intent?) {
+                    try {
+                        setResultCode(android.app.Activity.RESULT_OK)
+                        setResultData("alive")
+                        Log.d("Snapper", "DIAG: module ping answered")
+                    } catch (_: Throwable) {}
+                }
+            }, filter, Context.RECEIVER_EXPORTED)
+            Log.d("Snapper", "DIAG: module ping receiver registered")
+        } catch (t: Throwable) {
+            Log.d("Snapper", "DIAG: module ping receiver registration failed: $t")
+        }
     }
 
     fun isFeatureEnabled(key: String): Boolean {

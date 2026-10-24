@@ -84,6 +84,8 @@ class MainHook : IXposedHookLoadPackage {
                             prefs.loadFilePrefs()
                             prefs.startFileObserver()
                             prefs.startHeartbeatThread()
+                            // Answer the app's liveness ping — permission-free cross-ROM signal.
+                            try { prefs.registerPingReceiver(app) } catch (_: Throwable) {}
                             // Only now are prefs actually readable, so this is the earliest
                             // point the engine choice can be trusted. Still well before any
                             // notification row exists.

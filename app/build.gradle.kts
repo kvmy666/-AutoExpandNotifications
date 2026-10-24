@@ -46,8 +46,12 @@ android {
 
     buildTypes {
         debug {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            // Fast iteration: no R8/shrink (seconds instead of minutes), and signed with the
+            // release key so it installs *over* an existing release build without uninstalling
+            // (which would drop the LSPosed scope + prefs).
+            isMinifyEnabled = false
+            isShrinkResources = false
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
         release {
@@ -77,6 +81,13 @@ android {
             isIncludeAndroidResources = true
             isReturnDefaultValues = true
         }
+    }
+
+    // Release lint is the biggest single time sink in a release build and catches nothing we need
+    // here. Skipping it cuts the loop from minutes to seconds.
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
     }
 }
 

@@ -793,10 +793,12 @@ class NotificationExpander(private val prefs: PrefsBridge) {
         } catch (_: Throwable) {}
 
         // =====================================================
-        // HEADS-UP MAX LINES enforcement
+        // MAX LINES enforcement — heads-up, shade and lock screen
         // Target: com.android.internal.widget.MessagingTextMessage.setMaxDisplayedLines
-        // Called from MessagingLinearLayout.onMeasure with Integer.MAX_VALUE when
-        // our module forces full expansion — clamp to user-configured limit.
+        // The messaging layout passes the number of body lines it wants to render. The heads-up
+        // path asks for Integer.MAX_VALUE when our module forces full expansion; the shade/LS
+        // path asks for however many fit. Either way we clamp to the user's limit so a long
+        // thread shows the same number of lines everywhere.
         // 0 = unlimited (skip). Wrapped in try/catch — any failure is silent.
         // =====================================================
         try {
@@ -806,10 +808,14 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         try {
-                            if (!prefs.isFeatureEnabled("expand_headsup_enabled")) return
-                            if (prefs.isKillSwitchActive("disable_headsup_hooks_enabled")) return
                             val maxLines = prefs.getIntPref("headsup_max_lines", 5)
                             if (maxLines <= 0) return
+                            // Heads-up: gated by its own toggle and the HUD kill-switch.
+                            val hudOn = prefs.isFeatureEnabled("expand_headsup_enabled") &&
+                                        !prefs.isKillSwitchActive("disable_headsup_hooks_enabled")
+                            // Shade + lock screen: own toggle, independent of the HUD switch.
+                            val shadeOn = prefs.isFeatureEnabled("max_lines_shade_enabled")
+                            if (!hudOn && !shadeOn) return
                             val requested = param.args[0] as Int
                             if (requested > maxLines) {
                                 param.args[0] = maxLines
