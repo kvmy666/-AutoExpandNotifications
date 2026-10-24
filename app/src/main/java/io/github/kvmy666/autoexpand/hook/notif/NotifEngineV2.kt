@@ -41,9 +41,17 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
          * height at all.
          */
         const val VISIBLE_TYPE_SINGLE_LINE = 3
+        const val VISIBLE_TYPE_EXPANDED = 1
+        const val VISIBLE_TYPE_HEADSUP = 2
 
         const val GROUP_MANAGER_CLASS =
             "com.android.systemui.statusbar.notification.collection.render.GroupExpansionManagerImpl"
+
+        /** How long a package keeps its "this app currently has a group summary" status. */
+        const val SUMMARY_TTL_MS = 120_000L
+
+        /** Only content this recent may open a grouped heads-up. */
+        const val HUD_FRESH_MS = 60_000L
 
         /**
          * Row frames that mean *the user asked for this*. Everything else the row calls — most
@@ -61,6 +69,22 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
     @Volatile private var prefsFacts = PrefsFacts(true, true, emptySet())
     @Volatile private var lsGateEnabled = false
     @Volatile private var installed = false
+    /** Newest non-summary notification key seen on an update; Engine 2 only arrow-expands this HUD row. */
+    @Volatile private var newestChildKey: String? = null
+    /** The entry for [newestChildKey]; substitutes the fresh chat when the HUD picks a stale sibling. */
+    @Volatile private var newestChildEntry: Any? = null
+    /** Key of the row currently in the heads-up window; group expansion waits until it clears. */
+    @Volatile private var hudKey: String? = null
+    /** Key allowed into the HUD but not yet in setHeadsUp(true); collapse waits for it. */
+    @Volatile private var hudPendingKey: String? = null
+    @Volatile private var hudPendingAt = 0L
+    /** HUD rows we expanded; they are collapsed again when the HUD ends. */
+    private val hudExpandedKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    /** Message timestamp of [newestChildKey] — update order does not decide newest. */
+    @Volatile private var newestChildWhen = 0L
+    /** Packages that currently have a live group summary, with the last time one was seen. */
+    private val groupSummaryPkgs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    /** HUD freshness guard state is derived per entry from Notification.when; no package map. */
 
     // ── prefs, refreshed on cold events only ─────────────────────────────────
 
@@ -89,12 +113,30 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
         RowApi.sbnOf(row)?.let { XposedHelpers.callMethod(it, "getKey") } as? String
     } catch (_: Throwable) { null }
 
+    private fun now() = android.os.SystemClock.uptimeMillis()
+
+    /** Triggers that fire while a row is being re-attached/re-parented, not from new content. */
+    private fun isColdTrigger(trigger: String) =
+        trigger == "onAttachedToWindow" || trigger == "onNotificationUpdated" || trigger == "setOnKeyguard"
+
+    private fun contentWhenOf(row: Any): Long = try {
+        val sbn = RowApi.sbnOf(row) ?: return 0L
+        val notification = XposedHelpers.callMethod(sbn, "getNotification")
+        val whenMillis = XposedHelpers.getLongField(notification, "when")
+        if (whenMillis > 0L) whenMillis
+        else (XposedHelpers.callMethod(sbn, "getPostTime") as? Long ?: 0L)
+    } catch (_: Throwable) { 0L }
+
     private fun capture(row: Any): RowFacts? {
         return try {
             val sbn = RowApi.sbnOf(row)
             val key = (sbn?.let { XposedHelpers.callMethod(it, "getKey") } as? String) ?: return null
             val pkg = sbn.let { XposedHelpers.callMethod(it, "getPackageName") } as? String
             val groupKey = try { XposedHelpers.callMethod(sbn, "getGroupKey") as? String } catch (_: Throwable) { null }
+            val pkgHasLiveSummary = pkg?.let {
+                val at = groupSummaryPkgs[it]
+                at != null && now() - at < SUMMARY_TTL_MS
+            } ?: false
             val isGroupSummary = try {
                 val notif = XposedHelpers.callMethod(sbn, "getNotification")
                 (XposedHelpers.getIntField(notif, "flags") and FLAG_GROUP_SUMMARY) != 0
@@ -116,6 +158,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                 groupUserCollapsed = RowStateStore.isGroupCollapsedByUser(key),
                 childCollapseDone = RowStateStore.wasChildCollapsed(key),
                 pipelineGrouped = RowApi.pipelineGroupedOf(row),
+                pkgHasLiveSummary = pkgHasLiveSummary,
             )
         } catch (_: Throwable) { null }
     }
@@ -134,6 +177,32 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
     private fun reconcile(row: Any, trigger: String) {
         if (Attribution.isOurs()) return
         val facts = capture(row) ?: return
+        if (facts.isGroupSummary && facts.pkg != null) {
+            groupSummaryPkgs[facts.pkg] = now()
+        }
+        if (trigger == "onNotificationUpdated" && !facts.isGroupSummary &&
+            !facts.key.startsWith(RowFacts.INTERNAL_KEY_PREFIX)) {
+            val contentWhen = contentWhenOf(row)
+            if (newestChildKey == null || contentWhen > newestChildWhen) {
+                newestChildWhen = contentWhen
+                newestChildKey = facts.key
+                newestChildEntry = RowApi.entryOf(row)
+            }
+        }
+        // Cold triggers must not re-expand an older row. SystemUI re-attaches/reposts rows
+        // during a group refresh, and a row the system momentarily leaves ungrouped would
+        // otherwise be treated as a fresh single and expanded behind the new notification.
+        // Only the key that most recently received an update may expand on a cold trigger.
+        if (isColdTrigger(trigger) &&
+            !facts.isGroupSummary && facts.key != newestChildKey) {
+            NotifLog.d { "v2 $trigger defer not-newest key=${facts.key} newest=$newestChildKey" }
+            return
+        }
+        if (isColdTrigger(trigger) &&
+            facts.belongsToGroup && !facts.isGroupChild && !facts.isGroupSummary) {
+            NotifLog.d { "v2 $trigger defer group-forming key=${facts.key} kg=${facts.onKeyguard}" }
+            return
+        }
         val decision = ExpandPolicy.decide(facts, prefsFacts, RowStateStore.isBackedOff(facts.key))
 
         when (decision) {
@@ -143,10 +212,19 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                 NotifLog.d { "v2 $trigger EXPAND key=${facts.key} kg=${facts.onKeyguard} grouped=${facts.isGroupChild} bundle=${facts.isSystemAggregate}" }
             }
             is Decision.ExpandGroup -> {
+                if (hudKey != null) {
+                    NotifLog.d { "v2 $trigger defer EXPAND_GROUP hud key=${facts.key}" }
+                    return
+                }
                 applyGroupExpanded(row, facts)
                 NotifLog.d { "v2 $trigger EXPAND_GROUP key=${facts.key}" }
             }
             is Decision.Collapse -> {
+                val pending = facts.key == hudPendingKey && now() - hudPendingAt < 5_000L
+                if (facts.isHeadsUp || facts.isPinned || pending) {
+                    NotifLog.d { "v2 $trigger defer COLLAPSE hud key=${facts.key}" }
+                    return
+                }
                 setToken(row, false)
                 applyCollapsed(row, facts)
                 NotifLog.d { "v2 $trigger COLLAPSE_CHILD key=${facts.key}" }
@@ -204,11 +282,12 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
      * trigger and the display heals itself on the next frame no matter what caused the stale
      * state.
      *
-     * Deliberately independent of the children toggle. That toggle chooses between one-line and
-     * expanded *content*; this is about a row whose content does not match its own card, which
-     * is never a setting anyone would choose.
+     * Gated by the children toggle. When children are meant to stay one-line, reselecting the
+     * expanded layout is exactly the wrong repair: it turns a correct one-line child into a
+     * full card. The repair only applies once the user asked for expanded children.
      */
     private fun repairChildLayouts(summary: Any, trigger: String) {
+        if (!prefsFacts.groupChildrenEnabled) return
         if (!RowApi.layoutRepairCapable) return
         Attribution.ours {
             for (child in RowApi.attachedChildrenOf(summary)) {
@@ -226,66 +305,47 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
     }
 
     private fun applyExpanded(row: Any, facts: RowFacts) {
-        Attribution.ours {
-            try {
-                RowApi.setSystemExpanded?.invoke(row, true)
-                    ?: RowApi.setUserExpanded2?.invoke(row, true, true)
-                    ?: RowApi.setUserExpanded1?.invoke(row, true)
-            } catch (t: Throwable) {
-                NotifLog.d { "v2 apply failed key=${facts.key}: $t" }
-            }
-        }
+        val clicked = Attribution.ours { RowApi.clickExpand(row) }
+        if (clicked) NotifLog.d { "v2 arrow EXPAND key=${facts.key}" }
+        else NotifLog.d { "v2 arrow missing key=${facts.key}" }
         RowStateStore.onApplied(facts.key)
     }
 
     /**
      * Returns a group child to collapsed.
      *
-     * `setUserExpanded(false, allowChildExpansion = false)` is the mirror of what expanded it:
-     * the heads-up path uses `setUserExpanded(true, true)`, so clearing `mIsSystemExpanded` alone
-     * would not collapse anything — `isExpanded()` reads `mUserExpanded` at its tail. Passing
-     * false for the second argument keeps the call away from the group branch, so this touches
-     * the child only. It is the same primitive the heads-up code already uses to collapse
-     * children, so no new mechanism is introduced.
+     * The arrow is a toggle, and the policy only returns [Decision.Collapse] for a row that is
+     * currently expanded, so invoking the row's own arrow listener flips it closed. That keeps
+     * SystemUI's own bookkeeping (`mUserExpanded`, `mHasUserChangedExpansion`, heights) as the
+     * single writer instead of clearing fields behind its back.
      *
      * This deliberately leaves `mHasUserChangedExpansion` set, which means the row now behaves
      * exactly as if the user had collapsed it — including expiring when SystemUI resets the row
      * on the next repost. That is the lifetime we want.
      */
     private fun applyCollapsed(row: Any, facts: RowFacts) {
-        Attribution.ours {
-            try {
-                RowApi.setSystemExpanded?.invoke(row, false)
-                RowApi.setUserExpanded2?.invoke(row, false, false)
-                    ?: RowApi.setUserExpanded1?.invoke(row, false)
-            } catch (t: Throwable) {
-                NotifLog.d { "v2 collapse failed key=${facts.key}: $t" }
-            }
-        }
+        val clicked = Attribution.ours { RowApi.clickExpand(row) }
+        if (clicked) NotifLog.d { "v2 arrow COLLAPSE key=${facts.key}" }
+        else NotifLog.d { "v2 arrow missing key=${facts.key}" }
         RowStateStore.onChildCollapsed(facts.key)
     }
 
     /**
      * Opens a group summary.
      *
-     * `setUserExpanded(true, allowChildExpansion = true)` is the *only* primitive used here.
-     * Verified in this ROM's bytecode: for a summary it hands off to
-     * `GroupExpansionManager.setGroupExpanded(entry, true)` and returns before touching
-     * `mUserExpanded`, `mHasUserChangedExpansion` or any height — the same call the expand arrow
-     * makes. `setChildrenExpanded` is deliberately not used: it drives the container directly and
+     * The summary's own arrow listener is `mExpandClickListener`: on this build it calls
+     * `GroupExpansionManagerImpl.setGroupExpanded(entry, !isGroupExpanded)` and then
+     * `StatusBarNotificationPresenter.onExpandClicked` — the real gesture, not a state rewrite.
+     * `setChildrenExpanded` is deliberately not used: it drives the container directly and
      * visibly breaks the grouped layout.
      *
      * SystemUI's own `shouldShowPublic()` guard sits in front of that branch, so a redacted group
      * on the lock screen never opens.
      */
     private fun applyGroupExpanded(row: Any, facts: RowFacts) {
-        Attribution.ours {
-            try {
-                RowApi.setUserExpanded2?.invoke(row, true, true)
-            } catch (t: Throwable) {
-                NotifLog.d { "v2 group apply failed key=${facts.key}: $t" }
-            }
-        }
+        val clicked = Attribution.ours { RowApi.clickExpand(row) }
+        if (clicked) NotifLog.d { "v2 arrow GROUP key=${facts.key}" }
+        else NotifLog.d { "v2 arrow missing key=${facts.key}" }
         RowStateStore.onApplied(facts.key)
         reconcileChildren(row, "group")
     }
@@ -330,8 +390,19 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                         if (param.args[0] == true) return
                         val row = param.thisObject
                         if (!RowApi.bool(RowApi.fOnKeyguard, row)) return
-                        if (XposedHelpers.getAdditionalInstanceField(row, TOKEN) != true) return
-                        param.args[0] = true
+                        if (XposedHelpers.getAdditionalInstanceField(row, TOKEN) == true) {
+                            param.args[0] = true
+                            return
+                        }
+                        val facts = capture(row) ?: return
+                        val decision = ExpandPolicy.decide(
+                            facts, prefsFacts, RowStateStore.isBackedOff(facts.key)
+                        )
+                        if (decision is Decision.Expand || decision is Decision.AlreadyExpanded) {
+                            setToken(row, true)
+                            param.args[0] = true
+                            NotifLog.d { "v2 LS gate flip key=${facts.key} exp=${facts.expandedUngated}" }
+                        }
                     } catch (_: Throwable) {}
                 }
             })
@@ -397,6 +468,9 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
         }
 
         installGroupCollapseMemory(lpparam)
+        installExpandClickSuppressor(lpparam.classLoader)
+        installHudHook(lpparam.classLoader)
+        installHudVeto(lpparam.classLoader)
 
         // ── cold triggers ───────────────────────────────────────────────────
         // Deliberately no per-frame driver. These are the points where the row's situation
@@ -456,6 +530,325 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
         } catch (t: Throwable) { NotifLog.e("v2 resetUserExpansion hook failed: $t") }
 
         NotifLog.i("v2 engine installed")
+    }
+
+    /**
+     * Stops a programmatic arrow click from opening the shade.
+     *
+     * `ExpandableNotificationRow`'s arrow listener ends in
+     * `StatusBarNotificationPresenter.onExpandClicked`, which opens the notification shade when
+     * the row is on the lock screen. Our clicks are not the user's, so they must not have that
+     * side effect — but a real tap must still work, which is why the suppression is gated on
+     * [Attribution.isOurs] rather than on the method or the row.
+     */
+    private fun installExpandClickSuppressor(cl: ClassLoader) {
+        try {
+            val cls = cl.loadClass("com.android.systemui.statusbar.phone.StatusBarNotificationPresenter")
+            XposedBridge.hookAllMethods(cls, "onExpandClicked", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (Attribution.isOurs()) param.result = null
+                }
+            })
+            NotifLog.d { "v2 expand-click suppressor installed" }
+        } catch (t: Throwable) {
+            NotifLog.d { "v2 expand-click suppressor unavailable: ${t.javaClass.simpleName}" }
+        }
+    }
+
+    private fun setSystemExpanded(row: Any, value: Boolean): Boolean = try {
+        val m = RowApi.setSystemExpanded ?: return false
+        m.invoke(row, value)
+        true
+    } catch (_: Throwable) { false }
+
+    private fun expandUserExpanded(row: Any): Boolean = try {
+        setSystemExpanded(row, true)
+        val m2 = RowApi.setUserExpanded2
+        if (m2 != null) {
+            m2.invoke(row, true, true)
+        } else {
+            val m1 = RowApi.setUserExpanded1 ?: return false
+            m1.invoke(row, true)
+        }
+        RowApi.isExpandedUngated(row)
+    } catch (_: Throwable) { false }
+
+    private fun collapseUserExpanded(row: Any): Boolean = try {
+        setSystemExpanded(row, false)
+        try { XposedHelpers.callMethod(row, "setExpandedWhenPinned", false) } catch (_: Throwable) {}
+        val m2 = RowApi.setUserExpanded2
+        if (m2 != null) {
+            m2.invoke(row, false, true)
+        } else {
+            val m1 = RowApi.setUserExpanded1 ?: return false
+            m1.invoke(row, false)
+        }
+        !RowApi.isExpandedUngated(row)
+    } catch (_: Throwable) { false }
+
+    /**
+     * v2 HUD layout/height hooks.
+     *
+     * Engine 1's heads-up hooks skip group rows, so a grouped HUD stays on the single-line layout
+     * (194 px) while a single HUD expands (549 px). These hooks apply the same forced expanded
+     * type and height only to the current HUD key; the shade row is collapsed again by
+     * [hudExpandedKeys].
+     */
+    private fun installHudLayoutHooks(cl: ClassLoader) {
+        try {
+            val content = cl.loadClass(
+                "com.android.systemui.statusbar.notification.row.NotificationContentView"
+            )
+            XposedBridge.hookAllMethods(content, "calculateVisibleType", object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    try {
+                        val view = param.thisObject ?: return
+                        if (!XposedHelpers.getBooleanField(view, "mIsHeadsUp")) return
+                        val result = param.result as? Int ?: return
+                        if (result != VISIBLE_TYPE_HEADSUP) return
+                        val row = XposedHelpers.getObjectField(view, "mContainingNotification") ?: return
+                        val key = keyOf(row) ?: return
+                        if (key != hudKey && key != newestChildKey) return
+                        if (RowApi.callBool(RowApi.isSummaryWithChildren, row)) return
+                        if (XposedHelpers.getObjectField(view, "mExpandedChild") == null) return
+                        param.result = VISIBLE_TYPE_EXPANDED
+                        NotifLog.d { "v2 HUD visible-type key=$key 2->1" }
+                    } catch (_: Throwable) {}
+                }
+            })
+            NotifLog.d { "v2 HUD visible-type hook installed" }
+        } catch (t: Throwable) {
+            NotifLog.d { "v2 HUD visible-type hook unavailable: ${t.javaClass.simpleName}" }
+        }
+
+        val rowClass = RowApi.rowClass ?: return
+        try {
+            XposedBridge.hookAllMethods(rowClass, "getIntrinsicHeight", object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    try {
+                        val row = param.thisObject ?: return
+                        if (!RowApi.bool(RowApi.fIsHeadsUp, row)) return
+                        val key = keyOf(row) ?: return
+                        if (key != hudKey && key != newestChildKey) return
+                        if (RowApi.callBool(RowApi.isSummaryWithChildren, row)) return
+                        val layout = XposedHelpers.getObjectField(row, "mPrivateLayout") ?: return
+                        val child = XposedHelpers.getObjectField(layout, "mExpandedChild") as? android.view.View ?: return
+                        val h = child.measuredHeight
+                        if (h <= 0) return
+                        if (param.result != h) {
+                            param.result = h
+                            NotifLog.d { "v2 HUD intrinsic height key=$key h=$h" }
+                        }
+                    } catch (_: Throwable) {}
+                }
+            })
+            NotifLog.d { "v2 HUD intrinsic hook installed" }
+        } catch (t: Throwable) {
+            NotifLog.d { "v2 HUD intrinsic hook unavailable: ${t.javaClass.simpleName}" }
+        }
+
+        try {
+            XposedBridge.hookAllMethods(rowClass, "getPinnedHeadsUpHeight", object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    try {
+                        val row = param.thisObject ?: return
+                        if (!RowApi.bool(RowApi.fIsHeadsUp, row)) return
+                        val key = keyOf(row) ?: return
+                        if (key != hudKey && key != newestChildKey) return
+                        if (RowApi.callBool(RowApi.isSummaryWithChildren, row)) return
+                        val layout = XposedHelpers.getObjectField(row, "mPrivateLayout") ?: return
+                        val child = XposedHelpers.getObjectField(layout, "mExpandedChild") as? android.view.View ?: return
+                        val h = child.measuredHeight
+                        if (h <= 0) return
+                        if (param.result != h) {
+                            param.result = h
+                            NotifLog.d { "v2 HUD pinned height key=$key h=$h" }
+                        }
+                    } catch (_: Throwable) {}
+                }
+            })
+            NotifLog.d { "v2 HUD pinned-height hook installed" }
+        } catch (t: Throwable) {
+            NotifLog.d { "v2 HUD pinned-height hook unavailable: ${t.javaClass.simpleName}" }
+        }
+    }
+
+    /**
+     * Engine 2's heads-up expansion. Engine 1's HU hooks are gated off when v2 is selected, so
+     * this is the only thing that expands a pinned row. It clicks the row's real arrow listener
+     * and only for the newest non-summary notification; an older row that SystemUI re-pins is
+     * left alone instead of being re-expanded.
+     */
+    private fun installHudHook(cl: ClassLoader) {
+        val rowClass = RowApi.rowClass ?: return
+        try {
+            XposedBridge.hookAllMethods(rowClass, "setHeadsUp", object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val up = param.args.getOrNull(0) == true
+                    val row = param.thisObject ?: return
+                    val key = keyOf(row) ?: return
+                    val view = row as? android.view.View
+                    if (up) {
+                        hudKey = key
+                    } else {
+                        if (hudKey == key) hudKey = null
+                        if (hudPendingKey == key) hudPendingKey = null
+                        if (hudExpandedKeys.remove(key)) {
+                            view?.postDelayed({
+                                try {
+                                    if (RowApi.bool(RowApi.fIsHeadsUp, row)) return@postDelayed
+                                    Attribution.ours {
+                                        if (collapseUserExpanded(row)) {
+                                            RowStateStore.onChildCollapsed(key)
+                                            NotifLog.d { "v2 HUD auto-collapse key=$key" }
+                                        }
+                                    }
+                                } catch (_: Throwable) {}
+                            }, 250L)
+                        }
+                        return
+                    }
+                    if (key != newestChildKey) return
+                    val grouped = try { capture(row)?.isGroupChild == true } catch (_: Throwable) { true }
+                    if (grouped) {
+                        val v = view ?: return
+                        v.postDelayed({
+                            try {
+                                if (!v.isAttachedToWindow) return@postDelayed
+                                if (RowApi.isExpandedUngated(row)) {
+                                    hudExpandedKeys.add(key)
+                                    return@postDelayed
+                                }
+                                Attribution.ours {
+                                    if (expandUserExpanded(row)) {
+                                        hudExpandedKeys.add(key)
+                                        RowStateStore.onApplied(key)
+                                        NotifLog.d { "v2 HUD auto-expand key=$key" }
+                                    } else {
+                                        NotifLog.d { "v2 HUD auto-expand missing key=$key" }
+                                    }
+                                }
+                            } catch (_: Throwable) {}
+                        }, 60L)
+                        return
+                    }
+                    val v = view ?: return
+                    v.postDelayed(object : Runnable {
+                        override fun run() {
+                            try {
+                                if (!v.isAttachedToWindow) return
+                                if (RowApi.isExpandedUngated(row)) {
+                                    hudExpandedKeys.add(key)
+                                    return
+                                }
+                                Attribution.ours {
+                                    if (RowApi.clickExpand(row)) {
+                                        hudExpandedKeys.add(key)
+                                        NotifLog.d { "v2 HUD arrow EXPAND key=$key" }
+                                    } else {
+                                        NotifLog.d { "v2 HUD arrow missing key=$key" }
+                                    }
+                                }
+                            } catch (_: Throwable) {}
+                        }
+                    }, 60L)
+                }
+            })
+            XposedBridge.hookAllMethods(rowClass, "setPinnedStatus", object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    try {
+                        val row = param.thisObject ?: return
+                        val key = keyOf(row) ?: return
+                        if (key != newestChildKey) return
+                        val status = param.args.getOrNull(0) ?: return
+                        val pinned = XposedHelpers.callMethod(status, "isPinned") as? Boolean ?: false
+                        if (!pinned) return
+                        NotifLog.d { "v2 HUD pin seen key=$key" }
+                        Attribution.ours {
+                            XposedHelpers.callMethod(row, "setExpandedWhenPinned", true)
+                            setSystemExpanded(row, true)
+                        }
+                        hudExpandedKeys.add(key)
+                        NotifLog.d { "v2 HUD expand pinned key=$key" }
+                    } catch (_: Throwable) {}
+                }
+            })
+            NotifLog.d { "v2 HUD arrow hook installed" }
+        } catch (t: Throwable) {
+            NotifLog.d { "v2 HUD arrow hook unavailable: ${t.javaClass.simpleName}" }
+        }
+        installHudLayoutHooks(cl)
+    }
+
+    /**
+     * Replaces a stale HUD entry with the newest fresh entry.
+     *
+     * Measured on OxygenOS 16: the group refresh posts the stale sibling to `showNotification`,
+     * and the genuinely new child is never offered. The HUD manager only accepts the entry it is
+     * given, so the stale entry is swapped for the stored newest entry before the original call
+     * runs. The freshness check is repeated on the substitute.
+     */
+    private fun promoteNewest(param: XC_MethodHook.MethodHookParam, staleKey: String): Boolean {
+        val entry = newestChildEntry ?: return false
+        val freshKey = newestChildKey ?: return false
+        if (freshKey == staleKey) return false
+        val sbn = try { XposedHelpers.callMethod(entry, "getSbn") } catch (_: Throwable) { return false }
+        val key = try { XposedHelpers.callMethod(sbn, "getKey") as? String } catch (_: Throwable) { null } ?: return false
+        if (key != freshKey) return false
+        val notif = try { XposedHelpers.callMethod(sbn, "getNotification") } catch (_: Throwable) { return false }
+        val whenMillis = try { XposedHelpers.getLongField(notif, "when") } catch (_: Throwable) { 0L }
+        val age = System.currentTimeMillis() - whenMillis
+        if (whenMillis <= 0L || age < -5_000L || age > HUD_FRESH_MS) return false
+        param.args[0] = entry
+        hudPendingKey = freshKey
+        hudPendingAt = now()
+        NotifLog.d { "v2 HUD replace stale key=$staleKey fresh=$freshKey when=$whenMillis age=$age" }
+        return true
+    }
+
+    /**
+     * Rejects grouped heads-up content that is not current.
+     *
+     * Measured on OxygenOS 16: a group refresh promoted a sibling whose `Notification.when` was
+     * 2.6 minutes old while the genuinely new message was current. The wrong row was the one
+     * that reached `showNotification`. Only content newer than [HUD_FRESH_MS] may open a grouped
+     * heads-up; the stale sibling is vetoed and the current chat stays eligible. Standalone
+     * notifications and summaries are untouched.
+     */
+    private fun installHudVeto(cl: ClassLoader) {
+        try {
+            val cls = cl.loadClass("com.android.systemui.statusbar.notification.headsup.HeadsUpManagerImpl")
+            XposedBridge.hookAllMethods(cls, "showNotification", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    try {
+                        if (param.args.size < 2 || param.args[1] !is Boolean) return
+                        val entry = param.args[0] ?: return
+                        val sbn = XposedHelpers.callMethod(entry, "getSbn") ?: return
+                        val key = XposedHelpers.callMethod(sbn, "getKey") as? String ?: return
+                        val groupKey = XposedHelpers.callMethod(sbn, "getGroupKey") as? String
+                        if (groupKey == null) return
+                        val notification = XposedHelpers.callMethod(sbn, "getNotification")
+                        val contentWhen = try {
+                            XposedHelpers.getLongField(notification, "when")
+                        } catch (_: Throwable) { 0L }
+                        val age = System.currentTimeMillis() - contentWhen
+                        val fresh = contentWhen > 0L && age >= -5_000L && age <= HUD_FRESH_MS
+                        if (fresh) {
+                            hudPendingKey = key
+                            hudPendingAt = now()
+                            NotifLog.d { "v2 HUD allow fresh key=$key when=$contentWhen age=$age" }
+                            return
+                        }
+                        if (promoteNewest(param, key)) return
+                        param.result = null
+                        NotifLog.d { "v2 HUD veto stale key=$key when=$contentWhen age=$age" }
+                    } catch (_: Throwable) {}
+                }
+            })
+            NotifLog.d { "v2 HUD veto installed" }
+        } catch (t: Throwable) {
+            NotifLog.d { "v2 HUD veto unavailable: ${t.javaClass.simpleName}" }
+        }
     }
 
     /**

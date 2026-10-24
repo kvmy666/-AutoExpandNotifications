@@ -3,6 +3,7 @@ package io.github.kvmy666.autoexpand.hook.notif
 import android.util.Log
 import java.lang.reflect.Field
 import java.lang.reflect.Method
+import java.lang.reflect.Modifier
 
 /**
  * The one place that reflects into `ExpandableNotificationRow`.
@@ -47,6 +48,8 @@ object RowApi {
     private var groupEntryClass: Class<*>? = null
     private var getParentEntry: Method? = null   // PipelineEntry.getParent()
     private var getGroupSummary: Method? = null  // GroupEntry.getSummary()
+    /** The static top-level `GroupEntry` — anything parented to it is not inside a group. */
+    private var rootEntry: Any? = null
 
     // Fields
     var fIsHeadsUp: Field? = null; private set
@@ -58,6 +61,7 @@ object RowApi {
     private var fChildrenContainer: Field? = null
     private var fAttachedChildren: Field? = null
     private var fPrivateLayout: Field? = null
+    private var fExpandClickListener: Field? = null
 
     // NotificationContentView — the row's content, and the thing that decides which of the
     // inflated layouts (contracted / expanded / heads-up / single-line) is on screen.
@@ -105,6 +109,7 @@ object RowApi {
         fChildrenContainer       = field(cls, "mChildrenContainer")
         fAttachedChildren        = fChildrenContainer?.type?.let { field(it, "mAttachedChildren") }
         fPrivateLayout           = field(cls, "mPrivateLayout")
+        fExpandClickListener     = field(cls, "mExpandClickListener")
         fPrivateLayout?.type?.let { contentView ->
             getVisibleType = method(contentView, "getVisibleType")
             selectLayout   = method(contentView, "selectLayout",
@@ -130,8 +135,25 @@ object RowApi {
             ?: loadClass(classLoader, LIST_ENTRY_CLASS) ?: return
         getParentEntry = method(parentOwner, "getParent")
         groupEntryClass = loadClass(classLoader, GROUP_ENTRY_CLASS)
-        getGroupSummary = groupEntryClass?.let { method(it, "getSummary") }
+        groupEntryClass?.let { cls ->
+            rootEntry = resolveRootEntry(cls)
+            getGroupSummary = method(cls, "getSummary")
+        }
     }
+
+    /**
+     * Reads the static root `GroupEntry` by type rather than by field name.
+     *
+     * `ROOT_ENTRY` is the AOSP name but R8 is free to rename it, so the type is the reliable
+     * discriminator: a static field of the entry's own type. The name is only a preference.
+     */
+    private fun resolveRootEntry(cls: Class<*>): Any? = try {
+        val candidates = cls.declaredFields.filter {
+            Modifier.isStatic(it.modifiers) && cls.isAssignableFrom(it.type)
+        }
+        val f = candidates.firstOrNull { it.name == "ROOT_ENTRY" } ?: candidates.firstOrNull()
+        f?.apply { isAccessible = true }?.get(null)
+    } catch (_: Throwable) { null }
 
     private fun loadClass(classLoader: ClassLoader, name: String): Class<*>? =
         try { classLoader.loadClass(name) } catch (_: Throwable) { null }
@@ -146,7 +168,8 @@ object RowApi {
                 "fKidsExp=${b(fChildrenExpanded)} groupExp=${b(isGroupExpanded)} " +
                 "showPublic=${b(shouldShowPublic)} kids=${b(fChildrenContainer)}/${b(fAttachedChildren)} " +
                 "content=${b(fPrivateLayout)} visType=${b(getVisibleType)} selectLayout=${b(selectLayout)} " +
-                "entryParent=${b(getParentEntry)} groupSummary=${b(getGroupSummary)}"
+                "entryParent=${b(getParentEntry)} groupSummary=${b(getGroupSummary)} " +
+                "rootEntry=${b(rootEntry)} arrow=${b(fExpandClickListener)}"
 
     /** True when the group parent/children toggles have everything they need on this ROM. */
     val groupCapable: Boolean
@@ -239,6 +262,26 @@ object RowApi {
     } catch (_: Throwable) { false }
 
     /**
+     * Drives the row's own expand arrow — SystemUI's real listener, not a state rewrite.
+     *
+     * [fExpandClickListener] is the view's own `OnExpandClickListener`; its `onClick` is what a
+     * tap on the arrow runs, so it keeps every decision (summary vs single, grouped vs not) and
+     * every side effect (`StatusBarNotificationPresenter.onExpandClicked`) inside SystemUI.
+     * Returns false when the field or the view is missing, never throws.
+     */
+    fun clickExpand(row: Any): Boolean {
+        val listener = try { fExpandClickListener?.get(row) } catch (t: Throwable) { null } ?: return false
+        val view = row as? android.view.View ?: return false
+        return try {
+            (listener as android.view.View.OnClickListener).onClick(view)
+            true
+        } catch (t: Throwable) {
+            NotifLog.d { "arrow click failed: ${t.javaClass.simpleName}" }
+            false
+        }
+    }
+
+    /**
      * Whether the notification pipeline draws this row *inside a group* — SystemUI's own answer,
      * not the app's.
      *
@@ -250,26 +293,32 @@ object RowApi {
      *
      * Mirrors `GroupMembershipManagerImpl.getGroupSummary` as read out of this device's dex:
      * a row is a group child exactly when its parent is a `GroupEntry` holding a summary.
-     * `GroupEntry.ROOT_ENTRY` — the top level — never has one, so it needs no special case.
+     * `GroupEntry.ROOT_ENTRY` — the top level — is never a group, so a row parented to it is
+     * unambiguously a single.
      *
      * This is the *model*, set by the pipeline before the views are bound, which is why it is
      * trustworthy on the pass where the view-level `isChildInGroup()` is still false.
      *
      * Returns `null` for "cannot tell" — the handles are missing, the entry is not attached to
-     * the pipeline yet, or the parent is some other shape (an Android 16 `BundleEntry`). The
-     * caller falls back to the group key there, which is the previous behaviour.
+     * the pipeline yet, the parent is some other shape (an Android 16 `BundleEntry`), or the
+     * parent is a non-root `GroupEntry` whose summary has not attached yet. That last case is
+     * why this must not answer `false`: forming-group rows would look like singles and be
+     * expanded before SystemUI pins them. The caller falls back to the group key there.
      */
     fun pipelineGroupedOf(row: Any): Boolean? = try {
         val getParent = getParentEntry
         val groupEntry = groupEntryClass
         val getSummary = getGroupSummary
-        if (getParent == null || groupEntry == null || getSummary == null) null
+        if (getParent == null || groupEntry == null) null
         else {
             val parent = entryOf(row)?.let { getParent.invoke(it) }
             when {
                 parent == null -> null
                 !groupEntry.isInstance(parent) -> null
-                else -> getSummary.invoke(parent) != null
+                rootEntry != null && parent === rootEntry -> false
+                getSummary != null && getSummary.invoke(parent) != null -> true
+                // Non-root group whose summary has not attached yet: unknown, not "single".
+                else -> null
             }
         }
     } catch (_: Throwable) { null }

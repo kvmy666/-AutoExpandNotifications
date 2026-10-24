@@ -48,6 +48,16 @@ data class RowFacts(
      * this fact exists to get right.
      */
     val pipelineGrouped: Boolean? = null,
+    /**
+     * A group summary for this row's package is currently live.
+     *
+     * `pipelineGrouped` is momentarily `false` while SystemUI re-parents a child into a
+     * freshly-updated group. During that window a real group child looks like `ROOT_ENTRY`;
+     * the group key still says `|g:`. If a summary exists for the package, that pair means
+     * "transiently ungrouped child", not "standalone single". Without this, the old child is
+     * expanded as a single and can be promoted to a second heads-up.
+     */
+    val pkgHasLiveSummary: Boolean = false,
 ) {
     /**
      * Whether the notification belongs to *any* group.
@@ -81,10 +91,18 @@ data class RowFacts(
      * thread its own group key and posts no summary, so its notifications carry `|g:…` while
      * rendering as ordinary single cards — and were skipped as group children, collapsed, for
      * as long as the children toggle was off. [pipelineGrouped] is SystemUI's own verdict and
-     * wins wherever it can be read.
+     * wins wherever it can be read — with one measured exception: during a group refresh
+     * SystemUI detaches a child from its summary and its pipeline parent is briefly
+     * `ROOT_ENTRY`, so `pipelineGrouped` reads `false` even though the notification is still
+     * group-keyed and a summary for the package is live. [pkgHasLiveSummary] distinguishes that
+     * re-parent window from a genuine standalone (Instagram's lone child has no summary).
      */
     val isGroupChild: Boolean
-        get() = !isGroupSummary && (pipelineGrouped ?: belongsToGroup)
+        get() = !isGroupSummary && when {
+            pipelineGrouped == true -> true
+            pipelineGrouped == false -> belongsToGroup && pkgHasLiveSummary
+            else -> belongsToGroup
+        }
 
     /** Diagnostic only — which flavour of group this is, for the log line. */
     val isSystemAggregate: Boolean
@@ -99,6 +117,12 @@ data class RowFacts(
         const val SYSTEM_AGGREGATE_MARKER = "g:Aggregate_"
         /** Present in the group key of every grouped notification, absent for singles. */
         const val GROUP_MARKER = "|g:"
+        /**
+         * Keys of SystemUI's own HUD rows (e.g. `-2|com.android.systemui|1|null|0`). They are
+         * internal to the notification pipeline, not user notifications, and must never be
+         * expanded, collapsed or tracked.
+         */
+        const val INTERNAL_KEY_PREFIX = "-2|"
     }
 }
 
@@ -144,7 +168,9 @@ sealed interface Decision {
         /** A summary whose children have not attached yet — writing anything now breaks it. */
         GroupNotReady,
         /** A child whose group is still closed — expanding it would inflate the collapsed preview. */
-        GroupCollapsed;
+        GroupCollapsed,
+        /** SystemUI's own internal row (the HUD container) — never a user notification. */
+        Internal;
 
         /**
          * Whether the lock-screen token should be dropped for this skip.
@@ -165,6 +191,10 @@ object ExpandPolicy {
      *        stop rather than fight SystemUI (see [RowStateStore]).
      */
     fun decide(facts: RowFacts, prefs: PrefsFacts, backedOff: Boolean): Decision {
+        // SystemUI's HUD container and other pipeline-internal rows are not notifications.
+        if (facts.key.startsWith(RowFacts.INTERNAL_KEY_PREFIX))
+            return Decision.Skip(Decision.Reason.Internal)
+
         // Heads-up owns its own engine and is frozen — never touched here.
         if (facts.isHeadsUp) return Decision.Skip(Decision.Reason.HeadsUp)
         if (facts.isPinned)  return Decision.Skip(Decision.Reason.Pinned)

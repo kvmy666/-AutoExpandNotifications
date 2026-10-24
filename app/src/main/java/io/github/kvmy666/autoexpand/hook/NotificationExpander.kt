@@ -241,6 +241,8 @@ class NotificationExpander(private val prefs: PrefsBridge) {
      * when expanded — so re-entry from setHeadsUp re-fires can't bounce the state.
      */
     private fun expandGroupIfNeeded(rowView: View, rowObj: Any, pkg: String?) {
+        // Engine 2 owns heads-up entirely; Engine 1 must not touch HUD state.
+        if (useV2()) return
         // Master kill-switch: when ON, leave grouped HUDs at OEM default (collapsed parent).
         // Singles bypass this function entirely, so their auto-expand path is unaffected.
         if (prefs.isKillSwitchActive("disable_headsup_hooks_enabled")) return
@@ -361,6 +363,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                 Int::class.javaPrimitiveType,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
+                        if (useV2()) return
                         try {
                             val notifParent = XposedHelpers.getObjectField(param.thisObject, "mContainingNotification") ?: return
                             val pkg = getNotificationPackage(notifParent)
@@ -543,6 +546,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                 "calculateVisibleType",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
+                        if (useV2()) return
                         try {
                             val pkg = getNotificationPackageFromContentView(param.thisObject)
                             if (shouldSkipNotification("expand_headsup_enabled", pkg)) return
@@ -584,6 +588,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                 "getIntrinsicHeight",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
+                        if (useV2()) return
                         try {
                             val pkg = getNotificationPackage(param.thisObject)
                             if (shouldSkipNotification("expand_headsup_enabled", pkg)) return
@@ -616,6 +621,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                 "getPinnedHeadsUpHeight", Boolean::class.javaPrimitiveType,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
+                        if (useV2()) return
                         try {
                             val pkg = getNotificationPackage(param.thisObject)
                             if (shouldSkipNotification("expand_headsup_enabled", pkg)) return
@@ -643,6 +649,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                 "setHeadsUp", Boolean::class.javaPrimitiveType,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (useV2()) return
                         val v = param.args[0] as Boolean
                         val pkg = getNotificationPackage(param.thisObject)
                         if (shouldSkipNotification("expand_headsup_enabled", pkg)) return
@@ -663,6 +670,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                         }
                     }
                     override fun afterHookedMethod(param: MethodHookParam) {
+                        if (useV2()) return
                         if (param.args[0] as Boolean != true) return
                         val pkg = getNotificationPackage(param.thisObject)
                         if (shouldSkipNotification("expand_headsup_enabled", pkg)) return
@@ -683,6 +691,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                 "setExpandedWhenPinned",
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (useV2()) return
                         val isGroup = XposedHelpers.getAdditionalInstanceField(param.thisObject, "aeIsGroup") as? Boolean ?: false
                         if (isGroup) return
                         val value = param.args[0] as Boolean
