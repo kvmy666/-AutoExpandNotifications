@@ -57,6 +57,10 @@ object TestNotifier {
             "Group (summary + 2 children)",
             "Explicit group key — the legacy grouped-notification path"
         ),
+        StaleThenFresh(
+            "Stale sibling + fresh child",
+            "Old child stays in the shade, a new one arrives — the OxygenOS regression case"
+        ),
         AutoGroupFlood(
             "5 singles (auto-group test)",
             "Five ungrouped notifications. If the ROM still auto-bundles, a summary row appears"
@@ -98,6 +102,7 @@ object TestNotifier {
                 Kind.LongText       -> nm.notify(nextId(), longText(context))
                 Kind.Silent         -> nm.notify(nextId(), silent(context))
                 Kind.Group          -> postGroup(nm, context)
+                Kind.StaleThenFresh -> postStaleThenFresh(nm, context)
                 Kind.AutoGroupFlood -> repeat(5) { i -> nm.notify(nextId(), flood(context, i + 1)) }
                 Kind.LoneGroupChild -> nm.notify(nextId(), loneGroupChild(context))
             }
@@ -194,6 +199,42 @@ object TestNotifier {
                 NotificationCompat.InboxStyle()
                     .addLine("Group child 1")
                     .addLine("Group child 2")
+                    .setSummaryText("2 messages")
+            )
+            .setGroup(GROUP_KEY)
+            .setGroupSummary(true)
+            .build())
+    }
+
+    /**
+     * The OxygenOS regression shape: an old child stays in the shade, a genuinely new child
+     * arrives in the same group, and the summary updates last (as Telegram does). Stock AOSP
+     * HUDs the summary; OxygenOS offers the stale child. The engine must show the fresh chat
+     * and never the stale one.
+     */
+    private fun postStaleThenFresh(nm: NotificationManager, context: Context) {
+        val staleWhen = System.currentTimeMillis() - 5 * 60_000L
+        nm.notify(nextId(), base(context)
+            .setContentTitle("Stale child")
+            .setContentText("Posted five minutes ago")
+            .setWhen(staleWhen)
+            .setShowWhen(true)
+            .setGroup(GROUP_KEY)
+            .build())
+        nm.notify(nextId(), base(context)
+            .setContentTitle("Fresh child")
+            .setContentText("Just arrived")
+            .setWhen(System.currentTimeMillis())
+            .setShowWhen(true)
+            .setGroup(GROUP_KEY)
+            .build())
+        nm.notify(nextId(), base(context)
+            .setContentTitle("Group summary")
+            .setContentText("2 messages")
+            .setStyle(
+                NotificationCompat.InboxStyle()
+                    .addLine("Stale child")
+                    .addLine("Fresh child")
                     .setSummaryText("2 messages")
             )
             .setGroup(GROUP_KEY)

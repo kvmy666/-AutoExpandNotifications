@@ -33,6 +33,15 @@
             android:name=".AppListActivity"
             android:exported="false" />
 
+        <!-- Debug-only test trigger; TestTriggerReceiver no-ops unless BuildConfig.DEBUG. -->
+        <receiver
+            android:name=".TestTriggerReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="io.github.kvmy666.autoexpand.TEST" />
+            </intent-filter>
+        </receiver>
+
         <provider
             android:name=".PrefsProvider"
             android:authorities="io.github.kvmy666.autoexpand.prefs"

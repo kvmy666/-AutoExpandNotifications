@@ -908,11 +908,130 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                 }
             }
             val bound = hookAllWithFallback(cls, "showNotification", "shownotification", 2, vetoHook)
-            if (bound == 0) NotifLog.d { "v2 HUD veto: showNotification missing" }
-            else NotifLog.d { "v2 HUD veto installed" }
+            if (bound == 0) {
+                NotifLog.i("v2 HUD veto: showNotification missing — using onEntryAdded fallback")
+                installHudEntryFallback(cl)
+            } else NotifLog.d { "v2 HUD veto installed" }
         } catch (t: Throwable) {
             NotifLog.d { "v2 HUD veto unavailable: ${t.javaClass.simpleName}" }
         }
+    }
+
+    /**
+     * Android 15/16 and HyperOS removed `HeadsUpManagerImpl.showNotification`; the alert is now
+     * added through `onEntryAdded(HeadsUpEntry, PinnedStatus)` after `HeadsUpCoordinator` has
+     * bound the view. Hooking it reproduces the OxygenOS gate:
+     *
+     *  - grouped content older than [HUD_FRESH_MS] is dropped instead of shown;
+     *  - a grouped **summary** is replaced by the newest child's entry, so the banner is the
+     *    chat (OxygenOS behaviour) rather than "N messages" with every line merged;
+     *  - a stale sibling is replaced by the newest child when one is still fresh.
+     *
+     * Substitution asks the manager itself for the entry object (`createHeadsUpEntry`), so all
+     * timing/priority fields stay the manager's own. If anything fails, the original entry is
+     * left in place — the fallback must never make a HUD disappear by accident.
+     */
+    private fun installHudEntryFallback(cl: ClassLoader) {
+        val manager = HookTargets.headsUpManager(cl) ?: return
+        val candidates = HookTargetResolver.findByNameHint(manager, "onEntryAdded", 2)
+        val onEntryAdded = candidates.firstOrNull {
+            it.parameterTypes[0].name.contains("HeadsUpEntry")
+        } ?: run {
+            NotifLog.i("v2 HUD fallback: onEntryAdded(HeadsUpEntry, …) missing")
+            return
+        }
+
+        try {
+            XposedBridge.hookMethod(onEntryAdded, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    try {
+                        val headsUpEntry = param.args.getOrNull(0) ?: return
+                        val notifEntry = try {
+                            XposedHelpers.getObjectField(headsUpEntry, "mEntry")
+                        } catch (_: Throwable) { null } ?: return
+
+                        val sbn = XposedHelpers.callMethod(notifEntry, "getSbn") ?: return
+                        val key = XposedHelpers.callMethod(sbn, "getKey") as? String ?: return
+                        val groupKey = XposedHelpers.callMethod(sbn, "getGroupKey") as? String
+                        if (groupKey == null) return
+
+                        val notification = XposedHelpers.callMethod(sbn, "getNotification") ?: return
+                        val contentWhen = try {
+                            XposedHelpers.getLongField(notification, "when")
+                        } catch (_: Throwable) { 0L }
+                        val flags = try {
+                            XposedHelpers.getIntField(notification, "flags")
+                        } catch (_: Throwable) { 0 }
+                        val isSummary = (flags and android.app.Notification.FLAG_GROUP_SUMMARY) != 0
+                        val age = System.currentTimeMillis() - contentWhen
+                        val fresh = contentWhen > 0L && age >= -5_000L && age <= HUD_FRESH_MS
+
+                        if (fresh && !isSummary) {
+                            hudPendingKey = key
+                            hudPendingAt = now()
+                            NotifLog.d { "v2 HUD entry allow fresh key=$key when=$contentWhen age=$age" }
+                            return
+                        }
+
+                        // Summary (or stale content): prefer the newest chat when it is fresh.
+                        if (promoteOnEntry(param, headsUpEntry, key, isSummary)) return
+
+                        if (!fresh) {
+                            param.result = null
+                            NotifLog.d {
+                                "v2 HUD entry veto stale key=$key summary=$isSummary " +
+                                    "when=$contentWhen age=$age"
+                            }
+                        }
+                    } catch (_: Throwable) {}
+                }
+            })
+            NotifLog.i("v2 HUD fallback installed: ${onEntryAdded.declaringClass.simpleName}." +
+                        onEntryAdded.name)
+        } catch (t: Throwable) {
+            NotifLog.e("v2 HUD fallback hook failed: $t")
+        }
+    }
+
+    /**
+     * Swaps a summary/stale HUD entry for the newest child's own entry.
+     *
+     * The new entry comes from the manager's `createHeadsUpEntry`, so it carries the manager's
+     * post-time bookkeeping. Returns false (and leaves the original) when there is nothing
+     * fresh, when the substitute is the same key, or when the manager refuses to build it.
+     */
+    private fun promoteOnEntry(
+        param: XC_MethodHook.MethodHookParam,
+        original: Any,
+        offeredKey: String,
+        offeredIsSummary: Boolean,
+    ): Boolean {
+        val freshEntry = newestChildEntry ?: return false
+        val freshKey = newestChildKey ?: return false
+        if (freshKey == offeredKey) return false
+
+        val sbn = try { XposedHelpers.callMethod(freshEntry, "getSbn") } catch (_: Throwable) { return false }
+        val key = try { XposedHelpers.callMethod(sbn, "getKey") as? String } catch (_: Throwable) { null }
+            ?: return false
+        if (key != freshKey) return false
+        val notification = try { XposedHelpers.callMethod(sbn, "getNotification") } catch (_: Throwable) { return false }
+        val whenMillis = try { XposedHelpers.getLongField(notification, "when") } catch (_: Throwable) { 0L }
+        val age = System.currentTimeMillis() - whenMillis
+        if (whenMillis <= 0L || age < -5_000L || age > HUD_FRESH_MS) return false
+
+        val manager = param.thisObject ?: return false
+        val replacement = try {
+            XposedHelpers.callMethod(manager, "createHeadsUpEntry", freshEntry)
+        } catch (_: Throwable) { null } ?: return false
+
+        param.args[0] = replacement
+        hudPendingKey = freshKey
+        hudPendingAt = now()
+        NotifLog.d {
+            "v2 HUD promote entry key=$offeredKey summary=$offeredIsSummary " +
+                "-> fresh=$freshKey when=$whenMillis age=$age"
+        }
+        return true
     }
 
     /**
