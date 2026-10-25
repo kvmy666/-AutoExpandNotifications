@@ -37,12 +37,10 @@ class NotificationExpander(private val prefs: PrefsBridge) {
     internal companion object {
         @Volatile private var instance: NotificationExpander? = null
 
-        /** Engine 2 entry point for the swipe gesture; no-op before install. */
-        fun swipeToggle(row: Any) {
-            try {
-                instance?.toggleForSwipe(row)
-            } catch (_: Throwable) {}
-        }
+        /** Engine 2 entry point for the swipe gesture; false before install or on failure. */
+        fun swipeToggle(row: Any): Boolean = try {
+            instance?.toggleForSwipe(row) ?: false
+        } catch (_: Throwable) { false }
     }
     private val HUD_TAG        = "TweaksHud"
     private fun ts() = System.nanoTime() / 1_000_000L
@@ -323,13 +321,13 @@ class NotificationExpander(private val prefs: PrefsBridge) {
      * Directly sets mActualHeight to force the card to resize,
      * since notifyHeightChanged alone doesn't resize the OPlus floating window.
      */
-    private fun toggleHeadsUpExpandState(row: Any) {
+    private fun toggleHeadsUpExpandState(row: Any): Boolean {
         try {
             // Grouped HUDs are handled exclusively through the system arrow.
             val isGroup = XposedHelpers.getAdditionalInstanceField(row, "aeIsGroup") as? Boolean ?: false
             if (isGroup) {
                 (row as? View)?.let { findExpandButton(it)?.performClick() }
-                return
+                return false
             }
             val isCollapsed = XposedHelpers.getAdditionalInstanceField(row, "aeCollapsed") as? Boolean ?: false
             val newExpanded = isCollapsed // collapsed→expand, expanded→collapse
@@ -346,7 +344,8 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                 rowView.requestLayout()
                 (rowView.parent as? View)?.requestLayout()
             }
-        } catch (_: Throwable) {}
+            return newExpanded
+        } catch (_: Throwable) { return false }
     }
 
     /**
@@ -420,10 +419,10 @@ class NotificationExpander(private val prefs: PrefsBridge) {
 
     private fun v2OwnsHud(): Boolean = useV2() && !swipeToggleBypass
 
-    /** 3.3.5's toggle, invoked by Engine 2 for the swipe gesture. */
-    fun toggleForSwipe(row: Any) {
+    /** 3.3.5's toggle, invoked by Engine 2 for the swipe gesture. Returns the new expanded state. */
+    fun toggleForSwipe(row: Any): Boolean {
         swipeToggleBypass = true
-        try {
+        return try {
             toggleHeadsUpExpandState(row)
         } finally {
             swipeToggleBypass = false

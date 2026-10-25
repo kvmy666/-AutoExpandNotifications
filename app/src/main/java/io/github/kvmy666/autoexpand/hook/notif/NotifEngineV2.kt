@@ -671,7 +671,12 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
             val ok = if (grouped) {
                 RowApi.clickExpand(row)
             } else {
-                Attribution.ours { NotificationExpander.swipeToggle(row) }
+                val expanded = Attribution.ours { NotificationExpander.swipeToggle(row) }
+                if (!expanded) {
+                    // Collapsed by the gesture: drop the HUD-expanded marker so the exit
+                    // collapse cannot fight the new state.
+                    keyOf(row)?.let { hudExpandedKeys.remove(it) }
+                }
                 true
             }
             NotifLog.d { "v2 swipe toggle grouped=$grouped ok=$ok" }
@@ -681,6 +686,15 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
             false
         }
     }
+
+    /**
+     * Engine 1's 3.3.5 toggle marks a row collapsed in `aeCollapsed`. Engine 2's height and
+     * visible-type hooks must respect that, or they re-assert the expanded child height right
+     * after the swipe and the banner never stays collapsed.
+     */
+    private fun swipeCollapsed(row: Any?): Boolean = try {
+        row != null && XposedHelpers.getAdditionalInstanceField(row, "aeCollapsed") == true
+    } catch (_: Throwable) { false }
 
     private fun collapseUserExpanded(row: Any): Boolean = try {        setSystemExpanded(row, false)
         // Measured on CPH2747_16.0.9.400: `setExpandedWhenPinned(boolean)` does not exist on
@@ -721,6 +735,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                         val result = param.result as? Int ?: return
                         if (result != VISIBLE_TYPE_HEADSUP) return
                         val row = XposedHelpers.getObjectField(view, "mContainingNotification") ?: return
+                        if (swipeCollapsed(row)) return
                         if (!hudExpansionAllowed(row)) return
                         val key = keyOf(row) ?: return
                         if (key != hudKey && key != newestChildKey) return
@@ -748,6 +763,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                     try {
                         val row = param.thisObject ?: return
                         if (!RowApi.bool(RowApi.fIsHeadsUp, row)) return
+                        if (swipeCollapsed(row)) return
                         if (!hudExpansionAllowed(row)) return
                         val key = keyOf(row) ?: return
                         if (key != hudKey && key != newestChildKey) return
@@ -778,6 +794,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                     try {
                         val row = param.thisObject ?: return
                         if (!RowApi.bool(RowApi.fIsHeadsUp, row)) return
+                        if (swipeCollapsed(row)) return
                         if (!hudExpansionAllowed(row)) return
                         val key = keyOf(row) ?: return
                         if (key != hudKey && key != newestChildKey) return
@@ -824,6 +841,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                         // The user turned banner expansion off (or excluded this app): still
                         // track the HUD key so group expand/collapse can wait for it, but never
                         // expand the row.
+                        if (swipeCollapsed(row)) return
                         if (!hudExpansionAllowed(row)) return
                     } else {
                         if (hudKey == key) hudKey = null
@@ -894,6 +912,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     try {
                         val row = param.thisObject ?: return
+                        if (swipeCollapsed(row)) return
                         val key = keyOf(row) ?: return
                         if (key != newestChildKey) return
                         val status = param.args.getOrNull(0) ?: return
