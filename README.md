@@ -6,6 +6,20 @@ A tool that improves how notifications behave.
 
 ![Before and after](screenshots/before-after.gif)
 
+## Supported devices
+
+| Company | System | Status |
+|---|---|---|
+| OnePlus / OPPO / Realme | OxygenOS / ColorOS 16 | ✅ Tested on device |
+| Xiaomi / Redmi / POCO | HyperOS 3 | ✅ Verified against SystemUI |
+| vivo / iQOO | OriginOS 6 | ✅ Verified against SystemUI |
+| Honor | MagicOS | ✅ Verified against SystemUI |
+| Google / Motorola / Sony / Nothing | AOSP / Android 16 | ◐ Engine 2 tested on emulator |
+| Samsung | One UI | ⏳ Not yet |
+| ASUS | ZenUI / ROG | ⏳ Not yet |
+
+*Tested = run on the phone. Verified = checked against that company's real SystemUI files.*
+
 ## Screenshot
 
 ![Auto Expand](screenshots/settings.jpg)
