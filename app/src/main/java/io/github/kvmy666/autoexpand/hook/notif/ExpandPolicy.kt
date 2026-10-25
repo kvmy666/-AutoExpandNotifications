@@ -135,6 +135,13 @@ data class PrefsFacts(
     val groupParentsEnabled: Boolean = false,
     /** Inside an open group, expand each child too instead of leaving them one-line. */
     val groupChildrenEnabled: Boolean = false,
+    /**
+     * `expand_headsup_enabled`. Engine 1 read this in every HU hook; Engine 2 must do the same or
+     * turning the switch off still expands the banner.
+     */
+    val headsupEnabled: Boolean = true,
+    /** `disable_headsup_hooks_enabled`: leave OEM heads-up layouts untouched. */
+    val headsupHooksDisabled: Boolean = false,
 )
 
 sealed interface Decision {

@@ -28,7 +28,13 @@ import io.github.kvmy666.autoexpand.hook.PrefsBridge
  */
 class NotifEngineV2(private val prefs: PrefsBridge) {
 
-    private companion object {
+    internal companion object {
+        /** The installed engine, for Engine 1's gesture hooks (which have no instance). */
+        @Volatile private var instance: NotifEngineV2? = null
+
+        /** Swipe-down toggle entry used by Engine 1; no-op before install. */
+        fun swipeToggle(row: Any?): Boolean = instance?.toggleFromSwipe(row) ?: false
+
         /** Per-row token telling the hot `isExpanded` gate that this row may ignore the keyguard. */
         const val TOKEN = "aeV2LsAllow"
         /** `Notification.FLAG_GROUP_SUMMARY` — read off the posted notification, so race-free. */
@@ -106,9 +112,17 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                                        RowApi.groupCapable,
                 groupChildrenEnabled = prefs.isOptInEnabled("expand_group_children_enabled") &&
                                        RowApi.groupCapable,
+                headsupEnabled       = prefs.isFeatureEnabled("expand_headsup_enabled"),
+                headsupHooksDisabled = prefs.isKillSwitchActive("disable_headsup_hooks_enabled"),
             )
             lsGateEnabled = prefsFacts.lockscreenEnabled && RowApi.lockscreenCapable
             NotifLog.enabled = prefs.isOptInEnabled("notif_debug_logging")
+            NotifLog.i(
+                "v2 prefs: debug=${NotifLog.enabled} headsup=${prefsFacts.headsupEnabled} " +
+                    "hudKill=${prefsFacts.headsupHooksDisabled} " +
+                    "excluded=${prefsFacts.excludedApps.size} " +
+                    "shade=${prefsFacts.shadeEnabled} ls=${prefsFacts.lockscreenEnabled}"
+            )
         } catch (_: Throwable) {}
     }
 
@@ -119,6 +133,23 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
     } catch (_: Throwable) { null }
 
     private fun now() = android.os.SystemClock.uptimeMillis()
+
+    /**
+     * The same heads-up gate Engine 1 applies in `shouldSkipNotification`:
+     * the heads-up toggle, the master kill-switch, and the per-app exclusion list.
+     *
+     * Engine 2 owns HU expansion now, so it has to consult all three; otherwise an excluded app
+     * (e.g. Snapchat) still expands and turning the toggle off changes nothing.
+     */
+    private fun hudExpansionAllowed(row: Any?): Boolean {
+        val target = row ?: return false
+        if (!prefsFacts.headsupEnabled) return false
+        if (prefsFacts.headsupHooksDisabled) return false
+        val pkg = try {
+            RowApi.sbnOf(target)?.let { XposedHelpers.callMethod(it, "getPackageName") as? String }
+        } catch (_: Throwable) { null }
+        return pkg == null || pkg !in prefsFacts.excludedApps
+    }
 
     /** Triggers that fire while a row is being re-attached/re-parented, not from new content. */
     private fun isColdTrigger(trigger: String) =
@@ -374,6 +405,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
     fun install(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (installed) return
         installed = true
+        instance = this
         // Tell the resolver where SystemUI's own bytecode lives; DexKit stays inert unless an
         // exact-name lookup fails.
         HookTargetResolver.prepare(lpparam.appInfo?.sourceDir, prefs.appContext)
@@ -615,8 +647,25 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
         RowApi.isExpandedUngated(row)
     } catch (_: Throwable) { false }
 
-    private fun collapseUserExpanded(row: Any): Boolean = try {
-        setSystemExpanded(row, false)
+    /**
+     * Swipe-down toggle from Engine 1's gesture hooks.
+     *
+     * Engine 1 keeps the touch tracker (the Oplus helper is the only reliable swipe source), but
+     * its own toggle writes `aeCollapsed` / `mExpandedWhenPinned` and heights — state Engine 2
+     * ignores, which is why the popup was blocked but the banner stayed open. Route the change
+     * through v2's real primitives instead.
+     */
+    fun toggleFromSwipe(row: Any?): Boolean {
+        if (row == null) return false
+        return try {
+            Attribution.ours {
+                if (RowApi.isExpandedUngated(row)) collapseUserExpanded(row)
+                else expandUserExpanded(row)
+            }
+        } catch (_: Throwable) { false }
+    }
+
+    private fun collapseUserExpanded(row: Any): Boolean = try {        setSystemExpanded(row, false)
         // Measured on CPH2747_16.0.9.400: `setExpandedWhenPinned(boolean)` does not exist on
         // ExpandableNotificationRow — only the `mExpandedWhenPinned` field. The call therefore
         // throws and is swallowed here; it is kept so a ROM that does declare the setter still
@@ -655,6 +704,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                         val result = param.result as? Int ?: return
                         if (result != VISIBLE_TYPE_HEADSUP) return
                         val row = XposedHelpers.getObjectField(view, "mContainingNotification") ?: return
+                        if (!hudExpansionAllowed(row)) return
                         val key = keyOf(row) ?: return
                         if (key != hudKey && key != newestChildKey) return
                         if (RowApi.callBool(RowApi.isSummaryWithChildren, row)) return
@@ -681,6 +731,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                     try {
                         val row = param.thisObject ?: return
                         if (!RowApi.bool(RowApi.fIsHeadsUp, row)) return
+                        if (!hudExpansionAllowed(row)) return
                         val key = keyOf(row) ?: return
                         if (key != hudKey && key != newestChildKey) return
                         if (RowApi.callBool(RowApi.isSummaryWithChildren, row)) return
@@ -710,6 +761,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                     try {
                         val row = param.thisObject ?: return
                         if (!RowApi.bool(RowApi.fIsHeadsUp, row)) return
+                        if (!hudExpansionAllowed(row)) return
                         val key = keyOf(row) ?: return
                         if (key != hudKey && key != newestChildKey) return
                         if (RowApi.callBool(RowApi.isSummaryWithChildren, row)) return
@@ -751,6 +803,10 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                     val view = row as? android.view.View
                     if (up) {
                         hudKey = key
+                        // The user turned banner expansion off (or excluded this app): still
+                        // track the HUD key so group expand/collapse can wait for it, but never
+                        // expand the row.
+                        if (!hudExpansionAllowed(row)) return
                     } else {
                         if (hudKey == key) hudKey = null
                         if (hudPendingKey == key) hudPendingKey = null
@@ -824,6 +880,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                         val status = param.args.getOrNull(0) ?: return
                         val pinned = XposedHelpers.callMethod(status, "isPinned") as? Boolean ?: false
                         if (!pinned) return
+                        if (!hudExpansionAllowed(row)) return
                         NotifLog.d { "v2 HUD pin seen key=$key" }
                         Attribution.ours {
                             XposedHelpers.callMethod(row, "setExpandedWhenPinned", true)

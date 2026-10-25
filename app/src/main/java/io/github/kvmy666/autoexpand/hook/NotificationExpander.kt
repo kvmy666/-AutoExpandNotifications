@@ -10,6 +10,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage
 import io.github.kvmy666.autoexpand.hook.notif.EngineSelection
 import io.github.kvmy666.autoexpand.hook.notif.HookTargetResolver
 import io.github.kvmy666.autoexpand.hook.notif.HookTargets
+import io.github.kvmy666.autoexpand.hook.notif.NotifEngineV2
 import io.github.kvmy666.autoexpand.hook.notif.Oem
 import io.github.kvmy666.autoexpand.hook.notif.OemDetector
 
@@ -829,7 +830,8 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                         try {
                             if (param.args.size >= 2) {
                                 val row = param.args[1]
-                                toggleHeadsUpExpandState(row)
+                                if (useV2()) NotifEngineV2.swipeToggle(row)
+                                else toggleHeadsUpExpandState(row)
                             }
                         } catch (_: Throwable) {}
                     }
@@ -862,7 +864,11 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                             }
                             if (row == null) row = f1CurrentRow
                             if (row != null) {
-                                toggleHeadsUpExpandState(row)
+                                // Under Engine 2 the banner's state is mUserExpanded, not the
+                                // legacy aeCollapsed/height pair this toggle writes — route the
+                                // gesture through v2's own collapse/expand primitive.
+                                if (useV2()) NotifEngineV2.swipeToggle(row)
+                                else toggleHeadsUpExpandState(row)
                             }
                         } catch (_: Throwable) {}
                     }
