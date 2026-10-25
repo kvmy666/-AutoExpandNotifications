@@ -650,16 +650,18 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
     /**
      * Swipe-down toggle from Engine 1's gesture hooks.
      *
-     * Engine 1 keeps the touch tracker (the Oplus helper is the only reliable swipe source), but
-     * its own toggle writes `aeCollapsed` / `mExpandedWhenPinned` and heights — state Engine 2
-     * ignores, which is why the popup was blocked but the banner stayed open. Route the change
-     * through v2's real primitives instead.
+     * The banner is expanded through `mExpandedWhenPinned`, and the setter for it does not exist
+     * on the verified ROMs, so rewriting user/system expansion is a no-op for a pinned row.
+     * The row's own arrow performs the correct toggle for both the pinned and the shade case, so
+     * the gesture is routed through that same primitive (under our attribution token, so the
+     * expand-click suppressor does not swallow it).
      */
     fun toggleFromSwipe(row: Any?): Boolean {
         if (row == null) return false
         return try {
             Attribution.ours {
-                if (RowApi.isExpandedUngated(row)) collapseUserExpanded(row)
+                if (RowApi.clickExpand(row)) true
+                else if (RowApi.isExpandedUngated(row)) collapseUserExpanded(row)
                 else expandUserExpanded(row)
             }
         } catch (_: Throwable) { false }
