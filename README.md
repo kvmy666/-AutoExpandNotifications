@@ -20,9 +20,11 @@ A tool that improves how notifications behave.
 
 *Tested = run on the phone. Verified = checked against that company's real SystemUI files.*
 
-## Screenshot
+## Screenshots
 
-![Auto Expand](screenshots/settings.jpg)
+| Expanded Heads-Up | Notification Shade |
+|---|---|
+| ![](screenshots/headsup-expanded.jpg) | ![](screenshots/notification-shade.jpg) |
 
 ## What's inside
 
