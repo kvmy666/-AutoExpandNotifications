@@ -204,6 +204,42 @@ Cold triggers must not re-expand an older row (`defer not-newest`).
   required; the lib is at the module's `lib/arm64/libdexkit.so` (verified). On OxygenOS it never
   initializes.
 
+### Xiaomi HyperOS 3 — verified from a downloaded APK
+
+APK: Xiaomi `System UI 16.03.251211.r`, package `com.android.systemui`, HyperOS 3.0.301.0,
+Android 16, 63,664,648 bytes, SHA-256
+`02d87cd7db7c90e4f0100dab2807e8ec82dfd478380f8f65eb5dc64b60055c31` (APKMirror, extracted by the
+uploader from a Redmi Note 14 4G). **Never install an OEM SystemUI on the phone** — inspect only.
+
+Dex findings (all AOSP class paths still exist):
+- `ExpandableNotificationRow`: core members present (`isExpanded(Z)`, `setSystemExpanded`,
+  `setUserExpanded` ×2, all expansion fields, content/children fields). `isGroupExpanded` only as
+  `isGroupExpanded$1`; `resetUserExpansion` and `setExpandedWhenPinned` **absent**.
+- `NotificationChildrenContainer` (stack package) has **no `addNotification`**. Children are added
+  through `ExpandableNotificationRow.addChildNotification(ExpandableNotificationRow, int)`.
+  Engine 1 hooks that declaration only when no container declares `addNotification` (or OEM is
+  Xiaomi), so OxygenOS cannot get both hooks.
+- `StatusBarNotificationActivityStarter` has **no `onNotificationClicked`** and no
+  `startNotificationIntent`; it declares `startNotificationIntentPublic(...)`. Both names are
+  hooked with the same block.
+- `GroupEntry` has **no `getSummary`**; only the `mSummary` field. `RowApi` falls back to the field
+  (`caps` shows `groupSummary=1/0` on Oplus, `0/1` on Xiaomi).
+- `HeadsUpManagerImpl` has **no `showNotification` anywhere in the dex**. The stale-sibling veto
+  therefore cannot bind on HyperOS; the engine logs `v2 HUD veto: showNotification missing` and
+  keeps the visible-type/intrinsic-height paths. Do not invent a substitute entry point — the HUD
+  entry point has to be traced on hardware first.
+- `GroupExpansionManagerImpl.setGroupExpanded(NotificationEntry, Z)` is present, so group
+  collapse memory works.
+
+**Trap — do not "fix" without an unlocked device:** in the pinned path,
+`setExpandedWhenPinned(true)` throws (method absent on both Oplus and Xiaomi), which aborts the
+`Attribution.ours` block before `setSystemExpanded(true)`. The confirmed HUD still expands via
+`calculateVisibleType` 2→1 and the intrinsic height. Reordering or adding the missing setter call
+changes the verified 1121 px path.
+
+No standalone Samsung One UI SystemUI APK is published; verifying it needs a firmware dump from a
+real device.
+
 ## Current verified state
 
 - Committed base: `39eeceb` on `feat/autoexpand-v4`; OEM work is on `feat/oem-hook-resolver`.

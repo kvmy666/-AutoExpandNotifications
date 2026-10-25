@@ -10,6 +10,7 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage
 import io.github.kvmy666.autoexpand.hook.notif.EngineSelection
 import io.github.kvmy666.autoexpand.hook.notif.HookTargetResolver
 import io.github.kvmy666.autoexpand.hook.notif.HookTargets
+import io.github.kvmy666.autoexpand.hook.notif.Oem
 import io.github.kvmy666.autoexpand.hook.notif.OemDetector
 
 /**
@@ -354,6 +355,41 @@ class NotificationExpander(private val prefs: PrefsBridge) {
         return engineV2
     }
 
+    /**
+     * Shared body for both child-attach entry points:
+     *  - AOSP/OxygenOS: `NotificationChildrenContainer.addNotification` (container is `this`);
+     *  - HyperOS 3: `ExpandableNotificationRow.addChildNotification` (the row is `this`), so the
+     *    caller resolves the parent itself and passes it in.
+     */
+    private fun handleChildAttached(notifParent: Any?, child: Any?) {
+        try {
+            if (notifParent == null || child == null) return
+            if (useV2()) return
+            val pkg = getNotificationPackage(notifParent)
+            val parentHU = try { XposedHelpers.getBooleanField(notifParent, "mIsHeadsUp") } catch (_: Throwable) { false }
+            val onKeyguard = try { XposedHelpers.getBooleanField(notifParent, "mOnKeyguard") } catch (_: Throwable) { false }
+            val parentId = System.identityHashCode(notifParent)
+            val childIdx = try { XposedHelpers.callMethod(notifParent, "getNotificationChildCount") as Int } catch (_: Throwable) { -1 }
+            val childCls = child.javaClass.simpleName
+            val childParentRef = try {
+                XposedHelpers.getObjectField(child, "mNotificationParent")?.let { System.identityHashCode(it) }
+            } catch (_: Throwable) { null }
+            Log.d(HUD_TAG, "[${ts()}] addNotification ENTER parent=$parentId pkg=$pkg parentHU=$parentHU onKG=$onKeyguard childIdx=$childIdx childCls=$childCls childParentRef=$childParentRef match=${childParentRef == parentId}")
+
+            if (!parentHU) return
+            if (shouldSkipNotification("expand_headsup_enabled", pkg) ||
+                prefs.isKillSwitchActive("disable_headsup_hooks_enabled")) {
+                Log.d(HUD_TAG, "[${ts()}] addNotification EXIT parent=$parentId branch=HU skipped"); return
+            }
+            XposedHelpers.setAdditionalInstanceField(notifParent, "aeIsGroup", true)
+            // Expand parent so the compact group list is visible from first paint.
+            try { XposedHelpers.callMethod(notifParent, "setUserExpanded", true, true) } catch (_: Throwable) {}
+            val ok = collapseChildNoAnim(child)
+            val h = try { (XposedHelpers.callMethod(child, "getIntrinsicHeight") as? Int) ?: -1 } catch (_: Throwable) { -1 }
+            Log.d(HUD_TAG, "[${ts()}] addNotification EXIT parent=$parentId branch=HU ok=$ok childH=$h pkg=$pkg")
+        } catch (_: Throwable) {}
+    }
+
     fun install(lpparam: XC_LoadPackage.LoadPackageParam) {
 
         // Same resolver context Engine 2 uses; the app context is not available yet at this
@@ -376,49 +412,53 @@ class NotificationExpander(private val prefs: PrefsBridge) {
             if (containers.isEmpty()) {
                 Log.d(HUD_TAG, "engine 1: children container missing — addNotification hook skipped")
             }
-            val childAttach = object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        if (useV2()) return
-                        try {
-                            val notifParent = XposedHelpers.getObjectField(param.thisObject, "mContainingNotification") ?: return
-                            val pkg = getNotificationPackage(notifParent)
-                            val child = param.args[0] ?: return
-                            val parentHU = try { XposedHelpers.getBooleanField(notifParent, "mIsHeadsUp") } catch (_: Throwable) { false }
-                            val onKeyguard = try { XposedHelpers.getBooleanField(notifParent, "mOnKeyguard") } catch (_: Throwable) { false }
-                            val parentId = System.identityHashCode(notifParent)
-                            val childIdx = try { XposedHelpers.callMethod(notifParent, "getNotificationChildCount") as Int } catch (_: Throwable) { -1 }
-                            val childCls = child.javaClass.simpleName
-                            val childParentRef = try {
-                                XposedHelpers.getObjectField(child, "mNotificationParent")?.let { System.identityHashCode(it) }
-                            } catch (_: Throwable) { null }
-                            Log.d(HUD_TAG, "[${ts()}] addNotification ENTER parent=$parentId pkg=$pkg parentHU=$parentHU onKG=$onKeyguard childIdx=$childIdx childCls=$childCls childParentRef=$childParentRef match=${childParentRef == parentId}")
-
-                            if (parentHU) {
-                                if (shouldSkipNotification("expand_headsup_enabled", pkg) ||
-                                    prefs.isKillSwitchActive("disable_headsup_hooks_enabled")) {
-                                    Log.d(HUD_TAG, "[${ts()}] addNotification EXIT parent=$parentId branch=HU skipped"); return
-                                }
-                                XposedHelpers.setAdditionalInstanceField(notifParent, "aeIsGroup", true)
-                                // Expand parent so the compact group list is visible from first paint.
-                                try { XposedHelpers.callMethod(notifParent, "setUserExpanded", true, true) } catch (_: Throwable) {}
-                                val ok = collapseChildNoAnim(child)
-                                val h = try { (XposedHelpers.callMethod(child, "getIntrinsicHeight") as? Int) ?: -1 } catch (_: Throwable) { -1 }
-                                Log.d(HUD_TAG, "[${ts()}] addNotification EXIT parent=$parentId branch=HU ok=$ok childH=$h pkg=$pkg")
-                                return
-                            }
-                        } catch (_: Throwable) {}
-                    }
+            val containerChildAttach = object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    if (useV2()) return
+                    val parent = try {
+                        XposedHelpers.getObjectField(param.thisObject, "mContainingNotification")
+                    } catch (_: Throwable) { null }
+                    handleChildAttached(parent, param.args.getOrNull(0))
                 }
+            }
             // Hook every concrete declaration: OxygenOS's container subclass overrides
             // addNotification, so the base-class hook alone never sees shade calls.
             for (containerCls in containers) {
                 try {
                     XposedHelpers.findAndHookMethod(
-                        containerCls, "addNotification", rowCls, Int::class.javaPrimitiveType, childAttach
+                        containerCls, "addNotification", rowCls, Int::class.javaPrimitiveType, containerChildAttach
                     )
                 } catch (t: Throwable) {
                     Log.d(HUD_TAG, "engine 1: addNotification hook failed on ${containerCls.simpleName}: $t")
                 }
+            }
+
+            // HyperOS 3 (verified from the pulled Xiaomi SystemUI dex) has no
+            // NotificationChildrenContainer.addNotification at all: the row itself declares
+            // addChildNotification(ExpandableNotificationRow, int). Hook that declaration only
+            // when no container declares addNotification (or the ROM is Xiaomi), so OxygenOS
+            // cannot get both hooks firing for the same child.
+            val containersDeclareAdd = containers.any { cls ->
+                HookTargetResolver.findMethod(
+                    cls, listOf("addNotification"), listOf(rowCls, Int::class.javaPrimitiveType!!), Void.TYPE
+                ) != null
+            }
+            val useRowChildAdd = !containersDeclareAdd || OemDetector.current == Oem.XIAOMI
+            val rowChildAdd = if (useRowChildAdd) HookTargetResolver.findMethod(
+                rowCls,
+                listOf("addChildNotification"),
+                listOf(rowCls, Int::class.javaPrimitiveType!!),
+                Void.TYPE,
+                listOf("addchildnotification"),
+            ) else null
+            if (rowChildAdd != null) {
+                XposedBridge.hookMethod(rowChildAdd, object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (useV2()) return
+                        handleChildAttached(param.thisObject, param.args.getOrNull(0))
+                    }
+                })
+                Log.d(HUD_TAG, "engine 1: addChildNotification hook installed")
             }
         } catch (_: Throwable) {}
 
@@ -796,7 +836,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                 }
             })
 
-            XposedBridge.hookAllMethods(actCls, "startNotificationIntent", object : XC_MethodHook() {
+            val launchBlock = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!prefs.isFeatureEnabled("disable_headsup_popup_enabled")) return
                     val isRecent = f1IsDownwardSwipe && (System.currentTimeMillis() - f1SwipeTime < 2000)
@@ -827,7 +867,12 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                         } catch (_: Throwable) {}
                     }
                 }
-            })
+            }
+            XposedBridge.hookAllMethods(actCls, "startNotificationIntent", launchBlock)
+            // HyperOS 3 declares `startNotificationIntentPublic` instead (verified from the
+            // pulled Xiaomi SystemUI dex); hooking both names keeps AOSP/Oplus and HyperOS on
+            // the same block without guessing.
+            XposedBridge.hookAllMethods(actCls, "startNotificationIntentPublic", launchBlock)
             }
         } catch (_: Throwable) {}
 

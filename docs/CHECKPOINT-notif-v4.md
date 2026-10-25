@@ -230,11 +230,27 @@ notif_probe_enabled=1
   aborts safely, and never initializes on OxygenOS because every exact name resolves.
   `extractNativeLibs="true"` is required for the module's `lib/arm64/libdexkit.so`.
 
+## Xiaomi HyperOS 3 (verified from a downloaded APK)
+
+- APK: `System UI 16.03.251211.r`, HyperOS 3.0.301.0, Android 16, SHA-256 `02d87cd7…`.
+  Inspected statically; never installed on the phone.
+- Adaptations driven by the dex: row `addChildNotification` replaces the missing container
+  `addNotification` (only when no container declares it, or OEM is Xiaomi);
+  `startNotificationIntentPublic` is hooked alongside `startNotificationIntent`; `GroupEntry`'s
+  missing `getSummary` falls back to the `mSummary` field.
+- HyperOS has no `showNotification` on `HeadsUpManagerImpl`, so the stale-sibling HUD veto cannot
+  bind; the engine logs it and relies on visible-type/intrinsic height.
+- `setExpandedWhenPinned` is absent; the pinned path's call throws and skips the following
+  `setSystemExpanded(true)`. That is the verified Oplus behaviour too — left untouched.
+- Samsung One UI has no standalone SystemUI APK source; it needs a firmware dump.
+
 ## Test status (2026-10-25, final build)
 
 - Build green; 78 unit tests pass.
 - `pid 16843`: caps all 1s, engine v2 selected, all HUD hooks installed, no missing-target log,
   no DexKit line, and no `addNotification hook failed`.
+- Final build after the HyperOS adaptations (`pid 9185`): same caps, no `addChildNotification`
+  hook on Oplus (correctly gated off), no hook failures.
 - HUD via `TestNotifier` → Group: expanded body + arrow visible, `visible-type 2->1`,
   `pinned height 255`, `TweaksHud` absent; the second child stayed ~5.7 s.
 - Selector verified on screen: Auto / Engine 1 / Engine 2, with Engine 2 selected from the

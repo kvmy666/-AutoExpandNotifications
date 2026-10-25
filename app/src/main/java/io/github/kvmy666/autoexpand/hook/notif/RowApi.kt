@@ -48,6 +48,8 @@ object RowApi {
     private var groupEntryClass: Class<*>? = null
     private var getParentEntry: Method? = null   // PipelineEntry.getParent()
     private var getGroupSummary: Method? = null  // GroupEntry.getSummary()
+    /** Field fallback: HyperOS 3 declares only `GroupEntry.mSummary` (verified). */
+    private var fGroupSummary: Field? = null
     /** The static top-level `GroupEntry` — anything parented to it is not inside a group. */
     private var rootEntry: Any? = null
 
@@ -188,6 +190,11 @@ object RowApi {
             getGroupSummary = HookTargetResolver.findMethod(
                 cls, listOf("getSummary"), emptyList(), null, listOf("getsummary")
             )
+            // HyperOS 3 has no getSummary at all; the pipeline still stores the summary in
+            // `mSummary`. Verified from the pulled Xiaomi SystemUI dex.
+            if (getGroupSummary == null) {
+                fGroupSummary = HookTargetResolver.findField(cls, listOf("mSummary"))
+            }
         }
     }
 
@@ -220,7 +227,7 @@ object RowApi {
                 "fKidsExp=${b(fChildrenExpanded)} groupExp=${b(isGroupExpanded)} " +
                 "showPublic=${b(shouldShowPublic)} kids=${b(fChildrenContainer)}/${b(fAttachedChildren)} " +
                 "content=${b(fPrivateLayout)} visType=${b(getVisibleType)} selectLayout=${b(selectLayout)} " +
-                "entryParent=${b(getParentEntry)} groupSummary=${b(getGroupSummary)} " +
+                "entryParent=${b(getParentEntry)} groupSummary=${b(getGroupSummary)}/${b(fGroupSummary)} " +
                 "rootEntry=${b(rootEntry)} arrow=${b(fExpandClickListener)}"
 
     /** True when the group parent/children toggles have everything they need on this ROM. */
@@ -342,6 +349,7 @@ object RowApi {
         val getParent = getParentEntry
         val groupEntry = groupEntryClass
         val getSummary = getGroupSummary
+        val summaryField = fGroupSummary
         if (getParent == null || groupEntry == null) null
         else {
             val parent = entryOf(row)?.let { getParent.invoke(it) }
@@ -350,6 +358,7 @@ object RowApi {
                 !groupEntry.isInstance(parent) -> null
                 rootEntry != null && parent === rootEntry -> false
                 getSummary != null && getSummary.invoke(parent) != null -> true
+                getSummary == null && summaryField != null && summaryField.get(parent) != null -> true
                 // Non-root group whose summary has not attached yet: unknown, not "single".
                 else -> null
             }

@@ -67,6 +67,14 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    packaging {
+        // The manifest sets extractNativeLibs="true" so DexKit's libdexkit.so is a real file
+        // under the module's lib/arm64/. AGP requires legacy packaging for that layout.
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     kotlinOptions {
         jvmTarget = "17"
     }
