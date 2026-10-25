@@ -1,4 +1,4 @@
-package io.github.kvmy666.autoexpand
+package io.github.kvmy666.autoexpand.debug
 
 import android.app.NotificationManager
 import android.content.Context

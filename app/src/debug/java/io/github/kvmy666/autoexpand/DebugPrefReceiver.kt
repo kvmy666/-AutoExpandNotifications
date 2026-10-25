@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import io.github.kvmy666.autoexpand.debug.TestNotifier
 
 /**
  * Debug-only remote control for prefs.

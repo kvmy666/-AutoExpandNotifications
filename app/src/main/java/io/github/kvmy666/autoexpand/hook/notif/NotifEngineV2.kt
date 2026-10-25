@@ -53,6 +53,9 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
         /** Only content this recent may open a grouped heads-up. */
         const val HUD_FRESH_MS = 60_000L
 
+        /** Clock slack for a notification timestamp a moment in the future. */
+        const val HUD_AGE_SLACK_MS = 5_000L
+
         /**
          * Row frames that mean *the user asked for this*. Everything else the row calls — most
          * importantly `setHideSensitive` on every keyguard transition — is bookkeeping.
@@ -850,18 +853,58 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
         val entry = newestChildEntry ?: return false
         val freshKey = newestChildKey ?: return false
         if (freshKey == staleKey) return false
-        val sbn = try { XposedHelpers.callMethod(entry, "getSbn") } catch (_: Throwable) { return false }
-        val key = try { XposedHelpers.callMethod(sbn, "getKey") as? String } catch (_: Throwable) { null } ?: return false
-        if (key != freshKey) return false
-        val notif = try { XposedHelpers.callMethod(sbn, "getNotification") } catch (_: Throwable) { return false }
-        val whenMillis = try { XposedHelpers.getLongField(notif, "when") } catch (_: Throwable) { 0L }
-        val age = System.currentTimeMillis() - whenMillis
-        if (whenMillis <= 0L || age < -5_000L || age > HUD_FRESH_MS) return false
+        if (entryKey(entry) != freshKey) return false
+        val whenMillis = entryWhen(entry)
+        if (!isFresh(whenMillis)) return false
         param.args[0] = entry
         hudPendingKey = freshKey
         hudPendingAt = now()
-        NotifLog.d { "v2 HUD replace stale key=$staleKey fresh=$freshKey when=$whenMillis age=$age" }
+        NotifLog.d {
+            "v2 HUD replace stale key=$staleKey fresh=$freshKey when=$whenMillis " +
+                "age=${System.currentTimeMillis() - whenMillis}"
+        }
         return true
+    }
+
+    // ── notification-entry helpers (one extraction, four HUD paths) ──────────
+
+    /** Key of a NotificationEntry, or null when the entry cannot answer. */
+    private fun entryKey(entry: Any?): String? = try {
+        val sbn = XposedHelpers.callMethod(entry, "getSbn") ?: return null
+        sbnKey(sbn)
+    } catch (_: Throwable) { null }
+
+    /** Group key of a NotificationEntry; null for a standalone notification. */
+    private fun entryGroupKey(entry: Any?): String? = try {
+        val sbn = XposedHelpers.callMethod(entry, "getSbn") ?: return null
+        XposedHelpers.callMethod(sbn, "getGroupKey") as? String
+    } catch (_: Throwable) { null }
+
+    /** `Notification.when` of a NotificationEntry, 0 when unavailable. */
+    private fun entryWhen(entry: Any?): Long = try {
+        val sbn = XposedHelpers.callMethod(entry, "getSbn") ?: return 0L
+        sbnWhen(sbn)
+    } catch (_: Throwable) { 0L }
+
+    private fun sbnKey(sbn: Any?): String? =
+        try { XposedHelpers.callMethod(sbn, "getKey") as? String } catch (_: Throwable) { null }
+
+    private fun sbnWhen(sbn: Any?): Long = try {
+        val notification = XposedHelpers.callMethod(sbn, "getNotification") ?: return 0L
+        XposedHelpers.getLongField(notification, "when")
+    } catch (_: Throwable) { 0L }
+
+    /** `Notification.flags` of a StatusBarNotification, 0 when unavailable. */
+    private fun sbnFlags(sbn: Any?): Int = try {
+        val notification = XposedHelpers.callMethod(sbn, "getNotification") ?: return 0
+        XposedHelpers.getIntField(notification, "flags")
+    } catch (_: Throwable) { 0 }
+
+    /** The one freshness rule shared by every HUD entry point. */
+    private fun isFresh(whenMillis: Long): Boolean {
+        if (whenMillis <= 0L) return false
+        val age = System.currentTimeMillis() - whenMillis
+        return age in -HUD_AGE_SLACK_MS..HUD_FRESH_MS
     }
 
     /**
@@ -885,17 +928,12 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                     try {
                         if (param.args.size < 2 || param.args[1] !is Boolean) return
                         val entry = param.args[0] ?: return
-                        val sbn = XposedHelpers.callMethod(entry, "getSbn") ?: return
-                        val key = XposedHelpers.callMethod(sbn, "getKey") as? String ?: return
-                        val groupKey = XposedHelpers.callMethod(sbn, "getGroupKey") as? String
+                        val key = entryKey(entry) ?: return
+                        val groupKey = entryGroupKey(entry)
                         if (groupKey == null) return
-                        val notification = XposedHelpers.callMethod(sbn, "getNotification")
-                        val contentWhen = try {
-                            XposedHelpers.getLongField(notification, "when")
-                        } catch (_: Throwable) { 0L }
+                        val contentWhen = entryWhen(entry)
                         val age = System.currentTimeMillis() - contentWhen
-                        val fresh = contentWhen > 0L && age >= -5_000L && age <= HUD_FRESH_MS
-                        if (fresh) {
+                        if (isFresh(contentWhen)) {
                             hudPendingKey = key
                             hudPendingAt = now()
                             NotifLog.d { "v2 HUD allow fresh key=$key when=$contentWhen age=$age" }
@@ -950,21 +988,15 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                             XposedHelpers.getObjectField(headsUpEntry, "mEntry")
                         } catch (_: Throwable) { null } ?: return
 
-                        val sbn = XposedHelpers.callMethod(notifEntry, "getSbn") ?: return
-                        val key = XposedHelpers.callMethod(sbn, "getKey") as? String ?: return
-                        val groupKey = XposedHelpers.callMethod(sbn, "getGroupKey") as? String
-                        if (groupKey == null) return
+                        val key = entryKey(notifEntry) ?: return
+                        if (entryGroupKey(notifEntry) == null) return
 
-                        val notification = XposedHelpers.callMethod(sbn, "getNotification") ?: return
-                        val contentWhen = try {
-                            XposedHelpers.getLongField(notification, "when")
-                        } catch (_: Throwable) { 0L }
-                        val flags = try {
-                            XposedHelpers.getIntField(notification, "flags")
-                        } catch (_: Throwable) { 0 }
-                        val isSummary = (flags and android.app.Notification.FLAG_GROUP_SUMMARY) != 0
+                        val contentWhen = entryWhen(notifEntry)
+                        val sbn = XposedHelpers.callMethod(notifEntry, "getSbn")
+                        val isSummary =
+                            (sbnFlags(sbn) and android.app.Notification.FLAG_GROUP_SUMMARY) != 0
                         val age = System.currentTimeMillis() - contentWhen
-                        val fresh = contentWhen > 0L && age >= -5_000L && age <= HUD_FRESH_MS
+                        val fresh = isFresh(contentWhen)
 
                         if (fresh && !isSummary) {
                             hudPendingKey = key
@@ -974,7 +1006,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                         }
 
                         // Summary (or stale content): prefer the newest chat when it is fresh.
-                        if (promoteOnEntry(param, headsUpEntry, key, isSummary)) return
+                        if (promoteOnEntry(param, key, isSummary)) return
 
                         if (!fresh) {
                             param.result = null
@@ -1002,22 +1034,16 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
      */
     private fun promoteOnEntry(
         param: XC_MethodHook.MethodHookParam,
-        original: Any,
         offeredKey: String,
         offeredIsSummary: Boolean,
     ): Boolean {
         val freshEntry = newestChildEntry ?: return false
         val freshKey = newestChildKey ?: return false
         if (freshKey == offeredKey) return false
-
-        val sbn = try { XposedHelpers.callMethod(freshEntry, "getSbn") } catch (_: Throwable) { return false }
-        val key = try { XposedHelpers.callMethod(sbn, "getKey") as? String } catch (_: Throwable) { null }
-            ?: return false
-        if (key != freshKey) return false
-        val notification = try { XposedHelpers.callMethod(sbn, "getNotification") } catch (_: Throwable) { return false }
-        val whenMillis = try { XposedHelpers.getLongField(notification, "when") } catch (_: Throwable) { 0L }
+        if (entryKey(freshEntry) != freshKey) return false
+        val whenMillis = entryWhen(freshEntry)
+        if (!isFresh(whenMillis)) return false
         val age = System.currentTimeMillis() - whenMillis
-        if (whenMillis <= 0L || age < -5_000L || age > HUD_FRESH_MS) return false
 
         val manager = param.thisObject ?: return false
         val replacement = try {

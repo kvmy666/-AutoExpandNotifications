@@ -35,7 +35,7 @@
 
         <!-- Debug-only test trigger; TestTriggerReceiver no-ops unless BuildConfig.DEBUG. -->
         <receiver
-            android:name=".TestTriggerReceiver"
+            android:name=".debug.TestTriggerReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="io.github.kvmy666.autoexpand.TEST" />

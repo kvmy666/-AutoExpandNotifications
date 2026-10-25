@@ -1,8 +1,9 @@
-package io.github.kvmy666.autoexpand
+package io.github.kvmy666.autoexpand.debug
 
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import io.github.kvmy666.autoexpand.BuildConfig
 
 /**
  * Debug-only trigger for the test notifications.

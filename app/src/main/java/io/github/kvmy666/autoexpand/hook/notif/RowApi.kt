@@ -363,8 +363,6 @@ object RowApi {
     fun pipelineGroupedOf(row: Any): Boolean? = try {
         val getParent = getParentEntry
         val groupEntry = groupEntryClass
-        val getSummary = getGroupSummary
-        val summaryField = fGroupSummary
         if (getParent == null || groupEntry == null) null
         else {
             val parent = entryOf(row)?.let { getParent.invoke(it) }
@@ -372,13 +370,22 @@ object RowApi {
                 parent == null -> null
                 !groupEntry.isInstance(parent) -> null
                 rootEntry != null && parent === rootEntry -> false
-                getSummary != null && getSummary.invoke(parent) != null -> true
-                getSummary == null && summaryField != null && summaryField.get(parent) != null -> true
+                summaryPresent(parent) -> true
                 // Non-root group whose summary has not attached yet: unknown, not "single".
                 else -> null
             }
         }
     } catch (_: Throwable) { null }
+
+    /**
+     * Whether a group entry currently carries a summary.
+     *
+     * AOSP/OxygenOS expose `getSummary()`; HyperOS 3 only has the `mSummary` field. Either one
+     * counts — the caller only needs "is a summary attached", not which accessor answered.
+     */
+    private fun summaryPresent(parent: Any): Boolean = try {
+        (getGroupSummary?.invoke(parent) != null) || (fGroupSummary?.get(parent) != null)
+    } catch (_: Throwable) { false }
 
     fun entryOf(row: Any): Any? =
         try { getEntry?.invoke(row) } catch (_: Throwable) { null }

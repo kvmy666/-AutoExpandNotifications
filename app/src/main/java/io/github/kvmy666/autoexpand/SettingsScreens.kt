@@ -334,6 +334,77 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
 
                     // ── Notifications ─────────────────────────────────────────────
                     "notifications" -> {
+                        // ── Expand engine (first: it decides how everything below behaves) ──
+                        SettingsCard {
+                            SectionLabel("Expand engine")
+                            Text(
+                                text = "There are two ways to open a notification. " +
+                                    "If one looks wrong on your phone, try the other.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                EngineSelection.Mode.entries.forEach { mode ->
+                                    FilterChip(
+                                        selected = engineMode == mode,
+                                        onClick  = {
+                                            engineMode = mode
+                                            onStringPref(EngineSelection.MODE_KEY, mode.pref)
+                                        },
+                                        label    = { Text(mode.label) }
+                                    )
+                                }
+                            }
+                            Text(
+                                text = when (engineMode) {
+                                    EngineSelection.Mode.AUTO ->
+                                        "Auto picks the option that suits your phone. " +
+                                            "You do not need to do anything."
+                                    EngineSelection.Mode.V1 ->
+                                        "Engine 1 is the older way. It taps the arrow for you. " +
+                                            "It works on most phones, but on some it can flicker " +
+                                            "or open an older chat."
+                                    EngineSelection.Mode.V2 ->
+                                        "Engine 2 is the newer way. It reads what the " +
+                                            "notification is doing and opens the newest chat. " +
+                                            "Best on OxygenOS/ColorOS 16, HyperOS and Android 16."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                            )
+                            Text(
+                                text = "Not sure which one? Try Engine 1, tap the button below, " +
+                                    "and send yourself a message. Then do the same with Engine 2. " +
+                                    "Keep the one that opens the whole message without flicker.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                            )
+                            Button(
+                                onClick = {
+                                    engineRestarting = true
+                                    scope.launch {
+                                        val result = withContext(Dispatchers.IO) { RootShell.restartSystemUi() }
+                                        engineRestarting = false
+                                        snackbarHostState.currentSnackbarData?.dismiss()
+                                        snackbarHostState.showSnackbar(
+                                            if (result.ok) "SystemUI restarting — engine choice applied"
+                                            else "Restart failed — no root? ${result.output.take(80)}"
+                                        )
+                                    }
+                                },
+                                enabled  = !engineRestarting,
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
+                            ) { Text(if (engineRestarting) "Restarting…" else "Apply & restart SystemUI") }
+                        }
+
                         // ── Auto-expand ──
                         SettingsCard {
                             SectionLabel("Auto-expand")
@@ -374,57 +445,6 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
                                 checked = lockscreenEnabled,
                                 onCheckedChange = { lockscreenEnabled = it; onToggle("expand_lockscreen_enabled", it) }
                             )
-                        }
-
-                        // ── Expand engine ──
-                        SettingsCard {
-                            SectionLabel("Expand engine")
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                EngineSelection.Mode.entries.forEach { mode ->
-                                    FilterChip(
-                                        selected = engineMode == mode,
-                                        onClick  = {
-                                            engineMode = mode
-                                            onStringPref(EngineSelection.MODE_KEY, mode.pref)
-                                        },
-                                        label    = { Text(mode.label) }
-                                    )
-                                }
-                            }
-                            Text(
-                                text = when (engineMode) {
-                                    EngineSelection.Mode.AUTO ->
-                                        "Auto uses Engine 2 on OxygenOS/ColorOS 16 and Engine 1 elsewhere."
-                                    EngineSelection.Mode.V1 ->
-                                        "Engine 1 — legacy shade/lock-screen driver, for older ROMs."
-                                    EngineSelection.Mode.V2 ->
-                                        "Engine 2 — state-driven shade/lock-screen with the expanded heads-up banner."
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
-                            )
-                            Button(
-                                onClick = {
-                                    engineRestarting = true
-                                    scope.launch {
-                                        val result = withContext(Dispatchers.IO) { RootShell.restartSystemUi() }
-                                        engineRestarting = false
-                                        snackbarHostState.currentSnackbarData?.dismiss()
-                                        snackbarHostState.showSnackbar(
-                                            if (result.ok) "SystemUI restarting — engine choice applied"
-                                            else "Restart failed — no root? ${result.output.take(80)}"
-                                        )
-                                    }
-                                },
-                                enabled  = !engineRestarting,
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
-                            ) { Text(if (engineRestarting) "Restarting…" else "Apply & restart SystemUI") }
                         }
 
                         // ── Grouped notifications ──

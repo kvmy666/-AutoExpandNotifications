@@ -4,6 +4,7 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import com.google.android.material.color.DynamicColors
+import io.github.kvmy666.autoexpand.debug.TestNotifier
 
 class App : Application() {
     override fun onCreate() {
