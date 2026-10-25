@@ -28,6 +28,22 @@ import io.github.kvmy666.autoexpand.hook.notif.OemDetector
  * This is a behavior-preserving extraction from MainHook — the hook bodies are verbatim.
  */
 class NotificationExpander(private val prefs: PrefsBridge) {
+
+    init {
+        // Engine 2 needs the 3.3.5 swipe toggle, and it has no reference to this instance.
+        instance = this
+    }
+
+    internal companion object {
+        @Volatile private var instance: NotificationExpander? = null
+
+        /** Engine 2 entry point for the swipe gesture; no-op before install. */
+        fun swipeToggle(row: Any) {
+            try {
+                instance?.toggleForSwipe(row)
+            } catch (_: Throwable) {}
+        }
+    }
     private val HUD_TAG        = "TweaksHud"
     private fun ts() = System.nanoTime() / 1_000_000L
 
@@ -248,7 +264,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
      */
     private fun expandGroupIfNeeded(rowView: View, rowObj: Any, pkg: String?) {
         // Engine 2 owns heads-up entirely; Engine 1 must not touch HUD state.
-        if (useV2()) return
+        if (v2OwnsHud()) return
         // Master kill-switch: when ON, leave grouped HUDs at OEM default (collapsed parent).
         // Singles bypass this function entirely, so their auto-expand path is unaffected.
         if (prefs.isKillSwitchActive("disable_headsup_hooks_enabled")) return
@@ -324,6 +340,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
             val targetHeight = XposedHelpers.callMethod(row, "getIntrinsicHeight") as Int
 
             XposedHelpers.callMethod(row, "setActualHeight", targetHeight)
+            Log.d(HUD_TAG, "[${ts()}] swipe toggle aeCollapsed=${!newExpanded} targetH=$targetHeight")
 
             (row as? View)?.let { rowView ->
                 rowView.requestLayout()
@@ -365,7 +382,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
     private fun handleChildAttached(notifParent: Any?, child: Any?) {
         try {
             if (notifParent == null || child == null) return
-            if (useV2()) return
+            if (v2OwnsHud()) return
             val pkg = getNotificationPackage(notifParent)
             val parentHU = try { XposedHelpers.getBooleanField(notifParent, "mIsHeadsUp") } catch (_: Throwable) { false }
             val onKeyguard = try { XposedHelpers.getBooleanField(notifParent, "mOnKeyguard") } catch (_: Throwable) { false }
@@ -389,6 +406,28 @@ class NotificationExpander(private val prefs: PrefsBridge) {
             val h = try { (XposedHelpers.callMethod(child, "getIntrinsicHeight") as? Int) ?: -1 } catch (_: Throwable) { -1 }
             Log.d(HUD_TAG, "[${ts()}] addNotification EXIT parent=$parentId branch=HU ok=$ok childH=$h pkg=$pkg")
         } catch (_: Throwable) {}
+    }
+
+    /**
+     * One-shot bypass for the swipe gesture.
+     *
+     * 3.3.5's swipe path relied on Engine 1's own HUD hooks (`aeCollapsed` + the height hook's
+     * deliberate fall-through to SystemUI's collapsed height). Under Engine 2 those hooks are
+     * gated off, which is why the old toggle no longer produced a visible change. For an explicit
+     * user swipe only, let them run again so the behaviour matches 3.3.5.
+     */
+    @Volatile private var swipeToggleBypass = false
+
+    private fun v2OwnsHud(): Boolean = useV2() && !swipeToggleBypass
+
+    /** 3.3.5's toggle, invoked by Engine 2 for the swipe gesture. */
+    fun toggleForSwipe(row: Any) {
+        swipeToggleBypass = true
+        try {
+            toggleHeadsUpExpandState(row)
+        } finally {
+            swipeToggleBypass = false
+        }
     }
 
     fun install(lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -415,7 +454,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
             }
             val containerChildAttach = object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
-                    if (useV2()) return
+                    if (v2OwnsHud()) return
                     val parent = try {
                         XposedHelpers.getObjectField(param.thisObject, "mContainingNotification")
                     } catch (_: Throwable) { null }
@@ -455,7 +494,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
             if (rowChildAdd != null) {
                 XposedBridge.hookMethod(rowChildAdd, object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        if (useV2()) return
+                        if (v2OwnsHud()) return
                         handleChildAttached(param.thisObject, param.args.getOrNull(0))
                     }
                 })
@@ -477,7 +516,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                 "setSystemExpanded", Boolean::class.javaPrimitiveType,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        if (useV2()) return
+                        if (v2OwnsHud()) return
                         try {
                             val row = param.thisObject
                             val rowView = row as? View ?: return
@@ -550,7 +589,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                 "onLayout",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        if (useV2()) return
+                        if (v2OwnsHud()) return
                         try {
                             val row = param.thisObject
                             val rowView = row as? View ?: return
@@ -614,7 +653,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                 "calculateVisibleType",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        if (useV2()) return
+                        if (v2OwnsHud()) return
                         try {
                             val pkg = getNotificationPackageFromContentView(param.thisObject)
                             if (shouldSkipNotification("expand_headsup_enabled", pkg)) return
@@ -656,7 +695,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                 "getIntrinsicHeight",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        if (useV2()) return
+                        if (v2OwnsHud()) return
                         try {
                             val pkg = getNotificationPackage(param.thisObject)
                             if (shouldSkipNotification("expand_headsup_enabled", pkg)) return
@@ -689,7 +728,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                 "getPinnedHeadsUpHeight", Boolean::class.javaPrimitiveType,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        if (useV2()) return
+                        if (v2OwnsHud()) return
                         try {
                             val pkg = getNotificationPackage(param.thisObject)
                             if (shouldSkipNotification("expand_headsup_enabled", pkg)) return
@@ -717,7 +756,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                 "setHeadsUp", Boolean::class.javaPrimitiveType,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (useV2()) return
+                        if (v2OwnsHud()) return
                         val v = param.args[0] as Boolean
                         val pkg = getNotificationPackage(param.thisObject)
                         if (shouldSkipNotification("expand_headsup_enabled", pkg)) return
@@ -738,7 +777,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                         }
                     }
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        if (useV2()) return
+                        if (v2OwnsHud()) return
                         if (param.args[0] as Boolean != true) return
                         val pkg = getNotificationPackage(param.thisObject)
                         if (shouldSkipNotification("expand_headsup_enabled", pkg)) return
@@ -759,7 +798,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                 "setExpandedWhenPinned",
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (useV2()) return
+                        if (v2OwnsHud()) return
                         val isGroup = XposedHelpers.getAdditionalInstanceField(param.thisObject, "aeIsGroup") as? Boolean ?: false
                         if (isGroup) return
                         val value = param.args[0] as Boolean
@@ -804,6 +843,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                                             f1CurrentRow = XposedHelpers.callMethod(
                                                 param.thisObject, "getMTouchingHeadsUpView")
                                         } catch (_: Throwable) { f1CurrentRow = null }
+                                        Log.d(HUD_TAG, "[${ts()}] swipe DOWN dy=$dy helperRow=${f1CurrentRow != null}")
                                     }
                                 }
                             }
@@ -825,13 +865,15 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                     val isRecent = f1IsDownwardSwipe && (System.currentTimeMillis() - f1SwipeTime < 2000)
                     if (!isRecent) return
                     param.result = null
+                    Log.d(HUD_TAG, "[${ts()}] swipe block onClicked args=${param.args.size} toggled=$f1HasToggled")
                     if (!f1HasToggled) {
                         f1HasToggled = true
                         try {
                             if (param.args.size >= 2) {
                                 val row = param.args[1]
-                                if (useV2()) NotifEngineV2.swipeToggle(row)
-                                else toggleHeadsUpExpandState(row)
+                                val ok = if (useV2()) NotifEngineV2.swipeToggle(row)
+                                         else { toggleHeadsUpExpandState(row); true }
+                                Log.d(HUD_TAG, "[${ts()}] swipe toggle onClicked v2=${useV2()} ok=$ok")
                             }
                         } catch (_: Throwable) {}
                     }
@@ -844,6 +886,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                     val isRecent = f1IsDownwardSwipe && (System.currentTimeMillis() - f1SwipeTime < 2000)
                     if (!isRecent) return
                     param.result = null
+                    Log.d(HUD_TAG, "[${ts()}] swipe block launch args=${param.args.size} toggled=$f1HasToggled")
                     if (!f1HasToggled) {
                         f1HasToggled = true
                         try {
@@ -867,8 +910,11 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                                 // Under Engine 2 the banner's state is mUserExpanded, not the
                                 // legacy aeCollapsed/height pair this toggle writes — route the
                                 // gesture through v2's own collapse/expand primitive.
-                                if (useV2()) NotifEngineV2.swipeToggle(row)
-                                else toggleHeadsUpExpandState(row)
+                                val ok = if (useV2()) NotifEngineV2.swipeToggle(row)
+                                         else { toggleHeadsUpExpandState(row); true }
+                                Log.d(HUD_TAG, "[${ts()}] swipe toggle launch v2=${useV2()} row=${row.javaClass.simpleName} ok=$ok")
+                            } else {
+                                Log.d(HUD_TAG, "[${ts()}] swipe toggle launch: no row found")
                             }
                         } catch (_: Throwable) {}
                     }

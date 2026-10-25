@@ -4,6 +4,7 @@ import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
+import io.github.kvmy666.autoexpand.hook.NotificationExpander
 import io.github.kvmy666.autoexpand.hook.PrefsBridge
 
 /**
@@ -33,7 +34,9 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
         @Volatile private var instance: NotifEngineV2? = null
 
         /** Swipe-down toggle entry used by Engine 1; no-op before install. */
-        fun swipeToggle(row: Any?): Boolean = instance?.toggleFromSwipe(row) ?: false
+        fun swipeToggle(row: Any?): Boolean = try {
+            instance?.toggleFromSwipe(row) ?: false
+        } catch (_: Throwable) { false }
 
         /** Per-row token telling the hot `isExpanded` gate that this row may ignore the keyguard. */
         const val TOKEN = "aeV2LsAllow"
@@ -76,6 +79,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
     }
 
     @Volatile private var prefsFacts = PrefsFacts(true, true, emptySet())
+    @Volatile private var lastPrefsSnapshot: String? = null
     @Volatile private var lsGateEnabled = false
     @Volatile private var installed = false
     /** Newest non-summary notification key seen on an update; Engine 2 only arrow-expands this HUD row. */
@@ -117,12 +121,14 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
             )
             lsGateEnabled = prefsFacts.lockscreenEnabled && RowApi.lockscreenCapable
             NotifLog.enabled = prefs.isOptInEnabled("notif_debug_logging")
-            NotifLog.i(
-                "v2 prefs: debug=${NotifLog.enabled} headsup=${prefsFacts.headsupEnabled} " +
-                    "hudKill=${prefsFacts.headsupHooksDisabled} " +
-                    "excluded=${prefsFacts.excludedApps.size} " +
-                    "shade=${prefsFacts.shadeEnabled} ls=${prefsFacts.lockscreenEnabled}"
-            )
+            val snapshot = "debug=${NotifLog.enabled} headsup=${prefsFacts.headsupEnabled} " +
+                "hudKill=${prefsFacts.headsupHooksDisabled} " +
+                "excluded=${prefsFacts.excludedApps.size} " +
+                "shade=${prefsFacts.shadeEnabled} ls=${prefsFacts.lockscreenEnabled}"
+            if (snapshot != lastPrefsSnapshot) {
+                lastPrefsSnapshot = snapshot
+                NotifLog.i("v2 prefs: $snapshot")
+            }
         } catch (_: Throwable) {}
     }
 
@@ -650,21 +656,30 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
     /**
      * Swipe-down toggle from Engine 1's gesture hooks.
      *
-     * The banner is expanded through `mExpandedWhenPinned`, and the setter for it does not exist
-     * on the verified ROMs, so rewriting user/system expansion is a no-op for a pinned row.
-     * The row's own arrow performs the correct toggle for both the pinned and the shade case, so
-     * the gesture is routed through that same primitive (under our attribution token, so the
-     * expand-click suppressor does not swallow it).
+     * 3.3.5 toggled the banner through Engine 1's own state (`aeCollapsed`,
+     * `mExpandedWhenPinned`, height fall-through). Under Engine 2 those hooks are gated off and a
+     * plain presenter click is not what the old gesture did. So reproduce 3.3.5 exactly:
+     * Engine 1's toggle runs with its HUD hooks temporarily allowed, and the whole call is marked
+     * as ours so v2's `setSystemExpanded` rewrite cannot turn the collapse back into an expand.
+     *
+     * A grouped banner keeps using the real arrow (that is what 3.3.5 did for groups too).
      */
     fun toggleFromSwipe(row: Any?): Boolean {
         if (row == null) return false
         return try {
-            Attribution.ours {
-                if (RowApi.clickExpand(row)) true
-                else if (RowApi.isExpandedUngated(row)) collapseUserExpanded(row)
-                else expandUserExpanded(row)
+            val grouped = RowApi.callBool(RowApi.isSummaryWithChildren, row)
+            val ok = if (grouped) {
+                RowApi.clickExpand(row)
+            } else {
+                Attribution.ours { NotificationExpander.swipeToggle(row) }
+                true
             }
-        } catch (_: Throwable) { false }
+            NotifLog.d { "v2 swipe toggle grouped=$grouped ok=$ok" }
+            ok
+        } catch (t: Throwable) {
+            NotifLog.d { "v2 swipe toggle failed: ${t.javaClass.simpleName}" }
+            false
+        }
     }
 
     private fun collapseUserExpanded(row: Any): Boolean = try {        setSystemExpanded(row, false)
@@ -799,6 +814,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
         try {
             XposedBridge.hookAllMethods(rowClass, "setHeadsUp", object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
+                    try {
                     val up = param.args.getOrNull(0) == true
                     val row = param.thisObject ?: return
                     val key = keyOf(row) ?: return
@@ -871,6 +887,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                             } catch (_: Throwable) {}
                         }
                     }, 60L)
+                    } catch (_: Throwable) {}
                 }
             })
             XposedBridge.hookAllMethods(rowClass, "setPinnedStatus", object : XC_MethodHook() {
