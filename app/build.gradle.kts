@@ -101,6 +101,9 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation(libs.activity.compose)
     implementation("com.google.android.gms:play-services-mlkit-text-recognition:19.0.1")
+    // Bytecode fallback for OEM ROMs that rename the row/HUD classes. Only initialized when
+    // exact-name resolution fails, so the measured OxygenOS path never pays its cost.
+    implementation(libs.dexkit)
 
     // JVM unit tests. Robolectric supplies a real SQLite for ClipboardDatabase; the
     // policy tests need none of it and run on plain JUnit.

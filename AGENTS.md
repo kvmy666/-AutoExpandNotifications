@@ -152,8 +152,9 @@ Cold triggers must not re-expand an older row (`defer not-newest`).
 - The lock screen shows the stock **closed Telegram summary**; the shade shows the **open group**.
   The `GroupOnKeyguard` skip is intentional: the keyguard size calculator budgets a collapsed
   summary, and opening it in place paints over neighbours on a tight lock screen.
-- `ungroup_notifications_enabled` is a **dead pref**. The v1.2.0 commit `e7c8c4b` added only the
-  pref/UI; no hook ever read it. Do not treat the toggle as implemented.
+- `ungroup_notifications_enabled` was a **dead pref** and has been **removed** (UI, first-run
+  default, upgrade block, strings, README claim). Nothing reads it; do not reintroduce it without
+  an actual ungroup implementation.
 - `GroupEntry.getSummary` returning null on the keyguard **crashed SystemUI** and sent LSPosed
   into safe mode (all modules off). Reverted; never retry a null group-pipeline summary.
 - `ExpandGroupOnKeyguard` + `setUserExpanded(true, true)` + `setChildrenExpanded(true)` had no
@@ -161,31 +162,67 @@ Cold triggers must not re-expand an older row (`defer not-newest`).
 - The source is back to the pre-keyguard-open build; the confirmed HUD/layout fix remains. The
   lock-screen "three parents" request is **not delivered**.
 
+## Engine selection (2026-10-25)
+
+- `notif_engine_mode` = `auto` | `v1` | `v2`; UI selector + **Apply & restart SystemUI** live in
+  Notifications › Expand engine. The debug Testing screen no longer has an engine toggle.
+- `EngineSelection` is the single resolver, cached once per SystemUI process. `MainHook` (install
+  gate) and `NotificationExpander.useV2()` both call it, so they cannot disagree.
+- Migration: an explicit mode wins; otherwise a present `notif_engine_v2` is honoured as V2/V1;
+  otherwise Auto. Auto = Engine 2 only on SDK ≥ 36 + Oplus family, Engine 1 elsewhere.
+- Verified on device (`pid 2030`): `engine selected mode=v2 effective=v2`, all HUD hooks
+  installed, no DexKit line, no missing-capability line.
+
+## OEM resolver (2026-10-25)
+
+- `OemDetector` logs the skin once (`resolver OEM=OPLUS (…) sdk=36 brand=OnePlus …`).
+- `HookTargets` holds the class catalog; `HookTargetResolver` resolves exact name → hierarchy →
+  conservative shape match (params/return + name hint). Fields are **never** shape-matched.
+- **Verified against the pulled APK**, not guessed: `/tmp/sysui-pull/SystemUI.apk`, build
+  `CPH2747_16.0.9.400(EX01)`, SHA-256 `dbe67fd3688a5bb5ebe7200190aaaac0bfbf88068a1534b6aebd62cd3f588ff4`.
+- Findings that changed code:
+  - `NotificationChildrenContainer` is at
+    `com.android.systemui.statusbar.notification.stack.NotificationChildrenContainer` with
+    `addNotification(ExpandableNotificationRow, int)`. The old `…notification.row` path does not
+    exist here, so Engine 1's child hook had silently bound nothing.
+  - `ExpandableNotificationRow.setExpandedWhenPinned(boolean)` **does not exist**; only the
+    `mExpandedWhenPinned` field. The Engine 2 call remains a caught no-op — do not write the field
+    directly on the verified HUD path.
+  - `isGroupExpanded` exists only as `isGroupExpanded$1`; `mExpandClickListener` is typed
+    `ExpandableNotificationRow$1` (the arrow cast still works — confirmed by probe traces).
+  - `MessagingTextMessage` is in the APK (framework widget), `OplusHeadsUpTouchHelper` at the
+    expected Oplus path.
+- No unverified OEM class names are shipped. Xiaomi/Samsung candidates were removed; a renamed
+  row class is found by DexKit only if its name still contains `ExpandableNotificationRow`.
+  Fully renamed classes are unsupported until a real APK from that OEM proves the names.
+- DexKit (`org.luckypray:dexkit:2.3.0`) is lazy: native lib loaded on first miss, bridge created
+  only when exact names fail, failure degrades to reflection. `extractNativeLibs="true"` is
+  required; the lib is at the module's `lib/arm64/libdexkit.so` (verified). On OxygenOS it never
+  initializes.
+
 ## Current verified state
 
+- Committed base: `39eeceb` on `feat/autoexpand-v4`; OEM work is on `feat/oem-hook-resolver`.
 - User-confirmed on 2026-10-25: with a stale Telegram sibling kept in the shade, the
   old row stays suppressed and the new chat HUDs correctly (after the substitution
   fix). Exact duration was user-perceived; no final log capture was kept.
-- The last captured run before the substitution showed:
-  - stale `-1404489531` vetoed at `age=1113149`;
-  - no `v2 HUD allow` and no `setHeadsUp` for the new key — the representative-selection
-    bug.
-- Still to re-verify on the final build:
+- Latest device run (Engine 2, `pid 2030`): `RowApi caps` all 1s including `oem=OPLUS`,
+  `row=ExpandableNotificationRow`; `v2 engine installed`; HUD arrow/visible-type/intrinsic/
+  pinned-height/veto hooks installed; engine 1 reports no missing container/content/messaging/
+  Oplus-helper capability.
+- Unit tests: 78 pass, including the 5 new `EngineSelectionTest` cases.
+- Still to verify by hand (needs real chats / unlock):
   - shade children stay one-line with `expand_group_children_enabled=0`;
   - no HUD while inside the active chat, other chats may peek;
   - two genuinely new chats in quick succession;
-  - engine selector UI (auto default + manual override + Apply & Restart SystemUI);
-  - Engine 1 on the old ROM unchanged.
-
-Uncommitted work on `feat/autoexpand-v4`:
-`NotificationExpander.kt`, `ExpandPolicy.kt`, `NotifEngineV2.kt`, `RowApi.kt`,
-`brainstorms/2026-10-24-autoexpand-engine2-headsup.md`,
-`docs/CHECKPOINT-notif-v4.md`, `AGENTS.md`.
+  - Engine 1 on the old ROM unchanged;
+  - the selector chips visually on device.
 
 Live prefs:
 
 ```
-notif_engine_v2=1
+notif_engine_mode=<absent → Auto, legacy fallback v2>
+notif_engine_v2=1            (legacy, still honoured)
 expand_headsup_enabled=1
 disable_headsup_hooks_enabled=0
 disable_headsup_popup_enabled=1
@@ -194,6 +231,10 @@ expand_group_children_enabled=0
 notif_debug_logging=1
 notif_probe_enabled=1
 ```
+
+Tip for startup captures: a 256 KB log buffer evicts the install lines during SystemUI boot.
+Run `adb shell logcat -G 16M` before `logcat -c` and the restart, or the caps/engine lines look
+missing even though the engine installed.
 
 ---
 
@@ -269,4 +310,9 @@ Read:
 
 ## Next
 
-Another v2 Engine enhancement — to be chosen by the user.
+- Verify the remaining hand tests above on real chats.
+- Other OEM support needs real SystemUI APKs (device pull, never a guessed name or a web
+  "SystemUI.apk"). Once dumped, add the verified names to `HookTargets` and extend
+  `HookTargetResolver` only for what the dex actually shows.
+- M4 (rooted AOSP AVD) is still environment-dependent; no emulator image is provisioned on this
+  host yet.

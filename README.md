@@ -50,7 +50,7 @@ You'll need a rooted Android 16 device with **LSPosed** (Zygisk enabled).
 ## What's inside
 
 ### 🔔 Notification Tweak
-Auto-expands notifications in the shade, in heads-up banners, and on the lock screen — so you see full text and buttons without tapping. Grouped notifications expand cleanly without flicker. Extras: cap heads-up text length, block the swipe-to-freeform popup, ungroup notifications, mute the back-gesture buzz, and exclude any apps you don't want expanded.
+Auto-expands notifications in the shade, in heads-up banners, and on the lock screen — so you see full text and buttons without tapping. Grouped notifications expand cleanly without flicker. Extras: cap heads-up text length, block the swipe-to-freeform popup, mute the back-gesture buzz, choose the expand engine, and exclude any apps you don't want expanded.
 
 ### ⌨️ Gboard Tweak
 A customizable toolbar under Gboard — enable only the buttons you use, resize it to taste:
@@ -104,7 +104,7 @@ It's built against standard Android 16 internals, so most AOSP-style ROMs should
 - Card-based home screen; grouped heads-up handling; APK slimmed to arm64-only
 
 **v2.x** — Snapper Tweak, heads-up max lines, hardware chord interception
-**v1.x** — Gboard toolbar, clipboard history, ungroup notifications
+**v1.x** — Gboard toolbar, clipboard history
 
 ---
 

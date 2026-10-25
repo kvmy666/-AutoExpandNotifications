@@ -175,16 +175,12 @@ class MainActivity : ComponentActivity() {
                 .putBoolean("expand_lockscreen_enabled", true)
                 .putBoolean("disable_back_haptic_enabled", true)
                 .putBoolean("disable_headsup_popup_enabled", true)
-                .putBoolean("ungroup_notifications_enabled", true)
                 .putStringSet("excluded_apps", emptySet())
                 .apply()
         }
         // Ensure new prefs exist for upgrades
         if (!prefs.contains("disable_headsup_popup_enabled")) {
             prefs.edit().putBoolean("disable_headsup_popup_enabled", true).apply()
-        }
-        if (!prefs.contains("ungroup_notifications_enabled")) {
-            prefs.edit().putBoolean("ungroup_notifications_enabled", true).apply()
         }
         if (!prefs.contains("expand_group_parents_enabled")) {
             prefs.edit()

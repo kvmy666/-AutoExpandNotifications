@@ -9,6 +9,7 @@ import io.github.kvmy666.autoexpand.hook.GlobalSearchHook
 import io.github.kvmy666.autoexpand.hook.KeepScreenOnController
 import io.github.kvmy666.autoexpand.hook.NotifProbe
 import io.github.kvmy666.autoexpand.hook.NotificationExpander
+import io.github.kvmy666.autoexpand.hook.notif.EngineSelection
 import io.github.kvmy666.autoexpand.hook.notif.NotifEngineV2
 import io.github.kvmy666.autoexpand.hook.PrefsBridge
 import io.github.kvmy666.autoexpand.hook.SystemColorHook
@@ -90,7 +91,7 @@ class MainHook : IXposedHookLoadPackage {
                             // point the engine choice can be trusted. Still well before any
                             // notification row exists.
                             try {
-                                if (prefs.isOptInEnabled("notif_engine_v2")) notifV2.install(lpparam)
+                                if (EngineSelection.isV2(prefs)) notifV2.install(lpparam)
                             } catch (t: Throwable) {
                                 Log.e("AutoExpand", "notif engine v2 init failed: $t")
                             }

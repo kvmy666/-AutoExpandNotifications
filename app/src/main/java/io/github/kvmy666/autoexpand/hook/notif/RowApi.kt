@@ -14,9 +14,9 @@ import java.lang.reflect.Modifier
  * exceptions. [caps] is logged once so an unsupported ROM is visible immediately; it is the
  * single line to ask a Xiaomi user for.
  *
- * Deliberately resolves by explicit name + parameter types rather than enumerating
- * `getDeclaredMethods()` / `getDeclaredFields()`, which can throw `NoClassDefFoundError` while
- * resolving OEM parameter types.
+ * Names come from [HookTargets] and [HookTargetResolver], not from string literals here: exact
+ * AOSP/OEM names first, then a superclass walk, then a conservative shape match. Fields are
+ * never shape-matched — a wrong boolean field is worse than a missing capability.
  */
 object RowApi {
 
@@ -61,6 +61,7 @@ object RowApi {
     private var fChildrenContainer: Field? = null
     private var fAttachedChildren: Field? = null
     private var fPrivateLayout: Field? = null
+    private var fExpandedChild: Field? = null
     private var fExpandClickListener: Field? = null
 
     // NotificationContentView — the row's content, and the thing that decides which of the
@@ -75,53 +76,98 @@ object RowApi {
         get() = rowClass != null && isExpandedArg != null &&
                 (setSystemExpanded != null || setUserExpanded2 != null || setUserExpanded1 != null)
 
+    /**
+     * True when the row class itself resolved.
+     *
+     * The install gate uses this instead of [usable]: a ROM without `isExpanded(boolean)` can
+     * still run the heads-up and group paths, so it must not lose the whole engine over one
+     * missing capability.
+     */
+    val coreCapable: Boolean get() = rowClass != null
+
     /** True when the lock-screen gate can be installed. */
     val lockscreenCapable: Boolean get() = isExpandedArg != null
 
     fun bind(classLoader: ClassLoader): Boolean {
-        if (bound) return usable
+        if (bound) return coreCapable
         bound = true
-        val cls = try { classLoader.loadClass(ROW_CLASS) } catch (t: Throwable) {
-            Log.e(TAG, "RowApi: row class not found — v2 engine disabled ($t)"); return false
+        val cls = HookTargets.row(classLoader) ?: run {
+            Log.e(TAG, "RowApi: row class not found on ${OemDetector.current.name} — v2 engine disabled")
+            return false
         }
         rowClass = cls
 
-        isExpandedArg        = method(cls, "isExpanded", Boolean::class.javaPrimitiveType!!)
-        setUserExpanded2     = method(cls, "setUserExpanded", Boolean::class.javaPrimitiveType!!, Boolean::class.javaPrimitiveType!!)
-        setUserExpanded1     = method(cls, "setUserExpanded", Boolean::class.javaPrimitiveType!!)
-        setSystemExpanded    = method(cls, "setSystemExpanded", Boolean::class.javaPrimitiveType!!)
-        isChildInGroup       = method(cls, "isChildInGroup")
-        isPinned             = method(cls, "isPinned")
-        isSummaryWithChildren = method(cls, "isSummaryWithChildren")
+        isExpandedArg        = m(cls, listOf("isExpanded"), listOf(Boolean::class.javaPrimitiveType!!),
+                                 Boolean::class.javaPrimitiveType!!, listOf("isexpanded"))
+        setUserExpanded2     = m(cls, listOf("setUserExpanded"),
+                                 listOf(Boolean::class.javaPrimitiveType!!, Boolean::class.javaPrimitiveType!!),
+                                 Void.TYPE, listOf("setuserexpanded"))
+        setUserExpanded1     = m(cls, listOf("setUserExpanded"),
+                                 listOf(Boolean::class.javaPrimitiveType!!), Void.TYPE, listOf("setuserexpanded"))
+        setSystemExpanded    = m(cls, listOf("setSystemExpanded"),
+                                 listOf(Boolean::class.javaPrimitiveType!!), Void.TYPE, listOf("setsystemexpanded"))
+        isChildInGroup       = m(cls, listOf("isChildInGroup"), emptyList(), Boolean::class.javaPrimitiveType!!,
+                                 listOf("ischildingroup"))
+        isPinned             = m(cls, listOf("isPinned"), emptyList(), Boolean::class.javaPrimitiveType!!,
+                                 listOf("ispinned"))
+        isSummaryWithChildren = m(cls, listOf("isSummaryWithChildren"), emptyList(),
+                                  Boolean::class.javaPrimitiveType!!, listOf("issummarywithchildren"))
         // R8 renames the group-expansion read on some builds — measured as `isGroupExpanded$1`
         // on OxygenOS 16 because a synthetic accessor already owns the plain name.
-        isGroupExpanded      = method(cls, "isGroupExpanded") ?: method(cls, "isGroupExpanded\$1")
-        shouldShowPublic     = method(cls, "shouldShowPublic")
-        getEntry             = method(cls, "getEntry")
-        getEntryLegacy       = method(cls, "getEntryLegacy")
+        isGroupExpanded      = m(cls, listOf("isGroupExpanded", "isGroupExpanded\$1"), emptyList(),
+                                 Boolean::class.javaPrimitiveType!!, listOf("isgroupexpanded"))
+        shouldShowPublic     = m(cls, listOf("shouldShowPublic"), emptyList(),
+                                 Boolean::class.javaPrimitiveType!!, listOf("shouldshowpublic"))
+        getEntry             = m(cls, listOf("getEntry"), emptyList(), null, listOf("getentry"))
+        getEntryLegacy       = m(cls, listOf("getEntryLegacy"), emptyList(), null, listOf("getentrylegacy"))
 
-        fIsHeadsUp               = field(cls, "mIsHeadsUp")
-        fOnKeyguard              = field(cls, "mOnKeyguard")
-        fUserExpanded            = field(cls, "mUserExpanded")
-        fHasUserChangedExpansion = field(cls, "mHasUserChangedExpansion")
-        fIsSystemExpanded        = field(cls, "mIsSystemExpanded")
-        fChildrenExpanded        = field(cls, "mChildrenExpanded")
-        fChildrenContainer       = field(cls, "mChildrenContainer")
-        fAttachedChildren        = fChildrenContainer?.type?.let { field(it, "mAttachedChildren") }
-        fPrivateLayout           = field(cls, "mPrivateLayout")
-        fExpandClickListener     = field(cls, "mExpandClickListener")
+        fIsHeadsUp               = f(cls, listOf("mIsHeadsUp"))
+        fOnKeyguard              = f(cls, listOf("mOnKeyguard"))
+        fUserExpanded            = f(cls, listOf("mUserExpanded"))
+        fHasUserChangedExpansion = f(cls, listOf("mHasUserChangedExpansion"))
+        fIsSystemExpanded        = f(cls, listOf("mIsSystemExpanded"))
+        fChildrenExpanded        = f(cls, listOf("mChildrenExpanded"))
+        fChildrenContainer       = f(cls, listOf("mChildrenContainer"))
+        fAttachedChildren        = fChildrenContainer?.type?.let { f(it, listOf("mAttachedChildren")) }
+        fPrivateLayout           = f(cls, listOf("mPrivateLayout"))
+        fExpandClickListener     = f(cls, listOf("mExpandClickListener"))
+
+        // Layout repair is optional, but a renamed content field should still resolve: the
+        // content view type is unique on the row, so a type + "private" match is safe.
+        if (fPrivateLayout == null) {
+            HookTargets.contentView(classLoader)?.let { content ->
+                fPrivateLayout = HookTargetResolver.findUniqueFieldOfType(cls, content, "private")
+            }
+        }
         fPrivateLayout?.type?.let { contentView ->
-            getVisibleType = method(contentView, "getVisibleType")
-            selectLayout   = method(contentView, "selectLayout",
-                Boolean::class.javaPrimitiveType!!, Boolean::class.javaPrimitiveType!!)
+            fExpandedChild = HookTargetResolver.findField(contentView, listOf("mExpandedChild"))
+            getVisibleType = m(contentView, listOf("getVisibleType"), emptyList(), Int::class.javaPrimitiveType!!,
+                               listOf("getvisibletype"))
+            selectLayout   = m(contentView, listOf("selectLayout"),
+                               listOf(Boolean::class.javaPrimitiveType!!, Boolean::class.javaPrimitiveType!!),
+                               Void.TYPE, listOf("selectlayout"))
         }
 
         bindPipeline(classLoader)
 
         Log.d(TAG, "RowApi caps: $caps")
-        if (!usable) Log.e(TAG, "RowApi: insufficient capabilities — v2 engine will stay off")
-        return usable
+        if (!usable) Log.e(TAG, "RowApi: core capabilities missing — v2 will install with the " +
+                              "capabilities that did resolve (see caps line)")
+        return coreCapable
     }
+
+    /** Exact-name / hierarchy / shape resolution through [HookTargetResolver]. */
+    private fun m(
+        cls: Class<*>,
+        names: List<String>,
+        params: List<Class<*>>,
+        ret: Class<*>?,
+        hints: List<String>,
+    ): Method? = HookTargetResolver.findMethod(cls, names, params, ret, hints)
+
+    /** Field resolution stays exact-name only — see [HookTargetResolver]. */
+    private fun f(cls: Class<*>, names: List<String>): Field? =
+        HookTargetResolver.findField(cls, names)
 
     /**
      * Resolves the notification pipeline's group model.
@@ -133,11 +179,15 @@ object RowApi {
     private fun bindPipeline(classLoader: ClassLoader) {
         val parentOwner = loadClass(classLoader, PIPELINE_ENTRY_CLASS)
             ?: loadClass(classLoader, LIST_ENTRY_CLASS) ?: return
-        getParentEntry = method(parentOwner, "getParent")
+        getParentEntry = HookTargetResolver.findMethod(
+            parentOwner, listOf("getParent"), emptyList(), null, listOf("getparent")
+        )
         groupEntryClass = loadClass(classLoader, GROUP_ENTRY_CLASS)
         groupEntryClass?.let { cls ->
             rootEntry = resolveRootEntry(cls)
-            getGroupSummary = method(cls, "getSummary")
+            getGroupSummary = HookTargetResolver.findMethod(
+                cls, listOf("getSummary"), emptyList(), null, listOf("getsummary")
+            )
         }
     }
 
@@ -156,10 +206,12 @@ object RowApi {
     } catch (_: Throwable) { null }
 
     private fun loadClass(classLoader: ClassLoader, name: String): Class<*>? =
-        try { classLoader.loadClass(name) } catch (_: Throwable) { null }
+        HookTargetResolver.load(classLoader, name)
 
     val caps: String
-        get() = "isExpandedArg=${b(isExpandedArg)} setSysExp=${b(setSystemExpanded)} " +
+        get() = "oem=${OemDetector.current.name} " +
+                "row=${rowClass?.name?.substringAfterLast('.') ?: "none"} " +
+                "isExpandedArg=${b(isExpandedArg)} setSysExp=${b(setSystemExpanded)} " +
                 "setUserExp2=${b(setUserExpanded2)} setUserExp1=${b(setUserExpanded1)} " +
                 "childInGroup=${b(isChildInGroup)} pinned=${b(isPinned)} " +
                 "summaryKids=${b(isSummaryWithChildren)} entry=${b(getEntry)}/${b(getEntryLegacy)} " +
@@ -180,33 +232,6 @@ object RowApi {
         get() = fPrivateLayout != null && getVisibleType != null && selectLayout != null
 
     private fun b(o: Any?) = if (o != null) 1 else 0
-
-    private fun method(cls: Class<*>, name: String, vararg types: Class<*>): Method? = try {
-        cls.getDeclaredMethod(name, *types).apply { isAccessible = true }
-    } catch (_: Throwable) {
-        // Walk up: some OEMs move members onto a superclass.
-        var c: Class<*>? = cls.superclass
-        var found: Method? = null
-        while (c != null && found == null) {
-            found = try { c.getDeclaredMethod(name, *types).apply { isAccessible = true } }
-                    catch (_: Throwable) { null }
-            c = c.superclass
-        }
-        found
-    }
-
-    private fun field(cls: Class<*>, name: String): Field? = try {
-        cls.getDeclaredField(name).apply { isAccessible = true }
-    } catch (_: Throwable) {
-        var c: Class<*>? = cls.superclass
-        var found: Field? = null
-        while (c != null && found == null) {
-            found = try { c.getDeclaredField(name).apply { isAccessible = true } }
-                    catch (_: Throwable) { null }
-            c = c.superclass
-        }
-        found
-    }
 
     // ── typed accessors ──────────────────────────────────────────────────────
 
@@ -260,6 +285,14 @@ object RowApi {
         m.invoke(content, false, true)
         true
     } catch (_: Throwable) { false }
+
+    /** The row's private (user-facing) content view, or null when the capability is missing. */
+    fun privateLayoutOf(row: Any): Any? =
+        try { fPrivateLayout?.get(row) } catch (_: Throwable) { null }
+
+    /** The content view's expanded child (the view whose measured height is the HUD height). */
+    fun expandedChildOf(content: Any): android.view.View? =
+        try { fExpandedChild?.get(content) as? android.view.View } catch (_: Throwable) { null }
 
     /**
      * Drives the row's own expand arrow — SystemUI's real listener, not a state rewrite.

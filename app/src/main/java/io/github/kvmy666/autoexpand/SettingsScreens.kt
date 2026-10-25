@@ -31,6 +31,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -70,6 +71,19 @@ import java.util.concurrent.TimeUnit
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.ui.graphics.graphicsLayer
+import io.github.kvmy666.autoexpand.hook.notif.EngineSelection
+
+/**
+ * The engine the UI should show as selected.
+ *
+ * Mirrors [EngineSelection.resolveMode]: an explicit `notif_engine_mode` wins, otherwise a
+ * legacy `notif_engine_v2` value is displayed as the equivalent mode, otherwise Auto.
+ */
+private fun engineModeFromPrefs(prefs: SharedPreferences): EngineSelection.Mode {
+    val legacy = if (prefs.contains(EngineSelection.LEGACY_V2_KEY))
+        prefs.getBoolean(EngineSelection.LEGACY_V2_KEY, true) else null
+    return EngineSelection.resolveMode(prefs.getString(EngineSelection.MODE_KEY, null), legacy)
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -103,7 +117,8 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
     var systemColorFixEnabled by remember { mutableStateOf(prefs.getBoolean("system_color_fix_enabled", true)) }
     var globalSearchEnterEnabled by remember { mutableStateOf(prefs.getBoolean("global_search_enter_launch_enabled", false)) }
     var headsupPopupEnabled by remember { mutableStateOf(prefs.getBoolean("disable_headsup_popup_enabled", true)) }
-    var ungroupEnabled     by remember { mutableStateOf(prefs.getBoolean("ungroup_notifications_enabled", true)) }
+    var engineMode        by remember { mutableStateOf(engineModeFromPrefs(prefs)) }
+    var engineRestarting  by remember { mutableStateOf(false) }
     var excludedCount      by remember { mutableIntStateOf(prefs.getStringSet("excluded_apps", emptySet())?.size ?: 0) }
     var headsUpMaxLines    by remember { mutableStateOf(prefs.getString("headsup_max_lines", "5") ?: "5") }
     var maxLinesShade      by remember { mutableStateOf(prefs.getBoolean("max_lines_shade_enabled", true)) }
@@ -361,6 +376,57 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
                             )
                         }
 
+                        // ── Expand engine ──
+                        SettingsCard {
+                            SectionLabel("Expand engine")
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                EngineSelection.Mode.entries.forEach { mode ->
+                                    FilterChip(
+                                        selected = engineMode == mode,
+                                        onClick  = {
+                                            engineMode = mode
+                                            onStringPref(EngineSelection.MODE_KEY, mode.pref)
+                                        },
+                                        label    = { Text(mode.label) }
+                                    )
+                                }
+                            }
+                            Text(
+                                text = when (engineMode) {
+                                    EngineSelection.Mode.AUTO ->
+                                        "Auto uses Engine 2 on OxygenOS/ColorOS 16 and Engine 1 elsewhere."
+                                    EngineSelection.Mode.V1 ->
+                                        "Engine 1 — legacy shade/lock-screen driver, for older ROMs."
+                                    EngineSelection.Mode.V2 ->
+                                        "Engine 2 — state-driven shade/lock-screen with the expanded heads-up banner."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                            )
+                            Button(
+                                onClick = {
+                                    engineRestarting = true
+                                    scope.launch {
+                                        val result = withContext(Dispatchers.IO) { RootShell.restartSystemUi() }
+                                        engineRestarting = false
+                                        snackbarHostState.currentSnackbarData?.dismiss()
+                                        snackbarHostState.showSnackbar(
+                                            if (result.ok) "SystemUI restarting — engine choice applied"
+                                            else "Restart failed — no root? ${result.output.take(80)}"
+                                        )
+                                    }
+                                },
+                                enabled  = !engineRestarting,
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
+                            ) { Text(if (engineRestarting) "Restarting…" else "Apply & restart SystemUI") }
+                        }
+
                         // ── Grouped notifications ──
                         SettingsCard {
                             SectionLabel("Grouped notifications")
@@ -386,12 +452,6 @@ internal fun SettingsScreen(prefs: SharedPreferences) {
                                 description = stringResource(R.string.disable_headsup_popup_desc),
                                 checked = headsupPopupEnabled,
                                 onCheckedChange = { headsupPopupEnabled = it; onToggle("disable_headsup_popup_enabled", it) }
-                            )
-                            ToggleRow(
-                                title = stringResource(R.string.ungroup_notifications_title),
-                                description = stringResource(R.string.ungroup_notifications_desc),
-                                checked = ungroupEnabled,
-                                onCheckedChange = { ungroupEnabled = it; onToggle("ungroup_notifications_enabled", it) }
                             )
                         }
 
@@ -949,7 +1009,6 @@ internal fun GuideScreen() {
                     "where you want previews hidden).",
                 "Other toggles" to
                     "• Disable Heads-Up Popup — blocks the banner from appearing at all (notification still arrives silently)\n" +
-                    "• Ungroup Notifications — shows each notification individually instead of grouped\n" +
                     "• Disable Back Gesture Haptic — removes the vibration when you swipe back",
                 "Requirements" to
                     "LSPosed/Xposed must be installed. The module must be enabled for System UI in LSPosed. " +

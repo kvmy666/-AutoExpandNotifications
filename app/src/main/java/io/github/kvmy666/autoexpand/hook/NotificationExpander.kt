@@ -7,6 +7,10 @@ import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
+import io.github.kvmy666.autoexpand.hook.notif.EngineSelection
+import io.github.kvmy666.autoexpand.hook.notif.HookTargetResolver
+import io.github.kvmy666.autoexpand.hook.notif.HookTargets
+import io.github.kvmy666.autoexpand.hook.notif.OemDetector
 
 /**
  * All notification expand/collapse behavior + the SystemUI notification hooks.
@@ -327,13 +331,16 @@ class NotificationExpander(private val prefs: PrefsBridge) {
     }
 
     /**
-     * When the v2 engine owns the shade/lock-screen path, the two legacy drivers below no-op.
+     * When Engine 2 owns the shade/lock-screen path, the two legacy drivers below no-op.
      *
      * Resolved lazily on first hook invocation, NOT at install: `install()` runs from
      * `handleLoadPackage`, which is before the `Application.onCreate` hook has captured a
      * context and loaded the prefs, so a read here always falls back to XSharedPreferences and
      * would see a stale value. Cached after the first read — two engines competing for the same
      * rows would fight, so this must never change while hooks are live.
+     *
+     * The decision itself lives in [EngineSelection] so the install gate in
+     * [io.github.kvmy666.autoexpand.MainHook] and this check cannot disagree.
      */
     @Volatile private var engineV2 = false
     @Volatile private var engineV2Resolved = false
@@ -341,7 +348,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
     private fun useV2(): Boolean {
         if (!engineV2Resolved) {
             engineV2Resolved = true
-            engineV2 = try { prefs.isOptInEnabled("notif_engine_v2") } catch (_: Throwable) { false }
+            engineV2 = try { EngineSelection.isV2(prefs) } catch (_: Throwable) { false }
             Log.d(HUD_TAG, "engine selected: legacy shade/LS driver ${if (engineV2) "DISABLED — v2 owns it" else "active"}")
         }
         return engineV2
@@ -349,17 +356,29 @@ class NotificationExpander(private val prefs: PrefsBridge) {
 
     fun install(lpparam: XC_LoadPackage.LoadPackageParam) {
 
-        val rowClass = "com.android.systemui.statusbar.notification.row.ExpandableNotificationRow"
-        val contentViewClass = "com.android.systemui.statusbar.notification.row.NotificationContentView"
+        // Same resolver context Engine 2 uses; the app context is not available yet at this
+        // point in process start, so Engine 2's later call fills it in for DexKit's native load.
+        HookTargetResolver.prepare(lpparam.appInfo?.sourceDir, prefs.appContext)
+
+        // Resolved once, through the same catalog Engine 2 uses: AOSP name first, then the OEM
+        // subclass candidates. A missing row class is the only hard stop here.
+        val rowCls = HookTargets.row(lpparam.classLoader)
+        if (rowCls == null) {
+            Log.e(HUD_TAG, "engine 1: row class missing on ${OemDetector.current.name} — hooks skipped")
+            return
+        }
+        val contentViewCls = HookTargets.contentView(lpparam.classLoader)
 
         // === On child attach to a group (HU parent only):
         //  - Collapse the child before first layout (kills expanded-frame flicker).
         try {
-            val containerClass = "com.android.systemui.statusbar.notification.row.NotificationChildrenContainer"
-            XposedHelpers.findAndHookMethod(
-                containerClass, lpparam.classLoader,
+            val containerCls = HookTargets.childrenContainer(lpparam.classLoader)
+            if (containerCls == null) {
+                Log.d(HUD_TAG, "engine 1: children container missing — addNotification hook skipped")
+            } else XposedHelpers.findAndHookMethod(
+                containerCls,
                 "addNotification",
-                XposedHelpers.findClass(rowClass, lpparam.classLoader),
+                rowCls,
                 Int::class.javaPrimitiveType,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
@@ -407,7 +426,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
         // =====================================================
         try {
             XposedHelpers.findAndHookMethod(
-                rowClass, lpparam.classLoader,
+                rowCls,
                 "setSystemExpanded", Boolean::class.javaPrimitiveType,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
@@ -480,7 +499,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
         // =====================================================
         try {
             XposedBridge.hookAllMethods(
-                XposedHelpers.findClass(rowClass, lpparam.classLoader),
+                rowCls,
                 "onLayout",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
@@ -541,8 +560,10 @@ class NotificationExpander(private val prefs: PrefsBridge) {
 
         // calculateVisibleType — force expanded view type
         try {
-            XposedHelpers.findAndHookMethod(
-                contentViewClass, lpparam.classLoader,
+            if (contentViewCls == null) {
+                Log.d(HUD_TAG, "engine 1: content view missing — HUD layout hook skipped")
+            } else XposedHelpers.findAndHookMethod(
+                contentViewCls,
                 "calculateVisibleType",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
@@ -584,7 +605,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
         // getIntrinsicHeight — force expanded height (skip grouped summaries — let system size them)
         try {
             XposedHelpers.findAndHookMethod(
-                rowClass, lpparam.classLoader,
+                rowCls,
                 "getIntrinsicHeight",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
@@ -617,7 +638,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
         // getPinnedHeadsUpHeight — force expanded height for heads-up window sizing (skip grouped summaries)
         try {
             XposedHelpers.findAndHookMethod(
-                rowClass, lpparam.classLoader,
+                rowCls,
                 "getPinnedHeadsUpHeight", Boolean::class.javaPrimitiveType,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
@@ -645,7 +666,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
         // setHeadsUp — set expand/collapse state before first draw, no post-draw manipulation
         try {
             XposedHelpers.findAndHookMethod(
-                rowClass, lpparam.classLoader,
+                rowCls,
                 "setHeadsUp", Boolean::class.javaPrimitiveType,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
@@ -687,7 +708,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
         // setExpandedWhenPinned — sync aeCollapsed BEFORE original runs
         try {
             XposedBridge.hookAllMethods(
-                XposedHelpers.findClass(rowClass, lpparam.classLoader),
+                rowCls,
                 "setExpandedWhenPinned",
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
@@ -707,10 +728,12 @@ class NotificationExpander(private val prefs: PrefsBridge) {
         // on downward swipe and toggle expand/collapse instead
         // =====================================================
 
-        val oplusHuTouchHelper = "com.oplus.systemui.notification.headsup.windowframe.OplusHeadsUpTouchHelper"
         try {
-            XposedHelpers.findAndHookMethod(
-                oplusHuTouchHelper, lpparam.classLoader,
+            val oplusCls = HookTargets.oplusTouchHelper(lpparam.classLoader)
+            if (oplusCls == null) {
+                Log.d(HUD_TAG, "engine 1: Oplus heads-up touch helper not present — swipe fix off")
+            } else XposedHelpers.findAndHookMethod(
+                oplusCls,
                 "onInterceptTouchEvent", MotionEvent::class.java,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
@@ -745,11 +768,11 @@ class NotificationExpander(private val prefs: PrefsBridge) {
 
         // Block app launch on downward swipe, toggle expand instead
         try {
-            val actCls = XposedHelpers.findClass(
-                "com.android.systemui.statusbar.phone.StatusBarNotificationActivityStarter",
-                lpparam.classLoader)
-
-            XposedBridge.hookAllMethods(actCls, "onNotificationClicked", object : XC_MethodHook() {
+            val actCls = HookTargets.activityStarter(lpparam.classLoader)
+            if (actCls == null) {
+                Log.d(HUD_TAG, "engine 1: activity starter missing — swipe-to-launch block off")
+            } else {
+                XposedBridge.hookAllMethods(actCls, "onNotificationClicked", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!prefs.isFeatureEnabled("disable_headsup_popup_enabled")) return
                     val isRecent = f1IsDownwardSwipe && (System.currentTimeMillis() - f1SwipeTime < 2000)
@@ -778,7 +801,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                         try {
                             var row: Any? = null
                             for (arg in param.args) {
-                                if (arg != null && arg.javaClass.name.contains("ExpandableNotificationRow")) {
+                                if (arg != null && rowCls.isInstance(arg)) {
                                     row = arg
                                     break
                                 }
@@ -799,6 +822,7 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                     }
                 }
             })
+            }
         } catch (_: Throwable) {}
 
         // =====================================================
@@ -811,8 +835,11 @@ class NotificationExpander(private val prefs: PrefsBridge) {
         // 0 = unlimited (skip). Wrapped in try/catch — any failure is silent.
         // =====================================================
         try {
-            XposedHelpers.findAndHookMethod(
-                "com.android.internal.widget.MessagingTextMessage", lpparam.classLoader,
+            val msgCls = HookTargets.messagingText(lpparam.classLoader)
+            if (msgCls == null) {
+                Log.d(HUD_TAG, "engine 1: MessagingTextMessage missing — line clamp off")
+            } else XposedHelpers.findAndHookMethod(
+                msgCls,
                 "setMaxDisplayedLines", Int::class.javaPrimitiveType,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {

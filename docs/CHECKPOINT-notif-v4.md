@@ -184,6 +184,7 @@ What to read:
 Device prefs at checkpoint:
 
 ```
+notif_engine_mode=<absent → Auto; legacy below still honoured>
 notif_engine_v2=1
 expand_headsup_enabled=1
 disable_headsup_hooks_enabled=0
@@ -193,6 +194,39 @@ expand_group_children_enabled=0
 notif_debug_logging=1
 notif_probe_enabled=1
 ```
+
+---
+
+## Engine selector (2026-10-25)
+
+- `notif_engine_mode` (`auto` default, `v1`, `v2`) with a three-chip selector and **Apply &
+  restart SystemUI** in Notifications › Expand engine. The Testing screen toggle was removed so
+  there is one source of truth.
+- `EngineSelection` resolves once per SystemUI process and is used by both gates:
+  `MainHook` installs `NotifEngineV2` from `EngineSelection.isV2(prefs)`, and
+  `NotificationExpander.useV2()` calls the same resolver.
+- Auto: Engine 2 when SDK ≥ 36 and the Oplus family is detected, Engine 1 otherwise.
+- Log line: `engine selected mode=v2 effective=v2 sdk=36 brand=OnePlus …`.
+- `EngineSelectionTest` covers explicit mode > legacy boolean > Auto, and the unknown-mode
+  fallback.
+
+## OEM resolver (2026-10-25)
+
+- `OemDetector` (one log line), `HookTargets` (class catalog), `HookTargetResolver`
+  (exact name → superclass → conservative shape match; fields exact-name only).
+- Verified against the **pulled** APK `/tmp/sysui-pull/SystemUI.apk`
+  (`CPH2747_16.0.9.400(EX01)`, SHA-256 `dbe67fd3…`), not against guesses:
+  - `NotificationChildrenContainer` is
+    `com.android.systemui.statusbar.notification.stack.NotificationChildrenContainer`
+    (`addNotification(ExpandableNotificationRow, int)`). The previous `…notification.row` name
+    never loaded, so Engine 1's child hook had been silently absent.
+  - `setExpandedWhenPinned(boolean)` is absent (field only); the Engine 2 call is a caught no-op.
+  - `isGroupExpanded` exists only as `isGroupExpanded$1`.
+- `RowApi.usable` is no longer the install gate: only the row class is required, and each hook
+  group installs only if its own capability resolved.
+- DexKit 2.3.0 is the last-resort class lookup (name-contains on SystemUI's dex). It is lazy,
+  aborts safely, and never initializes on OxygenOS because every exact name resolves.
+  `extractNativeLibs="true"` is required for the module's `lib/arm64/libdexkit.so`.
 
 ---
 

@@ -82,6 +82,8 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
     private val hudExpandedKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     /** Message timestamp of [newestChildKey] — update order does not decide newest. */
     @Volatile private var newestChildWhen = 0L
+    /** Resolved `GroupExpansionManagerImpl` name; also used to read the initiator stack. */
+    @Volatile private var groupManagerName: String? = null
     /** Packages that currently have a live group summary, with the last time one was seen. */
     private val groupSummaryPkgs = java.util.concurrent.ConcurrentHashMap<String, Long>()
     /** HUD freshness guard state is derived per entry from Notification.when; no package map. */
@@ -369,21 +371,28 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
     fun install(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (installed) return
         installed = true
+        // Tell the resolver where SystemUI's own bytecode lives; DexKit stays inert unless an
+        // exact-name lookup fails.
+        HookTargetResolver.prepare(lpparam.appInfo?.sourceDir, prefs.appContext)
+        // Only the row class is a hard requirement. A ROM missing one optional capability
+        // (say `isExpanded(boolean)`) keeps every other path instead of losing the engine.
         if (!RowApi.bind(lpparam.classLoader)) {
-            NotifLog.e("v2 engine NOT installed — required capabilities missing")
+            NotifLog.e("v2 engine NOT installed — row class missing on ${OemDetector.current.name}")
             return
         }
         refreshPrefs()
         val cls = RowApi.rowClass ?: return
-        NotifLog.i("v2 engine installing (lsGate=$lsGateEnabled groupCapable=${RowApi.groupCapable} " +
+        NotifLog.i("v2 engine installing (oem=${OemDetector.current.name} lsGate=$lsGateEnabled " +
+                   "groupCapable=${RowApi.groupCapable} " +
                    "parents=${prefsFacts.groupParentsEnabled} children=${prefsFacts.groupChildrenEnabled})")
 
         // ── the lock-screen gate ────────────────────────────────────────────
         // Hottest hook in the engine: `isExpanded` runs from measure and from the stack
         // scroll algorithm. Ordered so the common case (shade traffic) exits after two
         // cheap checks and never touches the per-row token map.
+        RowApi.isExpandedArg?.let { isExpanded ->
         try {
-            XposedBridge.hookMethod(RowApi.isExpandedArg, object : XC_MethodHook() {
+            XposedBridge.hookMethod(isExpanded, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     try {
                         if (!lsGateEnabled) return
@@ -407,6 +416,7 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                 }
             })
         } catch (t: Throwable) { NotifLog.e("v2 lockscreen gate failed: $t") }
+        }
 
         // ── the shade write ─────────────────────────────────────────────────
         // Rewriting the argument rather than calling the setter ourselves means SystemUI does
@@ -543,16 +553,45 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
      */
     private fun installExpandClickSuppressor(cl: ClassLoader) {
         try {
-            val cls = cl.loadClass("com.android.systemui.statusbar.phone.StatusBarNotificationPresenter")
-            XposedBridge.hookAllMethods(cls, "onExpandClicked", object : XC_MethodHook() {
+            val cls = HookTargets.presenter(cl) ?: run {
+                NotifLog.d { "v2 expand-click suppressor unavailable: presenter class missing" }
+                return
+            }
+            val hook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (Attribution.isOurs()) param.result = null
                 }
-            })
-            NotifLog.d { "v2 expand-click suppressor installed" }
+            }
+            val bound = hookAllWithFallback(cls, "onExpandClicked", "onexpandclicked", null, hook)
+            if (bound == 0) NotifLog.d { "v2 expand-click suppressor: onExpandClicked missing" }
+            else NotifLog.d { "v2 expand-click suppressor installed" }
         } catch (t: Throwable) {
             NotifLog.d { "v2 expand-click suppressor unavailable: ${t.javaClass.simpleName}" }
         }
+    }
+
+    /**
+     * Hooks every overload of [name], falling back to a shape scan when the exact name binds
+     * nothing (an OEM rename). Returns the number of methods hooked.
+     */
+    private fun hookAllWithFallback(
+        cls: Class<*>?,
+        name: String,
+        hint: String,
+        paramCount: Int?,
+        hook: XC_MethodHook,
+    ): Int {
+        if (cls == null) return 0
+        var bound = try { XposedBridge.hookAllMethods(cls, name, hook).size } catch (_: Throwable) { 0 }
+        if (bound > 0) return bound
+        val alts = HookTargetResolver.findByNameHint(cls, hint, paramCount)
+        for (m in alts) {
+            try { XposedBridge.hookMethod(m, hook); bound++ } catch (_: Throwable) {}
+        }
+        if (bound > 0) {
+            NotifLog.i("v2 $name resolved by shape: ${alts.joinToString(",") { it.name }}")
+        }
+        return bound
     }
 
     private fun setSystemExpanded(row: Any, value: Boolean): Boolean = try {
@@ -575,6 +614,11 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
 
     private fun collapseUserExpanded(row: Any): Boolean = try {
         setSystemExpanded(row, false)
+        // Measured on CPH2747_16.0.9.400: `setExpandedWhenPinned(boolean)` does not exist on
+        // ExpandableNotificationRow — only the `mExpandedWhenPinned` field. The call therefore
+        // throws and is swallowed here; it is kept so a ROM that does declare the setter still
+        // gets it, and the field is NOT written directly because the verified HUD path depends on
+        // SystemUI's own height notification callbacks.
         try { XposedHelpers.callMethod(row, "setExpandedWhenPinned", false) } catch (_: Throwable) {}
         val m2 = RowApi.setUserExpanded2
         if (m2 != null) {
@@ -596,10 +640,11 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
      */
     private fun installHudLayoutHooks(cl: ClassLoader) {
         try {
-            val content = cl.loadClass(
-                "com.android.systemui.statusbar.notification.row.NotificationContentView"
-            )
-            XposedBridge.hookAllMethods(content, "calculateVisibleType", object : XC_MethodHook() {
+            val content = HookTargets.contentView(cl)
+            if (content == null) {
+                NotifLog.d { "v2 HUD visible-type hook unavailable: content view missing" }
+            } else {
+            val visibleHook = object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     try {
                         val view = param.thisObject ?: return
@@ -615,15 +660,20 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                         NotifLog.d { "v2 HUD visible-type key=$key 2->1" }
                     } catch (_: Throwable) {}
                 }
-            })
-            NotifLog.d { "v2 HUD visible-type hook installed" }
+            }
+            val bound = hookAllWithFallback(
+                content, "calculateVisibleType", "calculatevisibletype", 0, visibleHook
+            )
+            if (bound == 0) NotifLog.d { "v2 HUD visible-type hook: calculateVisibleType missing" }
+            else NotifLog.d { "v2 HUD visible-type hook installed" }
+            }
         } catch (t: Throwable) {
             NotifLog.d { "v2 HUD visible-type hook unavailable: ${t.javaClass.simpleName}" }
         }
 
         val rowClass = RowApi.rowClass ?: return
         try {
-            XposedBridge.hookAllMethods(rowClass, "getIntrinsicHeight", object : XC_MethodHook() {
+            val intrinsicHook = object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     try {
                         val row = param.thisObject ?: return
@@ -631,8 +681,8 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                         val key = keyOf(row) ?: return
                         if (key != hudKey && key != newestChildKey) return
                         if (RowApi.callBool(RowApi.isSummaryWithChildren, row)) return
-                        val layout = XposedHelpers.getObjectField(row, "mPrivateLayout") ?: return
-                        val child = XposedHelpers.getObjectField(layout, "mExpandedChild") as? android.view.View ?: return
+                        val layout = RowApi.privateLayoutOf(row) ?: return
+                        val child = RowApi.expandedChildOf(layout) ?: return
                         val h = child.measuredHeight
                         if (h <= 0) return
                         if (param.result != h) {
@@ -641,14 +691,18 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                         }
                     } catch (_: Throwable) {}
                 }
-            })
-            NotifLog.d { "v2 HUD intrinsic hook installed" }
+            }
+            val intrinsic = hookAllWithFallback(
+                rowClass, "getIntrinsicHeight", "getintrinsicheight", 0, intrinsicHook
+            )
+            if (intrinsic == 0) NotifLog.d { "v2 HUD intrinsic hook: getIntrinsicHeight missing" }
+            else NotifLog.d { "v2 HUD intrinsic hook installed" }
         } catch (t: Throwable) {
             NotifLog.d { "v2 HUD intrinsic hook unavailable: ${t.javaClass.simpleName}" }
         }
 
         try {
-            XposedBridge.hookAllMethods(rowClass, "getPinnedHeadsUpHeight", object : XC_MethodHook() {
+            val pinnedHook = object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     try {
                         val row = param.thisObject ?: return
@@ -656,8 +710,8 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                         val key = keyOf(row) ?: return
                         if (key != hudKey && key != newestChildKey) return
                         if (RowApi.callBool(RowApi.isSummaryWithChildren, row)) return
-                        val layout = XposedHelpers.getObjectField(row, "mPrivateLayout") ?: return
-                        val child = XposedHelpers.getObjectField(layout, "mExpandedChild") as? android.view.View ?: return
+                        val layout = RowApi.privateLayoutOf(row) ?: return
+                        val child = RowApi.expandedChildOf(layout) ?: return
                         val h = child.measuredHeight
                         if (h <= 0) return
                         if (param.result != h) {
@@ -666,8 +720,12 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                         }
                     } catch (_: Throwable) {}
                 }
-            })
-            NotifLog.d { "v2 HUD pinned-height hook installed" }
+            }
+            val pinned = hookAllWithFallback(
+                rowClass, "getPinnedHeadsUpHeight", "getpinnedheadsupheight", 1, pinnedHook
+            )
+            if (pinned == 0) NotifLog.d { "v2 HUD pinned-height hook: getPinnedHeadsUpHeight missing" }
+            else NotifLog.d { "v2 HUD pinned-height hook installed" }
         } catch (t: Throwable) {
             NotifLog.d { "v2 HUD pinned-height hook unavailable: ${t.javaClass.simpleName}" }
         }
@@ -817,8 +875,12 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
      */
     private fun installHudVeto(cl: ClassLoader) {
         try {
-            val cls = cl.loadClass("com.android.systemui.statusbar.notification.headsup.HeadsUpManagerImpl")
-            XposedBridge.hookAllMethods(cls, "showNotification", object : XC_MethodHook() {
+            val cls = HookTargets.headsUpManager(cl)
+            if (cls == null) {
+                NotifLog.d { "v2 HUD veto unavailable: heads-up manager missing" }
+                return
+            }
+            val vetoHook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     try {
                         if (param.args.size < 2 || param.args[1] !is Boolean) return
@@ -844,8 +906,10 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                         NotifLog.d { "v2 HUD veto stale key=$key when=$contentWhen age=$age" }
                     } catch (_: Throwable) {}
                 }
-            })
-            NotifLog.d { "v2 HUD veto installed" }
+            }
+            val bound = hookAllWithFallback(cls, "showNotification", "shownotification", 2, vetoHook)
+            if (bound == 0) NotifLog.d { "v2 HUD veto: showNotification missing" }
+            else NotifLog.d { "v2 HUD veto installed" }
         } catch (t: Throwable) {
             NotifLog.d { "v2 HUD veto unavailable: ${t.javaClass.simpleName}" }
         }
@@ -878,14 +942,14 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
      * already the module's one hard dependency.
      */
     private fun installGroupCollapseMemory(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val cls = try {
-            lpparam.classLoader.loadClass(GROUP_MANAGER_CLASS)
-        } catch (t: Throwable) {
-            NotifLog.e("v2 group collapse memory: $GROUP_MANAGER_CLASS not found ($t)")
+        val cls = HookTargets.groupExpansionManager(lpparam.classLoader)
+        if (cls == null) {
+            NotifLog.e("v2 group collapse memory: group manager class not found")
             return
         }
+        groupManagerName = cls.name
         try {
-            val hooks = XposedBridge.hookAllMethods(cls, "setGroupExpanded", object : XC_MethodHook() {
+            val groupHook = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     try {
                         if (Attribution.isOurs()) return
@@ -902,8 +966,9 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
                         NotifLog.d { "v2 group user expanded=$expanded via=$via key=$key" }
                     } catch (_: Throwable) {}
                 }
-            })
-            if (hooks.isEmpty()) NotifLog.e("v2 setGroupExpanded bound 0 methods")
+            }
+            val hooks = hookAllWithFallback(cls, "setGroupExpanded", "setgroupexpanded", 2, groupHook)
+            if (hooks == 0) NotifLog.e("v2 setGroupExpanded bound 0 methods")
         } catch (t: Throwable) { NotifLog.e("v2 group collapse memory failed: $t") }
     }
 
@@ -930,13 +995,17 @@ class NotifEngineV2(private val prefs: PrefsBridge) {
      * their frame, so a ROM that routes the arrow somewhere new is one log line away.
      */
     private fun initiator(): String? {
+        // Both names come from the resolver: an OEM subclass moves the frames, and matching the
+        // AOSP literal would then see neither the manager nor the row and drop a real tap.
+        val groupName = groupManagerName ?: GROUP_MANAGER_CLASS
+        val rowName = RowApi.rowClass?.name ?: RowApi.ROW_CLASS
         for (f in Throwable().stackTrace) {
             val c = f.className
-            if (c.startsWith(GROUP_MANAGER_CLASS)) {
+            if (c.startsWith(groupName)) {
                 if (f.methodName == "setGroupExpanded") continue   // the hooked frame itself
                 return null                                        // SystemUI's own bulk reset
             }
-            if (c.startsWith(RowApi.ROW_CLASS) && f.methodName in USER_INTENT_FRAMES)
+            if (c.startsWith(rowName) && f.methodName in USER_INTENT_FRAMES)
                 return f.methodName
         }
         return null

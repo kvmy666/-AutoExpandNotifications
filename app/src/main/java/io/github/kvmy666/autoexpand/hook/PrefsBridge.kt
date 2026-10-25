@@ -59,6 +59,16 @@ class PrefsBridge {
         return try { xprefs.getString(key, default) ?: default } catch (_: Throwable) { default }
     }
 
+    /**
+     * Whether the key has been written at all — needed to tell "the user chose the default"
+     * apart from "this install predates the key", which drives the engine-mode migration.
+     */
+    fun contains(key: String): Boolean {
+        reloadIfStale()
+        filePrefCache?.let { if (it.containsKey(key)) return true }
+        return try { xprefs.contains(key) } catch (_: Throwable) { false }
+    }
+
     fun reloadIfStale() {
         val now = System.currentTimeMillis()
         if (now - lastCacheTime < CACHE_INTERVAL_MS) return

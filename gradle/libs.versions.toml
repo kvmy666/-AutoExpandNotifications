@@ -8,6 +8,7 @@ composeBom = "2024.12.01"
 activityCompose = "1.9.3"
 mlkitTextRecognition = "16.0.1"
 mlkitTextRecognitionChinese = "16.0.1"
+dexkit = "2.3.0"
 junit = "4.13.2"
 robolectric = "4.14.1"
 androidxTestCore = "1.6.1"
@@ -21,6 +22,7 @@ compose-material3 = { module = "androidx.compose.material3:material3" }
 compose-ui = { module = "androidx.compose.ui:ui" }
 activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
 mlkit-text-recognition = { module = "com.google.mlkit:text-recognition", version.ref = "mlkitTextRecognition" }
+dexkit = { module = "org.luckypray:dexkit", version.ref = "dexkit" }
 junit = { module = "junit:junit", version.ref = "junit" }
 robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectric" }
 androidx-test-core = { module = "androidx.test:core", version.ref = "androidxTestCore" }
