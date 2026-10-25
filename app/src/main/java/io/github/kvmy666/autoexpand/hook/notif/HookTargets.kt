@@ -32,14 +32,27 @@ object HookTargets {
             listOf("$ROW_PKG.NotificationContentView"))
 
     /**
-     * The group's child container.
+     * Every class that declares `addNotification(ExpandableNotificationRow, int)`.
      *
-     * Measured on `CPH2747_16.0.9.400` (`dbe67fd3…SystemUI.apk`): the class is at
-     * `com.android.systemui.statusbar.notification.stack.NotificationChildrenContainer` and
-     * declares `addNotification(ExpandableNotificationRow, int)`. It is **not** under
-     * `…notification.row`; that older guess never loaded, so Engine 1's `addNotification` hook
-     * silently bound nothing on this build. The pre-stack AOSP location is kept for old ROMs.
+     * Measured on `CPH2747_16.0.9.400` (`dbe67fd3…SystemUI.apk`):
+     *  - the base is `com.android.systemui.statusbar.notification.stack.NotificationChildrenContainer`;
+     *  - OxygenOS ships `com.oplus.systemui.notification.row.oplusgroup.OplusNotificationChildrenContainer`,
+     *    a final subclass that **overrides** `addNotification`. Hooking only the base would miss
+     *    every call dispatched to the subclass, which is the one the shade actually uses here.
+     *
+     * The pre-stack AOSP location is kept for old ROMs. Duplicate entries are dropped.
      */
+    fun childrenContainers(classLoader: ClassLoader): List<Class<*>> {
+        val names = listOf(
+            "com.android.systemui.statusbar.notification.stack.NotificationChildrenContainer",
+            "com.android.systemui.statusbar.NotificationChildrenContainer",
+        ) + if (OemDetector.current == Oem.OPLUS) {
+            listOf("com.oplus.systemui.notification.row.oplusgroup.OplusNotificationChildrenContainer")
+        } else emptyList()
+        return names.mapNotNull { name -> HookTargetResolver.load(classLoader, name) }.distinct()
+    }
+
+    /** Base container class, for callers that only need the type. */
     fun childrenContainer(classLoader: ClassLoader): Class<*>? =
         HookTargetResolver.findClass(classLoader, "childrenContainer", listOf(
             "com.android.systemui.statusbar.notification.stack.NotificationChildrenContainer",

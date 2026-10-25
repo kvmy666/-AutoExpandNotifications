@@ -220,6 +220,8 @@ notif_probe_enabled=1
     `com.android.systemui.statusbar.notification.stack.NotificationChildrenContainer`
     (`addNotification(ExpandableNotificationRow, int)`). The previous `…notification.row` name
     never loaded, so Engine 1's child hook had been silently absent.
+  - OxygenOS's `com.oplus.systemui.notification.row.oplusgroup.OplusNotificationChildrenContainer`
+    is final and overrides `addNotification`; every concrete declaration is hooked.
   - `setExpandedWhenPinned(boolean)` is absent (field only); the Engine 2 call is a caught no-op.
   - `isGroupExpanded` exists only as `isGroupExpanded$1`.
 - `RowApi.usable` is no longer the install gate: only the row class is required, and each hook
@@ -227,6 +229,18 @@ notif_probe_enabled=1
 - DexKit 2.3.0 is the last-resort class lookup (name-contains on SystemUI's dex). It is lazy,
   aborts safely, and never initializes on OxygenOS because every exact name resolves.
   `extractNativeLibs="true"` is required for the module's `lib/arm64/libdexkit.so`.
+
+## Test status (2026-10-25, final build)
+
+- Build green; 78 unit tests pass.
+- `pid 16843`: caps all 1s, engine v2 selected, all HUD hooks installed, no missing-target log,
+  no DexKit line, and no `addNotification hook failed`.
+- HUD via `TestNotifier` → Group: expanded body + arrow visible, `visible-type 2->1`,
+  `pinned height 255`, `TweaksHud` absent; the second child stayed ~5.7 s.
+- Selector verified on screen: Auto / Engine 1 / Engine 2, with Engine 2 selected from the
+  legacy `notif_engine_v2=1` value, plus Apply & restart SystemUI.
+- Not executable here: real-chat HUD cases (device keyguard-locked), Engine 1 on the old ROM,
+  and M4 (no AOSP system image installed; only google_apis/playstore images exist).
 
 ---
 

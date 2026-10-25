@@ -372,15 +372,11 @@ class NotificationExpander(private val prefs: PrefsBridge) {
         // === On child attach to a group (HU parent only):
         //  - Collapse the child before first layout (kills expanded-frame flicker).
         try {
-            val containerCls = HookTargets.childrenContainer(lpparam.classLoader)
-            if (containerCls == null) {
+            val containers = HookTargets.childrenContainers(lpparam.classLoader)
+            if (containers.isEmpty()) {
                 Log.d(HUD_TAG, "engine 1: children container missing — addNotification hook skipped")
-            } else XposedHelpers.findAndHookMethod(
-                containerCls,
-                "addNotification",
-                rowCls,
-                Int::class.javaPrimitiveType,
-                object : XC_MethodHook() {
+            }
+            val childAttach = object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         if (useV2()) return
                         try {
@@ -413,7 +409,17 @@ class NotificationExpander(private val prefs: PrefsBridge) {
                         } catch (_: Throwable) {}
                     }
                 }
-            )
+            // Hook every concrete declaration: OxygenOS's container subclass overrides
+            // addNotification, so the base-class hook alone never sees shade calls.
+            for (containerCls in containers) {
+                try {
+                    XposedHelpers.findAndHookMethod(
+                        containerCls, "addNotification", rowCls, Int::class.javaPrimitiveType, childAttach
+                    )
+                } catch (t: Throwable) {
+                    Log.d(HUD_TAG, "engine 1: addNotification hook failed on ${containerCls.simpleName}: $t")
+                }
+            }
         } catch (_: Throwable) {}
 
         // =====================================================

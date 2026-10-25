@@ -185,6 +185,10 @@ Cold triggers must not re-expand an older row (`defer not-newest`).
     `com.android.systemui.statusbar.notification.stack.NotificationChildrenContainer` with
     `addNotification(ExpandableNotificationRow, int)`. The old `…notification.row` path does not
     exist here, so Engine 1's child hook had silently bound nothing.
+  - OxygenOS's `com.oplus.systemui.notification.row.oplusgroup.OplusNotificationChildrenContainer`
+    is `final` and **overrides** `addNotification`; the base-class hook alone never sees shade
+    calls. `HookTargets.childrenContainers()` returns every concrete declaration and Engine 1
+    hooks each one.
   - `ExpandableNotificationRow.setExpandedWhenPinned(boolean)` **does not exist**; only the
     `mExpandedWhenPinned` field. The Engine 2 call remains a caught no-op — do not write the field
     directly on the verified HUD path.
@@ -206,17 +210,21 @@ Cold triggers must not re-expand an older row (`defer not-newest`).
 - User-confirmed on 2026-10-25: with a stale Telegram sibling kept in the shade, the
   old row stays suppressed and the new chat HUDs correctly (after the substitution
   fix). Exact duration was user-perceived; no final log capture was kept.
-- Latest device run (Engine 2, `pid 2030`): `RowApi caps` all 1s including `oem=OPLUS`,
+- Latest device run (Engine 2, `pid 16843`): `RowApi caps` all 1s including `oem=OPLUS`,
   `row=ExpandableNotificationRow`; `v2 engine installed`; HUD arrow/visible-type/intrinsic/
   pinned-height/veto hooks installed; engine 1 reports no missing container/content/messaging/
-  Oplus-helper capability.
+  Oplus-helper capability and no `addNotification hook failed`.
+- HUD re-tested after the resolver refactor with `TestNotifier` → Group (summary + 2 children):
+  `v2 HUD allow fresh` (age 570 ms), `T:setHeadsUp(true)` with `visType=2`, `v2 HUD visible-type
+  2->1`, `v2 HUD pinned height h=255`, banner shows the expanded body and the collapse arrow,
+  `TweaksHud` absent. The second child then HUDed for ~5.7 s (long timeout, not the 800 ms
+  collapsed one).
 - Unit tests: 78 pass, including the 5 new `EngineSelectionTest` cases.
 - Still to verify by hand (needs real chats / unlock):
   - shade children stay one-line with `expand_group_children_enabled=0`;
   - no HUD while inside the active chat, other chats may peek;
-  - two genuinely new chats in quick succession;
-  - Engine 1 on the old ROM unchanged;
-  - the selector chips visually on device.
+  - two genuinely new chats in quick succession with real Telegram;
+  - Engine 1 on the old ROM unchanged.
 
 Live prefs:
 
@@ -239,6 +247,15 @@ missing even though the engine installed.
 ---
 
 ## Build / device workflow
+
+Device UI notes:
+- The debug **Testing** card is on the **Home** list (bottom, `BuildConfig.DEBUG` only), not
+  inside Notifications. Test notification kinds there include Group, Messaging, BigText, etc.,
+  and all use `TestNotifier`'s HIGH channel.
+- Tapping by fixed coordinates breaks after any scroll. Dump with `uiautomator dump`, parse the
+  `text="…"` bounds, then tap the computed centre.
+- When the device is keyguard-locked, adb install / SystemUI restart / logcat still work; UI
+  taps do not. Do not try to automate the UI through the keyguard.
 
 Build:
 
