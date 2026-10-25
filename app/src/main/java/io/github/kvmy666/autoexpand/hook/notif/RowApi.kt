@@ -33,6 +33,8 @@ object RowApi {
 
     // Methods
     var isExpandedArg: Method? = null; private set     // isExpanded(boolean allowOnKeyguard)
+    /** vivo OriginOS 6 declares only `isExpanded$1()Z` (verified); read-only fallback. */
+    var isExpandedNoArg: Method? = null; private set
     var setUserExpanded2: Method? = null; private set  // setUserExpanded(boolean, boolean)
     var setUserExpanded1: Method? = null; private set  // setUserExpanded(boolean)
     var setSystemExpanded: Method? = null; private set
@@ -75,7 +77,7 @@ object RowApi {
 
     /** True when enough of the surface resolved that the v2 engine can do its job at all. */
     val usable: Boolean
-        get() = rowClass != null && isExpandedArg != null &&
+        get() = rowClass != null && (isExpandedArg != null || isExpandedNoArg != null) &&
                 (setSystemExpanded != null || setUserExpanded2 != null || setUserExpanded1 != null)
 
     /**
@@ -101,6 +103,10 @@ object RowApi {
 
         isExpandedArg        = m(cls, listOf("isExpanded"), listOf(Boolean::class.javaPrimitiveType!!),
                                  Boolean::class.javaPrimitiveType!!, listOf("isexpanded"))
+        if (isExpandedArg == null) {
+            isExpandedNoArg = m(cls, listOf("isExpanded\$1"), emptyList(),
+                                Boolean::class.javaPrimitiveType!!, listOf("isexpanded"))
+        }
         setUserExpanded2     = m(cls, listOf("setUserExpanded"),
                                  listOf(Boolean::class.javaPrimitiveType!!, Boolean::class.javaPrimitiveType!!),
                                  Void.TYPE, listOf("setuserexpanded"))
@@ -218,7 +224,8 @@ object RowApi {
     val caps: String
         get() = "oem=${OemDetector.current.name} " +
                 "row=${rowClass?.name?.substringAfterLast('.') ?: "none"} " +
-                "isExpandedArg=${b(isExpandedArg)} setSysExp=${b(setSystemExpanded)} " +
+                "isExpandedArg=${b(isExpandedArg)} isExpNoArg=${b(isExpandedNoArg)} " +
+                "setSysExp=${b(setSystemExpanded)} " +
                 "setUserExp2=${b(setUserExpanded2)} setUserExp1=${b(setUserExpanded1)} " +
                 "childInGroup=${b(isChildInGroup)} pinned=${b(isPinned)} " +
                 "summaryKids=${b(isSummaryWithChildren)} entry=${b(getEntry)}/${b(getEntryLegacy)} " +
@@ -249,8 +256,16 @@ object RowApi {
         try { if (m == null) default else (m.invoke(row, *args) as? Boolean) ?: default }
         catch (_: Throwable) { default }
 
-    /** `isExpanded(allowOnKeyguard = true)` — the honest read; the no-arg form does not exist. */
-    fun isExpandedUngated(row: Any): Boolean = callBool(isExpandedArg, row, true)
+    /**
+     * `isExpanded(allowOnKeyguard = true)` — the honest read.
+     *
+     * vivo OriginOS 6 has no boolean overload at all, only the synthetic `isExpanded$1()`; the
+     * read path uses that when present. The lock-screen *hook* still requires the boolean form,
+     * because that is the method SystemUI calls.
+     */
+    fun isExpandedUngated(row: Any): Boolean =
+        if (isExpandedArg != null) callBool(isExpandedArg, row, true)
+        else callBool(isExpandedNoArg, row)
 
     /**
      * The rows currently attached under a group summary, or empty when this is not a summary.
